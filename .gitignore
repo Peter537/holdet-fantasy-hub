@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.streamlit/secrets.toml
+
+# Legacy and personalized runtime data
+/config/
+/output/
+/exports/
+/holdet-data/
+/accounts.json
+/groups.json
+
+# Atomic-publication remnants
+*.tmp
+*.partial
+*.backup

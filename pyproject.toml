@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "holdet-lib"
+version = "0.1.0"
+description = "Unofficial Holdet.dk fantasy data library, CLI, and local dashboard"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = ["platformdirs>=4.11,<5"]
+classifiers = [
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3.14",
+]
+
+[project.optional-dependencies]
+website = ["streamlit>=1.60,<2"]
+
+[project.scripts]
+holdet = "cli.main:main"
+
+[tool.setuptools.packages.find]
+include = ["holdet_lib*", "cli*", "website*"]
