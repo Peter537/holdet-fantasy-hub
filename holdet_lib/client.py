@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from dataclasses import replace
 
 from .http import HttpClient
 from .models import AccountConfig, GameUrl, ScrapedGame, ScrapedTeam, TeamReference
@@ -19,6 +20,7 @@ class HoldetClient:
         *,
         text_fetcher=None,
         json_fetcher=None,
+        clock=None,
     ) -> None:
         client = http_client or HttpClient()
         self._fetch_text = text_fetcher or client.fetch_text
@@ -26,6 +28,7 @@ class HoldetClient:
         self._teams = TeamDataService(
             text_fetcher=self._fetch_text,
             json_fetcher=self._fetch_json,
+            clock=clock,
         )
 
     def fetch_players(
@@ -34,12 +37,18 @@ class HoldetClient:
         """Fetch all player/entity rows for one game or one historical round."""
 
         game = source if isinstance(source, GameUrl) else normalize_game_url(source)
-        context = self._teams.context(game)
-        return scrape_game(
+        context = self._teams.context_with_schedule(game)
+        result = scrape_game(
             game,
             fetcher=self._fetch_text,
             round_number=round_number,
             policy=context.policy,
+        )
+        status, round_end_at = self._teams.status_for(context, result.round_number)
+        return replace(
+            result,
+            round_status=status,
+            round_end_at=round_end_at,
         )
 
     def discover_account_teams(

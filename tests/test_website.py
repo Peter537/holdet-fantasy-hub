@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 from types import SimpleNamespace
 import tempfile
@@ -139,12 +140,15 @@ class DashboardTests(unittest.TestCase):
         container.assert_called_once_with(key="nav-card-game-da-test")
         expected_label = (
             "**\\<" + chr(0xC5) + "ge & Co\\>**  \n"
-            "slug  \n:small[2 grupper]"
+            ":small[slug]  \n"
+            "2 grupper  \n"
+            "**" + chr(0xC5) + "bn " + chr(0x2192) + "**"
         )
         card_button.assert_called_once_with(
             expected_label,
             key="open-card-game-da-test",
             help=chr(0xC5) + 'bn "test"',
+            icon=None,
             type="tertiary",
             width="stretch",
         )
@@ -312,11 +316,60 @@ class DashboardTests(unittest.TestCase):
             render.call_args_list[1].kwargs["card_key"], "group-gruppe-id"
         )
         self.assertIn("1 gruppe ·", render.call_args_list[0].kwargs["detail"])
+        game_card = render.call_args_list[0].kwargs
+        self.assertIn("Ingen lokale data endnu", game_card["detail"])
+        self.assertNotIn("runde 0", game_card["detail"].casefold())
+        self.assertEqual(game_card["icon"], ":material/directions_bike:")
+        self.assertEqual(game_card["action"], chr(0xC5) + "bn og opdater manuelt")
 
     def test_manager_game_group_count_uses_danish_singular_and_plural(self) -> None:
         self.assertEqual(dashboard._group_count_label(0), "0 grupper")
         self.assertEqual(dashboard._group_count_label(1), "1 gruppe")
         self.assertEqual(dashboard._group_count_label(2), "2 grupper")
+
+    def test_tournament_card_uses_danish_match_singular_and_plural(self) -> None:
+        team = sample_team(56, name="Turneringshold")
+        group = holdet.GroupDefinition(
+            "turnering-id",
+            "Turnering",
+            team.reference.game,
+            (holdet.GroupTeam(56, team.team_name, team.reference.source_url),),
+            "tournament",
+            SimpleNamespace(),
+        )
+        for count, expected in ((1, "1 kamp"), (3, "3 kampe")):
+            state = SimpleNamespace(
+                champion_id=None,
+                next_matches=tuple(
+                    SimpleNamespace(round_numbers=(2,)) for _ in range(count)
+                ),
+                phase="Gruppespil",
+            )
+            with (
+                self.subTest(count=count),
+                patch.object(
+                    dashboard, "build_tournament_state", return_value=state
+                ),
+                patch.object(
+                    dashboard, "latest_tournament_round", return_value=1
+                ),
+                patch.object(dashboard, "_navigation_card") as render,
+            ):
+                dashboard._group_card(group, holdet.SnapshotIndex(()))
+                detail = render.call_args.kwargs["detail"]
+                self.assertIn(f"({expected})", detail)
+                self.assertNotIn("kamp(e)", detail)
+
+    def test_danish_user_facing_copy_has_no_parenthesis_plurals(self) -> None:
+        pattern = re.compile(r"\((?:e|er|r)\)")
+        paths = (
+            PROJECT_ROOT / "website" / "app.py",
+            PROJECT_ROOT / "website" / "data_page.py",
+            PROJECT_ROOT / "holdet_lib" / "tournament.py",
+        )
+        for path in paths:
+            with self.subTest(path=path.name):
+                self.assertIsNone(pattern.search(path.read_text(encoding="utf-8")))
 
     def test_dismissing_account_dialog_clears_pending_action(self) -> None:
         state = {"pending_account_dialog": ("rename", "konto")}
@@ -348,6 +401,7 @@ class DashboardTests(unittest.TestCase):
             patch.object(dashboard, "build_standings", return_value=(standing,)),
             patch.object(dashboard, "_manifest_statuses", return_value=frozenset()),
             patch.object(dashboard.st, "dataframe", return_value=event),
+            patch.object(dashboard.st, "caption") as caption_instruction,
             patch.object(dashboard, "_navigate") as navigate_to_team,
         ):
             dashboard._standings_table(
@@ -355,6 +409,10 @@ class DashboardTests(unittest.TestCase):
             )
         navigate_to_team.assert_called_once_with(
             "team", group="direkte", team=42, round=7
+        )
+        caption_instruction.assert_called_once_with(
+            "Klik p" + chr(0xE5) + " en r" + chr(0xE6) + "kke for at "
+            + chr(0xE5) + "bne holdet"
         )
 
         tournament_row = SimpleNamespace(
@@ -374,11 +432,16 @@ class DashboardTests(unittest.TestCase):
         state = SimpleNamespace(standings=(tournament_row,))
         with (
             patch.object(dashboard.st, "dataframe", return_value=event),
+            patch.object(dashboard.st, "caption") as caption_instruction,
             patch.object(dashboard, "_navigate") as navigate_to_team,
         ):
             dashboard._tournament_standings_table(group, state, round_number=8)
         navigate_to_team.assert_called_once_with(
             "team", group="direkte", team=42, round=8
+        )
+        caption_instruction.assert_called_once_with(
+            "Klik p" + chr(0xE5) + " en r" + chr(0xE6) + "kke for at "
+            + chr(0xE5) + "bne holdet"
         )
 
     def test_combines_missing_round_and_stale_warning(self) -> None:
@@ -961,6 +1024,33 @@ class DashboardTests(unittest.TestCase):
             golf_numeric, ("Point", "Totalændring", "Rundeændring")
         )
 
+    def test_missing_player_round_batch_skips_cache_and_continues_after_error(self) -> None:
+        class BatchClient:
+            def __init__(self):
+                self.calls: list[int] = []
+
+            def fetch_players(self, game, *, round_number=None):
+                assert round_number is not None
+                self.calls.append(round_number)
+                if round_number == 3:
+                    raise holdet.FetchError("round 3 failed")
+                return sample_statistics(round_number)
+
+        with website_environment() as (_config, output):
+            game = sample_statistics().game
+            store = holdet.PlayerStatisticsStore(output)
+            store.save(sample_statistics(2))
+            client = BatchClient()
+            result = dashboard._fetch_missing_player_rounds(
+                game, 1, 4, store=store, client=client
+            )
+
+            self.assertEqual(client.calls, [1, 3, 4])
+            self.assertEqual(result.fetched, (1, 4))
+            self.assertEqual(result.skipped, (2,))
+            self.assertEqual(result.failures[0][0], 3)
+            self.assertEqual(store.scan(game).rounds_for(game), (4, 2, 1))
+
     def test_cached_player_tab_is_offline_and_historical_round_is_on_demand(self) -> None:
         class FakeClient:
             def __init__(self):
@@ -1088,6 +1178,48 @@ class DashboardTests(unittest.TestCase):
                 )
 
 
+    def test_standalone_statistics_start_empty_and_show_technical_metadata(self) -> None:
+        with website_environment() as (config, output):
+            team = sample_team(707, name="Cached team")
+            game = team.reference.game
+            holdet.GroupStore(config / "groups.json").create_manager_game(
+                game, "Tour display name"
+            )
+            holdet.SnapshotStore(output).save_team_json(team)
+            holdet.PlayerStatisticsStore(output).save(sample_statistics())
+
+            app = AppTest.from_file(APP_PATH).run(timeout=15)
+            navigate(app, "players")
+            player_game = widget(app, "selectbox", "Managerspil")
+            self.assertIsNone(player_game.value)
+            self.assertFalse(app.dataframe)
+
+            app.session_state["standalone-player-game"] = game.original
+            app.run(timeout=15)
+            self.assertTrue(
+                any(
+                    game.slug in item.value and "sprog: da" in item.value
+                    for item in app.caption
+                )
+            )
+
+            navigate(app, "teams")
+            team_game = widget(app, "selectbox", "Managerspil")
+            self.assertIsNone(team_game.value)
+            self.assertEqual([item.value for item in app.title], ["Holdstatistik"])
+
+            app.session_state["standalone-team-game"] = game.original
+            app.run(timeout=15)
+            team_choice = widget(app, "selectbox", "Hold")
+            self.assertIsNone(team_choice.value)
+            self.assertEqual([item.value for item in app.title], ["Holdstatistik"])
+            self.assertTrue(
+                any(
+                    game.slug in item.value and "sprog: da" in item.value
+                    for item in app.caption
+                )
+            )
+
     def test_standalone_player_statistics_retries_without_registering_game(self) -> None:
         class FlakyClient:
             def __init__(self):
@@ -1169,6 +1301,19 @@ class DashboardTests(unittest.TestCase):
         )
         self.assertEqual(config["server"]["address"], "127.0.0.1")
         self.assertNotIn("port", config["server"])
+        self.assertEqual(config["client"]["toolbarMode"], "viewer")
+        app_source = APP_PATH.read_text(encoding="utf-8")
+        data_source = (PROJECT_ROOT / "website" / "data_page.py").read_text(
+            encoding="utf-8"
+        )
+        for anchor in (
+            "spillerstatistik",
+            "holdstatistik",
+            "arkiverede-managerspil",
+            "administrer-managerspil",
+        ):
+            self.assertIn(f'anchor="{anchor}"', app_source)
+        self.assertIn('anchor="data-og-lager"', data_source)
 
         readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
         command = "py -3.14 -m streamlit run .\\website\\app.py"

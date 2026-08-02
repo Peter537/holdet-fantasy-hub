@@ -22,7 +22,9 @@ from .models import (
     GameUrl,
     PlayerEntry,
     RosterEntry,
+    RoundStatus,
     RoundSummary,
+    ScheduleRound,
     ScrapedGame,
     ScrapedTeam,
     TeamOverview,
@@ -175,6 +177,8 @@ from .teams import (
     parse_game_display_name,
     parse_history,
     parse_schedule_final_round,
+    parse_schedule_rounds,
+    round_status_for,
     select_accounts,
 )
 from .version import VERSION
@@ -183,7 +187,8 @@ __all__ = [
     "VERSION",
     "AccountConfig", "AccountStore", "AppPaths", "FetchError", "GamePolicy",
     "GameUrl", "HoldetClient", "PathOverrides", "PayloadError", "PlayerEntry",
-    "RosterEntry", "RoundSummary", "ScrapedGame", "ScrapedTeam", "ScraperError",
+    "RosterEntry", "RoundStatus", "RoundSummary", "ScheduleRound", "ScrapedGame",
+    "ScrapedTeam", "ScraperError",
     "TeamOverview", "TeamReference", "UnsupportedGameError", "UrlValidationError",
     "GroupDefinition", "GroupStore", "GroupTeam", "HubConfiguration", "ManagerGame",
     "TournamentConfig", "TournamentRevision", "TournamentState",

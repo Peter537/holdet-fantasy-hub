@@ -254,7 +254,18 @@ class TournamentResultTests(unittest.TestCase):
         )
         self.assertEqual(state.knockout_matches, ())
         self.assertEqual(state.active_team_ids, frozenset({1, 2, 3, 4}))
-        self.assertTrue(any("afventer rundedata" in warning for warning in state.warnings))
+        self.assertIn("1 gruppespilskamp afventer rundedata", state.warnings)
+
+        incomplete_two = replace(teams[1], history=teams[1].history[1:])
+        incomplete_three = replace(teams[2], history=teams[2].history[1:])
+        plural_state = holdet.build_tournament_state(
+            group,
+            snapshot_index(teams[0], incomplete_two, incomplete_three, incomplete),
+            3,
+        )
+        self.assertIn(
+            "2 gruppespilskampe afventer rundedata", plural_state.warnings
+        )
 
     def test_two_round_ties_are_aggregated_and_high_seed_advances(self):
         teams = tuple(
@@ -475,6 +486,39 @@ class TournamentResultTests(unittest.TestCase):
         self.assertEqual(summary.team_b_wins, 0)
         self.assertEqual(summary.team_a_growth, -8)
         self.assertEqual(summary.team_b_growth, -13)
+
+
+    def test_only_complete_rounds_award_tournament_points(self):
+        first = team_with_changes(1, {1: 10})
+        second = team_with_changes(2, {1: 5})
+        group = tournament_group((first, second), final=2)
+
+        def with_status(team, status):
+            return replace(
+                team,
+                history=tuple(
+                    replace(summary, round_status=status)
+                    for summary in team.history
+                ),
+            )
+
+        for status in ("unknown", "in_progress"):
+            state = holdet.build_tournament_state(
+                group,
+                snapshot_index(
+                    with_status(first, status),
+                    with_status(second, status),
+                ),
+                1,
+            )
+            self.assertEqual([row.played for row in state.standings], [0, 0])
+            self.assertEqual([row.points for row in state.standings], [0, 0])
+
+        complete = holdet.build_tournament_state(
+            group, snapshot_index(first, second), 1
+        )
+        self.assertEqual([row.played for row in complete.standings], [1, 1])
+        self.assertEqual(sum(row.points for row in complete.standings), 3)
 
 
 class TournamentStorageTests(unittest.TestCase):

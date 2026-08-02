@@ -176,7 +176,7 @@ def _format_round(summary: RoundSummary, *, unit: str) -> str:
 def team_to_dict(team: ScrapedTeam, *, generated_at: datetime) -> dict[str, object]:
     latest = team.history[0] if team.history else None
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "generated_at": generated_at.isoformat(),
         "source": {
             "game_url": team.reference.game.original,
@@ -246,9 +246,15 @@ def _round_growth_dict(summary: RoundSummary) -> dict[str, int | None]:
     }
 
 
-def _round_dict(summary: RoundSummary) -> dict[str, int | None]:
+def _round_dict(summary: RoundSummary) -> dict[str, object]:
     return {
         "round": summary.round_number,
+        "round_status": summary.round_status,
+        "round_end_at": (
+            summary.round_end_at.isoformat()
+            if summary.round_end_at is not None
+            else None
+        ),
         "total": summary.total,
         "change": summary.change,
         "bank": summary.bank,

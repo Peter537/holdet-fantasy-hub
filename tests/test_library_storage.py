@@ -32,6 +32,7 @@ def sample_team(
     change: int = 30,
     unit: str = "money",
     history_rounds: tuple[int, ...] | None = None,
+    round_status: holdet.RoundStatus = "complete",
 ) -> holdet.ScrapedTeam:
     game_url = f"https://www.holdet.dk/da/fantasy/{slug}"
     game = holdet.GameUrl(game_url, "da", slug)
@@ -63,6 +64,7 @@ def sample_team(
             substitutions_used=round_number,
             round_rank=10 + round_number,
             overall_rank=20 + round_number,
+            round_status=round_status,
         )
         for round_number in sorted(rounds, reverse=True)
     )
@@ -141,15 +143,26 @@ class ClientAndSerializationTests(unittest.TestCase):
         self.assertTrue(result.entries)
         self.assertEqual(before, after)
 
-    def test_unicode_schema_one_round_trip(self) -> None:
+    def test_unicode_schema_two_round_trip_and_schema_one_migration(self) -> None:
         team = sample_team()
         generated = datetime(2026, 7, 25, 12, 3, 4, tzinfo=timezone.utc)
         payload = json.loads(holdet.team_to_json(team, generated_at=generated))
+        self.assertEqual(payload["schema_version"], 2)
+        self.assertEqual(payload["history"][0]["round_status"], "complete")
         restored = holdet.team_from_dict(payload)
         self.assertEqual(restored, team)
+        legacy = json.loads(json.dumps(payload))
+        legacy["schema_version"] = 1
+        for summary in legacy["history"]:
+            summary.pop("round_status")
+            summary.pop("round_end_at")
+        restored_legacy = holdet.team_from_dict(legacy)
+        self.assertTrue(
+            all(item.round_status == "unknown" for item in restored_legacy.history)
+        )
         self.assertEqual(restored.roster[0].name, "Søren Ægir")
         with self.assertRaises(holdet.PayloadError):
-            holdet.team_from_dict({"schema_version": 2})
+            holdet.team_from_dict({"schema_version": 3})
 
 
 class SnapshotStorageTests(unittest.TestCase):

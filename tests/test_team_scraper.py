@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 import shutil
@@ -465,6 +465,20 @@ class TeamServiceAndOutputTests(unittest.TestCase):
         )
 
 
+def schedule_payload(count: int = 3) -> dict[str, object]:
+    return {
+        "rounds": [
+            {
+                "round": round_number,
+                "start": f"2026-08-{round_number:02d}T08:00:00Z",
+                "close": f"2026-08-{round_number:02d}T10:00:00Z",
+                "end": f"2026-08-{round_number:02d}T12:00:00Z",
+            }
+            for round_number in range(1, count + 1)
+        ]
+    }
+
+
 class GameInfoTests(unittest.TestCase):
     def test_schedule_metadata_uses_structured_round_count(self) -> None:
         game = scraper.normalize_game_url(
@@ -480,7 +494,7 @@ class GameInfoTests(unittest.TestCase):
             if url.endswith("/api/cartridges/super-manager-fall-2026"):
                 return cartridge
             if url.endswith("/api/schedules/623"):
-                return {"rounds": [{} for _ in range(17)]}
+                return schedule_payload(17)
             raise AssertionError(url)
 
         def fetch_text(url: str) -> str:
@@ -495,6 +509,7 @@ class GameInfoTests(unittest.TestCase):
         info = client.fetch_game_info(game)
         self.assertEqual(info.schedule_id, 623)
         self.assertEqual(info.final_round, 17)
+        self.assertEqual(len(info.rounds), 17)
         self.assertEqual(info.display_name, "Super Manager Efter" + chr(0xe5) + "r 2026")
         self.assertEqual(calls[-1], f"{base}/api/schedules/623")
         self.assertIs(client.fetch_game_info(game), info)
@@ -540,11 +555,28 @@ class GameInfoTests(unittest.TestCase):
         del missing_salary["_embedded"]["rulesets"]["8"]["salaryCap"]
         with self.assertRaisesRegex(scraper.PayloadError, "salaryCap"):
             scraper.parse_game_context(game, "cycling", missing_salary)
+    def test_schedule_parser_and_completion_boundary(self) -> None:
+        rounds = scraper.parse_schedule_rounds(schedule_payload())
+        self.assertEqual([item.round_number for item in rounds], [1, 2, 3])
+        before = datetime(2026, 8, 2, 11, 59, tzinfo=timezone.utc)
+        boundary = datetime(2026, 8, 2, 12, 0, tzinfo=timezone.utc)
+        self.assertEqual(
+            scraper.round_status_for(rounds, 2, at=before)[0],
+            "in_progress",
+        )
+        status, end_at = scraper.round_status_for(rounds, 2, at=boundary)
+        self.assertEqual(status, "complete")
+        self.assertEqual(end_at, boundary)
+        self.assertEqual(
+            scraper.round_status_for(rounds, 99, at=boundary),
+            ("unknown", None),
+        )
+
     def test_schedule_parser_rejects_empty_or_invalid_payloads(self) -> None:
         self.assertEqual(
-            scraper.parse_schedule_final_round({"rounds": [{}, {}, {}]}), 3
+            scraper.parse_schedule_final_round(schedule_payload()), 3
         )
-        for payload in ({}, {"rounds": []}, {"rounds": [None]}):
+        for payload in ({}, {"rounds": []}, {"rounds": [None]}, {"rounds": [{}]}):
             with self.subTest(payload=payload):
                 with self.assertRaises(scraper.PayloadError):
                     scraper.parse_schedule_final_round(payload)

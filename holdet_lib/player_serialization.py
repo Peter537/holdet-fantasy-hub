@@ -4,14 +4,14 @@ from __future__ import annotations
 
 from datetime import datetime
 import json
-from typing import Any
+from typing import Any, cast
 
 from .errors import PayloadError
-from .models import GameUrl, PlayerEntry, ScrapedGame
+from .models import GameUrl, PlayerEntry, RoundStatus, ScrapedGame
 from .policies import legacy_policy
 
 
-PLAYER_STATISTICS_SCHEMA_VERSION = 2
+PLAYER_STATISTICS_SCHEMA_VERSION = 3
 
 
 def _statuses(entry: PlayerEntry) -> list[str]:
@@ -43,6 +43,12 @@ def player_statistics_to_dict(
             "format": game.format,
             "unit": game.unit,
             "round": game.round_number,
+            "round_status": game.round_status,
+            "round_end_at": (
+                game.round_end_at.isoformat()
+                if game.round_end_at is not None
+                else None
+            ),
         },
         "entries": [
             {
@@ -92,12 +98,31 @@ def _integer(value: object, label: str, *, optional: bool = False) -> int | None
     return value
 
 
+def _round_status(value: object) -> RoundStatus:
+    if value not in {"complete", "in_progress", "unknown"}:
+        raise PayloadError("player snapshot game.round_status is invalid")
+    return cast(RoundStatus, value)
+
+
+def _datetime(value: object, label: str) -> datetime | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise PayloadError(f"player snapshot {label} must be an ISO timestamp")
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise PayloadError(
+            f"player snapshot {label} must be an ISO timestamp"
+        ) from exc
+
+
 def player_statistics_from_dict(payload: object) -> ScrapedGame:
-    """Deserialize and validate a player-statistics schema-version 1 snapshot."""
+    """Deserialize and validate a compatible player-statistics snapshot."""
 
     root = _object(payload, "root")
     schema_version = root.get("schema_version")
-    if schema_version not in {1, PLAYER_STATISTICS_SCHEMA_VERSION}:
+    if schema_version not in {1, 2, PLAYER_STATISTICS_SCHEMA_VERSION}:
         raise PayloadError(
             "unsupported player snapshot schema: "
             f"{schema_version!r}"
@@ -171,6 +196,16 @@ def player_statistics_from_dict(payload: object) -> ScrapedGame:
     else:
         game_format = _text(game_data.get("format"), "game.format")
         unit = _text(game_data.get("unit"), "game.unit")
+    round_status = (
+        _round_status(game_data.get("round_status"))
+        if schema_version >= 3
+        else "unknown"
+    )
+    round_end_at = (
+        _datetime(game_data.get("round_end_at"), "game.round_end_at")
+        if schema_version >= 3
+        else None
+    )
     return ScrapedGame(
         game=game,
         variant=variant,
@@ -178,5 +213,7 @@ def player_statistics_from_dict(payload: object) -> ScrapedGame:
         entries=tuple(entries),
         format=game_format,
         unit=unit,
+        round_status=round_status,
+        round_end_at=round_end_at,
     )
 

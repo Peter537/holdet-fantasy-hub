@@ -7,11 +7,14 @@ Spillerstatistik kan bruges som en selvstændig dashboardside eller fra et regis
 Vælg en gemt spilreference, en slug eller en fuld Holdet-URL. En bar slug bruger locale `da`. Dashboardet viser nyeste kompatible cache med det samme og kontakter kun Holdet via:
 
 - **Hent seneste spillerstatistik**;
+- **Hent manglende runder** for et valgt fra-/til-interval;
 - **Hent runde X**;
 - **Opdater runde X**;
 - **Prøv igen** efter en fejl.
 
-Efter den første hentning kan runder fra 1 til senest kendte runde vælges. Hver hentning gemmer hele, ufiltrerede resultatet som et kanonisk JSON-snapshot.
+Batchhentningen springer allerede gemte runder over, genbruger én klient, fortsætter efter enkeltfejl og viser en samlet opsummering. Enkeltrundehentningen bruges fortsat til korrektioner.
+
+Hver hentning gemmer hele, ufiltrerede resultatet som et kanonisk JSON-snapshot. Datakilden vises med lokal dato og den frosne rundestatus fra hentetidspunktet; der foretages ingen automatisk statuskontrol.
 
 ## Formater og enheder
 

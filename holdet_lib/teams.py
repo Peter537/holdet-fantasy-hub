@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from html.parser import HTMLParser
 import json
 from pathlib import Path
@@ -18,7 +19,9 @@ from .models import (
     AccountConfig,
     GameUrl,
     RosterEntry,
+    RoundStatus,
     RoundSummary,
+    ScheduleRound,
     ScrapedTeam,
     TeamOverview,
     TeamReference,
@@ -38,6 +41,7 @@ class GameContext:
     salary_cap: int
     final_round: int | None = None
     display_name: str | None = None
+    rounds: tuple[ScheduleRound, ...] = ()
 
     @property
     def unit(self) -> str:
@@ -516,8 +520,8 @@ def parse_game_context(game: GameUrl, variant: str, payload: object) -> GameCont
     )
 
 
-def parse_schedule_final_round(payload: object) -> int:
-    """Return the authoritative final round from a public schedule payload."""
+def parse_schedule_rounds(payload: object) -> tuple[ScheduleRound, ...]:
+    """Return validated rounds from a public schedule payload."""
 
     if not isinstance(payload, dict):
         raise PayloadError("schedule payload must be an object")
@@ -526,7 +530,63 @@ def parse_schedule_final_round(payload: object) -> int:
         raise PayloadError("schedule payload lacks a non-empty rounds list")
     if any(not isinstance(item, dict) for item in rounds):
         raise PayloadError("schedule payload contains an invalid round")
-    return len(rounds)
+    result: list[ScheduleRound] = []
+    for index, item in enumerate(rounds, 1):
+        assert isinstance(item, dict)
+        round_number = item.get("round", index)
+        if not isinstance(round_number, int) or isinstance(round_number, bool):
+            raise PayloadError(f"schedule round {index} has an invalid number")
+        timestamps: dict[str, datetime] = {}
+        for field in ("start", "close", "end"):
+            value = item.get(field)
+            if not isinstance(value, str) or not value.strip():
+                raise PayloadError(f"schedule round {round_number} lacks {field}")
+            try:
+                parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError as exc:
+                raise PayloadError(
+                    f"schedule round {round_number} has an invalid {field}"
+                ) from exc
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            timestamps[field] = parsed
+        if not (timestamps["start"] <= timestamps["close"] <= timestamps["end"]):
+            raise PayloadError(f"schedule round {round_number} has invalid boundaries")
+        result.append(
+            ScheduleRound(
+                round_number=round_number,
+                start=timestamps["start"],
+                close=timestamps["close"],
+                end=timestamps["end"],
+            )
+        )
+    return tuple(sorted(result, key=lambda value: value.round_number))
+
+
+def parse_schedule_final_round(payload: object) -> int:
+    """Return the authoritative final round from a public schedule payload."""
+
+    return max(item.round_number for item in parse_schedule_rounds(payload))
+
+
+def round_status_for(
+    rounds: Iterable[ScheduleRound],
+    round_number: int,
+    *,
+    at: datetime | None = None,
+) -> tuple[RoundStatus, datetime | None]:
+    """Freeze a round's completion state at the supplied observation time."""
+
+    observed_at = at or datetime.now(timezone.utc)
+    if observed_at.tzinfo is None:
+        observed_at = observed_at.replace(tzinfo=timezone.utc)
+    for item in rounds:
+        if item.round_number == round_number:
+            return (
+                "complete" if observed_at >= item.end else "in_progress",
+                item.end,
+            )
+    return "unknown", None
 
 
 def _rank_map(payload: object) -> dict[int, int]:
@@ -611,11 +671,14 @@ class TeamDataService:
         *,
         text_fetcher: Callable[[str], str] | None = None,
         json_fetcher: Callable[[str], object] | None = None,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         client = HttpClient()
         self.fetch_text = text_fetcher or client.fetch_text
         self.fetch_json = json_fetcher or client.fetch_json
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._contexts: dict[tuple[str, str], GameContext] = {}
+        self._schedule_unavailable: set[tuple[str, str]] = set()
 
     def context(self, game: GameUrl) -> GameContext:
         key = (game.locale.casefold(), game.slug)
@@ -627,20 +690,48 @@ class TeamDataService:
             )
         return self._contexts[key]
 
+    def context_with_schedule(
+        self, game: GameUrl, *, strict: bool = False
+    ) -> GameContext:
+        """Return context enriched with schedule data when it is available."""
+
+        context = self.context(game)
+        key = (game.locale.casefold(), game.slug)
+        if context.rounds:
+            return context
+        if key in self._schedule_unavailable and not strict:
+            return context
+        if context.schedule_id is None:
+            if strict:
+                raise PayloadError("game metadata lacks scheduleId")
+            self._schedule_unavailable.add(key)
+            return context
+        schedule_url = f"https://{NEXUS_HOST}/api/schedules/{context.schedule_id}"
+        try:
+            rounds = parse_schedule_rounds(self.fetch_json(schedule_url))
+        except Exception:
+            if strict:
+                raise
+            self._schedule_unavailable.add(key)
+            return context
+        context = replace(
+            context,
+            rounds=rounds,
+            final_round=max(item.round_number for item in rounds),
+        )
+        self._contexts[key] = context
+        return context
+
+    def status_for(
+        self, context: GameContext, round_number: int
+    ) -> tuple[RoundStatus, datetime | None]:
+        return round_status_for(context.rounds, round_number, at=self._clock())
+
     def game_info(self, game: GameUrl) -> GameContext:
         """Fetch and cache public schedule metadata and the official display name."""
 
-        context = self.context(game)
+        context = self.context_with_schedule(game, strict=True)
         updates: dict[str, object] = {}
-        if context.final_round is None:
-            if context.schedule_id is None:
-                raise PayloadError("game metadata lacks scheduleId")
-            schedule_url = (
-                f"https://{NEXUS_HOST}/api/schedules/{context.schedule_id}"
-            )
-            updates["final_round"] = parse_schedule_final_round(
-                self.fetch_json(schedule_url)
-            )
         if context.display_name is None:
             display_name = parse_game_display_name(self.fetch_text(game.original))
             if display_name is not None:
@@ -664,7 +755,7 @@ class TeamDataService:
         return round_ranks, overall
 
     def scrape(self, reference: TeamReference) -> ScrapedTeam:
-        context = self.context(reference.game)
+        context = self.context_with_schedule(reference.game)
         team_url = reference.game.team_url(context.variant, reference.team_id)
         history_url = (
             f"https://{NEXUS_HOST}/api/fantasyteams/{reference.team_id}/history"
@@ -695,6 +786,20 @@ class TeamDataService:
                     f"history player value {expected}"
                 )
         assert page is not None
+        observed_at = self._clock()
+        annotated_history: list[RoundSummary] = []
+        for summary in history:
+            status, round_end_at = round_status_for(
+                context.rounds, summary.round_number, at=observed_at
+            )
+            annotated_history.append(
+                replace(
+                    summary,
+                    round_status=status,
+                    round_end_at=round_end_at,
+                )
+            )
+        history = tuple(annotated_history)
         latest = history[0] if history else None
         current_round = (
             latest.round_number

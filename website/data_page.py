@@ -6,6 +6,7 @@ from pathlib import Path
 
 import streamlit as st
 
+from holdet_lib._formatting import count_label
 from holdet_lib.accounts import AccountStore, rename_account_and_groups
 from holdet_lib.errors import PayloadError
 from holdet_lib.groups import GroupDefinition, GroupStore, HubConfiguration
@@ -87,10 +88,12 @@ def _rename_account_dialog(
         f"Nøgle `{account.key}` og bruger-ID {account.user_id} forbliver uændret."
     )
     if membership_count:
-        st.info(
-            f"Navnet opdateres også i {membership_count} "
-            "eksisterende gruppemedlemskab(er)."
+        membership_label = count_label(
+            membership_count,
+            "eksisterende gruppemedlemskab",
+            "eksisterende gruppemedlemskaber",
         )
+        st.info(f"Navnet opdateres også i {membership_label}.")
     label = st.text_input(
         "Visningsnavn", value=account.label, key=f"rename-account-{account.key}"
     )
@@ -265,7 +268,7 @@ def data_storage_view(
     index: SnapshotIndex,
     app_paths: AppPaths,
 ) -> None:
-    st.title("Data og lager")
+    st.title("Data og lager", anchor="data-og-lager")
     st.caption(
         "Administrer gemte Holdet-konti og se, hvor Holdet Fantasy Hub "
         "opbevarer lokale data."

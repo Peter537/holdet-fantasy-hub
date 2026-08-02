@@ -3,10 +3,21 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
+from typing import Literal
 from urllib.parse import quote
 
 
 NEXUS_HOST = "nexus-app-fantasy.holdet.dk"
+RoundStatus = Literal["complete", "in_progress", "unknown"]
+
+
+@dataclass(frozen=True, slots=True)
+class ScheduleRound:
+    round_number: int
+    start: datetime
+    close: datetime
+    end: datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,6 +73,8 @@ class ScrapedGame:
     entries: tuple[PlayerEntry, ...]
     format: str | None = None
     unit: str | None = None
+    round_status: RoundStatus = "unknown"
+    round_end_at: datetime | None = None
 
     def __post_init__(self) -> None:
         from .policies import GamePolicy, legacy_policy
@@ -145,6 +158,8 @@ class RoundSummary:
     overall_rank: int | None = None
     round_rank_change: int | None = None
     overall_rank_change: int | None = None
+    round_status: RoundStatus = "unknown"
+    round_end_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)

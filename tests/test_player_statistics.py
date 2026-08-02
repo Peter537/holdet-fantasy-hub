@@ -131,6 +131,7 @@ class PlayerPayloadTests(unittest.TestCase):
         ).fetch_players(game, round_number=6)
         self.assertEqual(result.round_number, 6)
         self.assertEqual(requested[-1], game.statistics_url("cycling", 6))
+        self.assertEqual(result.round_status, "unknown")
 
 
 class PlayerSerializationTests(unittest.TestCase):
@@ -140,13 +141,20 @@ class PlayerSerializationTests(unittest.TestCase):
         payload = json.loads(
             holdet.player_statistics_to_json(original, generated_at=generated)
         )
-        self.assertEqual(payload["schema_version"], 2)
+        self.assertEqual(payload["schema_version"], 3)
         self.assertEqual(payload["game"]["format"], "cycling")
         self.assertEqual(payload["game"]["unit"], "money")
         self.assertEqual(holdet.player_statistics_from_dict(payload), original)
+        legacy = json.loads(json.dumps(payload))
+        legacy["schema_version"] = 2
+        legacy["game"].pop("round_status")
+        legacy["game"].pop("round_end_at")
+        restored_legacy = holdet.player_statistics_from_dict(legacy)
+        self.assertEqual(restored_legacy.round_status, "unknown")
+        self.assertIsNone(restored_legacy.round_end_at)
         self.assertEqual(payload["entries"][0]["name"], "Søren Pogačar")
         with self.assertRaises(holdet.PayloadError):
-            holdet.player_statistics_from_dict({"schema_version": 3})
+            holdet.player_statistics_from_dict({"schema_version": 4})
 
     def test_schema_one_cycling_requires_refetch_but_other_formats_load(self) -> None:
         generated = datetime(2026, 7, 28, 12, 34, 56)

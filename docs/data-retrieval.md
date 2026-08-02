@@ -70,7 +70,9 @@ En teamhentning kombinerer:
 - standardligaens overall- og runde-leaderboards, når de er offentligt tilgængelige;
 - cartridge-data for format, enhed, salary cap og schedule-ID.
 
-`/api/schedules/<schedule-id>` bruges til den autoritative finalerunde. For pengebaserede spil kontrolleres opstillingens samlede spillerværdi mod historikkens total minus bank; uoverensstemmelse genhentes én gang og giver derefter fejl.
+`/api/schedules/<schedule-id>` hentes sammen med manuelle spiller- og holdhentninger. Parseren gemmer hver rundes `start`, `close` og `end`; `end` afgør, om snapshotstatus er `complete` eller `in_progress`. Hvis schedulekaldet fejler, gemmes de øvrige gyldige data med `unknown`.
+
+For pengebaserede spil kontrolleres opstillingens samlede spillerværdi mod historikkens total minus bank; uoverensstemmelse genhentes én gang og giver derefter fejl.
 
 ## HTTP, retries og proxy
 

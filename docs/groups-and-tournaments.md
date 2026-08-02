@@ -46,7 +46,7 @@ Nye planer har et tilfældigt `draw_seed`. Samme seed, samme sorterede medlemmer
 
 ### Resultater og seedning
 
-En gruppespilskamp sammenligner holdenes `RoundSummary.change`. Sejr giver 3 point, uafgjort 1 og nederlag 0. Manglende rundedata efterlader kampen som afventende.
+En gruppespilskamp sammenligner holdenes `RoundSummary.change`, men kun når begge rundesammendrag er mærket `complete`. Sejr giver 3 point, uafgjort 1 og nederlag 0. `in_progress`, `unknown` og manglende rundedata efterlader kampen som afventende uden point, seedning eller knockoutresultat.
 
 Seedning afgøres af:
 

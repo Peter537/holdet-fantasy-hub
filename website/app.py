@@ -15,6 +15,7 @@ if __package__ in {None, ""}:
 import pandas as pd
 import streamlit as st
 
+from holdet_lib._formatting import count_label
 from holdet_lib.accounts import AccountStore
 from holdet_lib.team_exports import (
     TEAM_EXPORT_FORMATS, TeamExportStore, build_team_export,
@@ -111,6 +112,75 @@ def _colors(slug: str) -> tuple[str, str]:
     return "#6f62d9", "#fbfaff"
 
 
+_DANISH_MONTHS = (
+    "",
+    "januar",
+    "februar",
+    "marts",
+    "april",
+    "maj",
+    "juni",
+    "juli",
+    "august",
+    "september",
+    "oktober",
+    "november",
+    "december",
+)
+
+
+def _format_local_date(value: datetime) -> str:
+    local = value.astimezone()
+    return f"{local.day}. {_DANISH_MONTHS[local.month]}"
+
+
+def _local_data_status(
+    generated_at: datetime | None,
+    round_number: int | None = None,
+    round_status: str | None = None,
+) -> str:
+    if generated_at is None:
+        return "Ingen lokale data endnu \u00b7 Klar til manuel opdatering"
+    prefix = f"Viser lokale data fra {_format_local_date(generated_at)}"
+    if round_number is None or round_number <= 0:
+        return prefix
+    if round_status == "in_progress":
+        return f"{prefix} \u00b7 Runde {round_number} er ikke afsluttet"
+    if round_status == "unknown":
+        return f"{prefix} \u00b7 Rundestatus ukendt"
+    if round_status == "complete":
+        return f"{prefix} \u00b7 Runde {round_number} er afsluttet"
+    return prefix
+
+
+def _sport_icon(slug: str) -> str:
+    icons = {
+        "super-manager": ":material/sports_soccer:",
+        "motor": ":material/sports_motorsports:",
+        "golf": ":material/sports_golf:",
+        "tour": ":material/directions_bike:",
+    }
+    return next(
+        (icon for marker, icon in icons.items() if marker in slug),
+        ":material/trophy:",
+    )
+
+
+def _snapshot_data_status(snapshot: TeamSnapshot | None) -> str:
+    if snapshot is None:
+        return _local_data_status(None)
+    latest = max(
+        snapshot.team.history,
+        key=lambda summary: summary.round_number,
+        default=None,
+    )
+    return _local_data_status(
+        snapshot.generated_at,
+        None if latest is None else latest.round_number,
+        None if latest is None else latest.round_status,
+    )
+
+
 def _format_number(value: int | None, *, signed: bool = False) -> str:
     if value is None:
         return "–"
@@ -181,13 +251,16 @@ def _navigation_card(
     foreground: str,
     aria_label: str,
     view: str,
+    icon: str | None = None,
+    action: str = "\u00c5bn",
     **parameters: object,
 ) -> None:
     """Render a native, keyboard-accessible card without a browser reload."""
     label = (
         f"**{_markdown_literal(title)}**  \n"
-        f"{_markdown_literal(subtitle)}  \n"
-        f":small[{_markdown_literal(detail)}]"
+        f":small[{_markdown_literal(subtitle)}]  \n"
+        f"{_markdown_literal(detail)}  \n"
+        f"**{_markdown_literal(action)} \u2192**"
     )
     with st.container(key=f"nav-card-{card_key}"):
         st.html(
@@ -202,6 +275,7 @@ def _navigation_card(
             label,
             key=f"open-card-{card_key}",
             help=aria_label,
+            icon=icon,
             type="tertiary",
             width="stretch",
         ):
@@ -416,7 +490,9 @@ def _sidebar(
 def _warning_panel(index: SnapshotIndex) -> None:
     if not index.warnings:
         return
-    with st.expander(f"{len(index.warnings)} fil(er) blev ignoreret"):
+    with st.expander(
+        f"{count_label(len(index.warnings), 'fil', 'filer')} blev ignoreret"
+    ):
         st.warning(
             "Nogle snapshots var beskadigede eller havde en ukendt version. "
             "Resten af siden virker fortsat."
@@ -427,20 +503,20 @@ def _warning_panel(index: SnapshotIndex) -> None:
 
 def _group_card(group: GroupDefinition, index: SnapshotIndex) -> None:
     color, foreground = _colors(group.game.slug)
-    available = sum(
-        index.newest(group.game, member.team_id) is not None
+    snapshots = tuple(
+        snapshot
         for member in group.teams
+        if (snapshot := index.newest(group.game, member.team_id)) is not None
     )
-    latest_round = max(
-        (
-            snapshot.team.overview.current_round
-            for member in group.teams
-            if (snapshot := index.newest(group.game, member.team_id)) is not None
-        ),
-        default=0,
+    available = len(snapshots)
+    newest_snapshot = max(
+        snapshots,
+        key=lambda snapshot: snapshot.generated_at,
+        default=None,
     )
     detail = (
-        f"Gruppestilling · {len(group.teams)} hold · {available} med data · seneste runde {latest_round}"
+        f"Gruppestilling \u00b7 {len(group.teams)} hold \u00b7 "
+        f"{available} med data"
     )
     if group.kind == "tournament" and group.tournament is not None:
         state = build_tournament_state(
@@ -462,10 +538,11 @@ def _group_card(group: GroupDefinition, index: SnapshotIndex) -> None:
             )
             detail = (
                 f"Turnering · {state.phase} · næste runde {next_round} "
-                f"({len(next_matches)} kamp(e))"
+                f"({count_label(len(next_matches), 'kamp', 'kampe')})"
             )
         else:
             detail = f"Turnering · {state.phase}"
+    detail = f"{detail} \u00b7 {_snapshot_data_status(newest_snapshot)}"
     _navigation_card(
         card_key=f"group-{group.group_id}",
         title=group.name,
@@ -474,6 +551,8 @@ def _group_card(group: GroupDefinition, index: SnapshotIndex) -> None:
         color=color,
         foreground=foreground,
         aria_label=f"Åbn gruppe {group.name}",
+        icon=_sport_icon(group.game.slug),
+        action="\u00c5bn gruppen",
         view="group",
         group=group.group_id,
     )
@@ -495,7 +574,7 @@ def _game_statistics(
 
 
 def _group_count_label(count: int) -> str:
-    return f"{count} gruppe" if count == 1 else f"{count} grupper"
+    return count_label(count, "gruppe", "grupper")
 
 
 def _manager_game_card(
@@ -504,18 +583,30 @@ def _manager_game_card(
     index: SnapshotIndex,
 ) -> None:
     color, foreground = _colors(manager_game.game.slug)
-    group_count, team_count, latest_round = _game_statistics(manager_game, groups, index)
+    group_count, team_count, _ = _game_statistics(manager_game, groups, index)
+    newest_snapshot = max(
+        (
+            snapshot
+            for snapshot in index.snapshots
+            if _game_identity(snapshot.team.reference.game)
+            == manager_game.identity
+        ),
+        key=lambda snapshot: snapshot.generated_at,
+        default=None,
+    )
     _navigation_card(
         card_key=f"game-{manager_game.game.locale}-{manager_game.game.slug}",
         title=manager_game.name,
         subtitle=manager_game.game.slug,
         detail=(
             f"{_group_count_label(group_count)} · {team_count} unikke hold · "
-            f"seneste runde {latest_round}"
+            f"{_snapshot_data_status(newest_snapshot)}"
         ),
         color=color,
         foreground=foreground,
         aria_label=f"Åbn managerspil {manager_game.name}",
+        icon=_sport_icon(manager_game.game.slug),
+        action="\u00c5bn og opdater manuelt",
         view="game",
         locale=manager_game.game.locale,
         game=manager_game.game.slug,
@@ -597,7 +688,7 @@ def _archive_view(
     groups: tuple[GroupDefinition, ...],
     index: SnapshotIndex,
 ) -> None:
-    st.title("Arkiverede managerspil")
+    st.title("Arkiverede managerspil", anchor="arkiverede-managerspil")
     st.caption(
         "Arkiverede managerspil og deres data bevares lokalt. Åbn et spil "
         "for at gendanne, opdatere eller redigere det igen."
@@ -612,8 +703,18 @@ def _archive_view(
     for position, manager_game in enumerate(archived):
         with columns[position % 2]:
             color, foreground = _colors(manager_game.game.slug)
-            group_count, team_count, latest_round = _game_statistics(
+            group_count, team_count, _ = _game_statistics(
                 manager_game, groups, index
+            )
+            newest_snapshot = max(
+                (
+                    snapshot
+                    for snapshot in index.snapshots
+                    if _game_identity(snapshot.team.reference.game)
+                    == manager_game.identity
+                ),
+                key=lambda snapshot: snapshot.generated_at,
+                default=None,
             )
             _navigation_card(
                 card_key=f"game-{manager_game.game.locale}-{manager_game.game.slug}",
@@ -622,11 +723,13 @@ def _archive_view(
                 detail=(
                     f"Arkiveret {_archive_date(manager_game)} · "
                     f"{_group_count_label(group_count)} · {team_count} unikke hold · "
-                    f"seneste runde {latest_round}"
+                    f"{_snapshot_data_status(newest_snapshot)}"
                 ),
                 color=color,
                 foreground=foreground,
                 aria_label=f"Åbn arkiveret managerspil {manager_game.name}",
+                icon=_sport_icon(manager_game.game.slug),
+                action="\u00c5bn arkivspillet",
                 view="game",
                 locale=manager_game.game.locale,
                 game=manager_game.game.slug,
@@ -653,7 +756,7 @@ def _archived_banner(
 
 
 def _manage_games_view(store: GroupStore) -> None:
-    st.title("Administrer managerspil")
+    st.title("Administrer managerspil", anchor="administrer-managerspil")
     st.caption("Tilføj et Holdet-managerspil med en URL eller slug. Der hentes ingen data nu.")
     with st.form("create-manager-game"):
         source = st.text_input(
@@ -737,6 +840,57 @@ def _fetch_player_statistics(game: GameUrl, round_number: int | None) -> None:
             f"Runde {statistics.round_number} blev hentet og gemt som {saved.name}."
         )
         st.rerun()
+
+
+@dataclass(frozen=True, slots=True)
+class _PlayerBatchResult:
+    fetched: tuple[int, ...]
+    skipped: tuple[int, ...]
+    failures: tuple[tuple[int, str], ...]
+
+
+def _fetch_missing_player_rounds(
+    game: GameUrl,
+    from_round: int,
+    to_round: int,
+    *,
+    store: PlayerStatisticsStore | None = None,
+    client: HoldetClient | None = None,
+) -> _PlayerBatchResult:
+    """Fetch uncached rounds in ascending order with one reused client."""
+
+    if from_round < 1 or to_round < from_round:
+        raise ValueError("Rundeintervallet er ugyldigt.")
+    snapshot_store = store or PlayerStatisticsStore(OUTPUT_DIR)
+    holdet_client = client or _client()
+    cached = set(snapshot_store.scan(game).rounds_for(game))
+    fetched: list[int] = []
+    skipped: list[int] = []
+    failures: list[tuple[int, str]] = []
+    for round_number in range(from_round, to_round + 1):
+        if round_number in cached:
+            skipped.append(round_number)
+            continue
+        try:
+            statistics = holdet_client.fetch_players(
+                game, round_number=round_number
+            )
+            if statistics.round_number != round_number:
+                raise PayloadError(
+                    f"Holdet returnerede runde {statistics.round_number} "
+                    f"i stedet for runde {round_number}."
+                )
+            snapshot_store.save(statistics)
+        except Exception as exc:
+            failures.append((round_number, str(exc)))
+            continue
+        fetched.append(round_number)
+        cached.add(round_number)
+    return _PlayerBatchResult(
+        tuple(fetched),
+        tuple(skipped),
+        tuple(failures),
+    )
 
 
 def _optional_number_input(label: str, key: str) -> int | None:
@@ -953,10 +1107,25 @@ def _player_statistics_panel(
 ) -> None:
     store = PlayerStatisticsStore(OUTPUT_DIR)
     index = store.scan(game)
+    rounds = index.rounds_for(game)
     identity = (game.locale.casefold(), game.slug)
     notice = st.session_state.setdefault("player_statistics_notices", {}).pop(identity, None)
     if notice:
         st.success(notice)
+    batch = st.session_state.setdefault(
+        "player_statistics_batch_results", {}
+    ).pop(identity, None)
+    if isinstance(batch, _PlayerBatchResult):
+        summary = (
+            f"{len(batch.fetched)} hentet \u00b7 "
+            f"{len(batch.skipped)} allerede gemt \u00b7 "
+            f"{len(batch.failures)} fejl"
+        )
+        (st.warning if batch.failures else st.success)(summary)
+        if batch.failures:
+            with st.expander("Fejl under hentningen"):
+                for failed_round, details in batch.failures:
+                    st.code(f"Runde {failed_round}: {details}")
     error = st.session_state.get("player_statistics_errors", {}).get(identity)
     if error:
         details, failed_round, is_network = _player_failure_details(error)
@@ -978,7 +1147,10 @@ def _player_statistics_panel(
         ):
             _fetch_player_statistics(game, failed_round)
     if index.warnings:
-        with st.expander(f"{len(index.warnings)} spillerfil(er) blev ignoreret"):
+        with st.expander(
+            f"{count_label(len(index.warnings), 'spillerfil', 'spillerfiler')} "
+            "blev ignoreret"
+        ):
             st.warning(
                 "Nogle spiller-snapshots var beskadigede eller havde en ukendt "
                 "version. Resten af statistikken virker fortsat."
@@ -1000,9 +1172,56 @@ def _player_statistics_panel(
     ):
         _fetch_player_statistics(game, None)
 
+    if not read_only:
+        with st.expander("Hent manglende runder"):
+            st.caption(
+                "Henter kun runder, der ikke allerede er gemt, i stigende "
+                "r\u00e6kkef\u00f8lge. En enkelt fejl stopper ikke resten."
+            )
+            interval = st.columns(2)
+            with interval[0]:
+                from_round = int(
+                    st.number_input(
+                        "Fra runde",
+                        min_value=1,
+                        value=1,
+                        step=1,
+                        key=f"batch-from-{game.locale}-{game.slug}-{empty_label}",
+                    )
+                )
+            with interval[1]:
+                to_round = int(
+                    st.number_input(
+                        "Til runde",
+                        min_value=1,
+                        value=max(rounds, default=1),
+                        step=1,
+                        key=f"batch-to-{game.locale}-{game.slug}-{empty_label}",
+                    )
+                )
+            if st.button(
+                "Hent manglende runder",
+                icon=":material/download:",
+                key=f"batch-fetch-{game.locale}-{game.slug}-{empty_label}",
+                disabled=to_round < from_round,
+            ):
+                with st.spinner(
+                    f"Henter manglende runder {from_round}-{to_round} ..."
+                ):
+                    result = _fetch_missing_player_rounds(
+                        game,
+                        from_round,
+                        to_round,
+                        store=store,
+                    )
+                st.session_state.setdefault(
+                    "player_statistics_batch_results", {}
+                )[identity] = result
+                st.rerun()
+
     rounds = index.rounds_for(game)
     if not rounds:
-        st.info(f"Der er endnu ikke gemt spillerstatistik for {empty_label}.")
+        st.info(_local_data_status(None))
         return
     latest_known_round = max(rounds)
     selected_round = st.selectbox(
@@ -1032,6 +1251,23 @@ def _player_statistics_panel(
         return
 
     statistics = selected.statistics
+    status_text = _local_data_status(
+        selected.generated_at,
+        statistics.round_number,
+        statistics.round_status,
+    )
+    if statistics.round_status == "complete":
+        st.caption(status_text)
+    elif statistics.round_status == "in_progress":
+        st.warning(
+            f"{status_text}. Data kan vises, men turneringspoint gives "
+            "f\u00f8rst, n\u00e5r runden er afsluttet og hentet igen."
+        )
+    else:
+        st.warning(
+            f"{status_text}. Hent runden igen for at bekr\u00e6fte den, "
+            "f\u00f8r data kan give turneringspoint."
+        )
     scope = f"player-filter-{game.locale}-{game.slug}"
     try:
         query = _player_filter_query(statistics, scope)
@@ -1075,7 +1311,7 @@ def _player_statistics_tab(
 
 
 def _standalone_player_statistics(games: tuple[ManagerGame, ...]) -> None:
-    st.title("Spillerstatistik")
+    st.title("Spillerstatistik", anchor="spillerstatistik")
     st.caption(
         "Vælg et gemt spil, eller indtast en Holdet-URL eller slug. Spillet "
         "bliver ikke føjet til Mine managerspil."
@@ -1101,6 +1337,9 @@ def _standalone_player_statistics(games: tuple[ManagerGame, ...]) -> None:
     option_labels = {
         item[0].original: f"{item[1]} · {item[0].slug}"
         for item in sorted_suggestions
+    }
+    option_labels = {
+        item[0].original: item[1] for item in sorted_suggestions
     }
     selected_source = st.selectbox(
         "Managerspil",
@@ -1294,7 +1533,7 @@ def _game_view(
         f'<div style="height:6px;border-radius:6px;background:{color};margin-bottom:1rem"></div>',
         unsafe_allow_html=True,
     )
-    st.title(manager_game.name)
+    st.title(manager_game.name, anchor=f"managerspil-{manager_game.game.slug}")
     st.caption(manager_game.game.slug)
     groups_tab, players_tab, teams_tab, manage_tab, settings_tab = st.tabs(
         ("Grupper", "Spillerstatistik", "Holdstatistik", "Administrer grupper", "Spilindstillinger"),
@@ -1362,6 +1601,7 @@ def _standings_table(
                 "Hold-ID": row.team_id,
             }
         )
+    st.caption("Klik p\u00e5 en r\u00e6kke for at \u00e5bne holdet")
     event = st.dataframe(
         _style_integer_columns(rows, ("Værdi", "Vækst", "Afstand")),
         hide_index=True,
@@ -1392,7 +1632,7 @@ def _standings_group_view(group: GroupDefinition, index: SnapshotIndex) -> None:
         f'<div style="height:6px;border-radius:6px;background:{color};margin-bottom:1rem"></div>',
         unsafe_allow_html=True,
     )
-    st.title(group.name)
+    st.title(group.name, anchor=f"gruppe-{group.group_id}")
     st.caption(f"{group.game.slug} · {len(group.teams)} faste hold")
     if not group.teams:
         st.info("Gruppen har ingen hold endnu.")
@@ -1423,6 +1663,35 @@ def _match_round(match: GroupMatch | KnockoutMatch) -> int:
     )
 
 
+def _round_data_state(
+    index: SnapshotIndex,
+    game: GameUrl,
+    team_ids: Iterable[int],
+    round_numbers: Iterable[int],
+) -> str:
+    statuses: list[str] = []
+    for team_id in team_ids:
+        for round_number in round_numbers:
+            located = index.summary_for(game, team_id, round_number)
+            if located is None:
+                return "missing"
+            statuses.append(located[1].round_status)
+    if "in_progress" in statuses:
+        return "in_progress"
+    if "unknown" in statuses:
+        return "unknown"
+    return "complete"
+
+
+def _round_data_label(status: str) -> str:
+    return {
+        "complete": "F\u00e6rdig",
+        "in_progress": "Runde i gang",
+        "unknown": "Rundestatus ukendt",
+        "missing": "Mangler data",
+    }[status]
+
+
 def _tournament_standings_table(
     group: GroupDefinition, state: TournamentState, round_number: int
 ) -> None:
@@ -1443,6 +1712,7 @@ def _tournament_standings_table(
         }
         for row in state.standings
     ]
+    st.caption("Klik p\u00e5 en r\u00e6kke for at \u00e5bne holdet")
     event = st.dataframe(
         _style_integer_columns(rows, ("For", "Imod", "Forskel")),
         hide_index=True,
@@ -1552,7 +1822,14 @@ def _tournament_head_to_head(
     rows: list[dict[str, object]] = []
     for match in summary.matches:
         if not match.complete:
-            status = "Afventer"
+            status = _round_data_label(
+                _round_data_state(
+                    index,
+                    group.game,
+                    (match.team_a_id, match.team_b_id),
+                    (match.round_number,),
+                )
+            )
         elif match.winner_id is None:
             status = "Uafgjort"
         else:
@@ -1590,7 +1867,15 @@ def _tournament_matches(
         elif match.complete:
             status = "Uafgjort" if match.winner_id is None else "Færdig"
         elif match.fixture.round_number <= state.as_of_round:
-            status = "Afventer data"
+            assert match.fixture.team_b_id is not None
+            status = _round_data_label(
+                _round_data_state(
+                    index,
+                    group.game,
+                    (match.fixture.team_a_id, match.fixture.team_b_id),
+                    (match.fixture.round_number,),
+                )
+            )
         else:
             status = "Planlagt"
         rows.append(
@@ -1679,30 +1964,54 @@ def _tournament_data_status(
                 required[match.team_a_id].add(round_number)
                 required[match.team_b_id].add(round_number)
 
-    rows: list[dict[str, object]] = []
+    status_rows: list[dict[str, object]] = []
     has_missing = False
+    has_in_progress = False
+    has_unknown = False
     for member in group.teams:
-        known_rounds = index.rounds_for(group.game, (member.team_id,))
-        missing = sorted(
-            round_number
-            for round_number in required[member.team_id]
-            if index.summary_for(group.game, member.team_id, round_number) is None
-        )
+        missing: list[int] = []
+        in_progress: list[int] = []
+        unknown: list[int] = []
+        for round_number in sorted(required[member.team_id]):
+            located = index.summary_for(
+                group.game, member.team_id, round_number
+            )
+            if located is None:
+                missing.append(round_number)
+            elif located[1].round_status == "in_progress":
+                in_progress.append(round_number)
+            elif located[1].round_status == "unknown":
+                unknown.append(round_number)
         has_missing = has_missing or bool(missing)
+        has_in_progress = has_in_progress or bool(in_progress)
+        has_unknown = has_unknown or bool(unknown)
         newest = index.newest(group.game, member.team_id)
-        rows.append(
+        status_rows.append(
             {
                 "Hold": newest.team.team_name if newest else member.name,
-                "Seneste runde": max(known_rounds, default=None),
-                "Mangler": ", ".join(str(value) for value in missing) or "–",
+                "Datakilde": _snapshot_data_status(newest),
+                "Runde i gang": ", ".join(map(str, in_progress)) or "\u2013",
+                "Rundestatus ukendt": ", ".join(map(str, unknown)) or "\u2013",
+                "Mangler data": ", ".join(map(str, missing)) or "\u2013",
             }
         )
-    with st.expander("Datastatus", expanded=has_missing):
+    pending = has_missing or has_in_progress or has_unknown
+    with st.expander("Datastatus", expanded=pending):
         if has_missing:
-            st.warning("Nogle planlagte kampe mangler rundedata.")
-        else:
-            st.success("Alle nødvendige rundedata er tilgængelige.")
-        st.table(pd.DataFrame(rows), border="horizontal")
+            st.warning("Mangler data til en eller flere planlagte kampe.")
+        if has_in_progress:
+            st.warning(
+                "Runde i gang. Data vises, men turneringspoint gives ikke, "
+                "f\u00f8r runden er afsluttet og hentet igen."
+            )
+        if has_unknown:
+            st.warning(
+                "Rundestatus ukendt. Data vises, men turneringspoint holdes "
+                "tilbage, indtil en manuel genhentning bekr\u00e6fter runden."
+            )
+        if not pending:
+            st.success("Alle n\u00f8dvendige runder er komplette.")
+        st.table(pd.DataFrame(status_rows), border="horizontal")
 
 
 def _tournament_view(
@@ -1715,7 +2024,7 @@ def _tournament_view(
         f'<div style="height:6px;border-radius:6px;background:{color};margin-bottom:1rem"></div>',
         unsafe_allow_html=True,
     )
-    st.title(group.name)
+    st.title(group.name, anchor=f"gruppe-{group.group_id}")
     st.caption(f"{group.game.slug} · Turnering · {len(group.teams)} faste hold")
 
     round_key = f"tournament-round-{group.group_id}"
@@ -1963,8 +2272,25 @@ def _render_team_snapshot(
     located = index.summary_for(team.reference.game, team.reference.team_id, round_number)
     summary = located[1] if located else None
     roster_snapshot = index.roster_for(team.reference.game, team.reference.team_id, round_number)
-    st.title(team.team_name)
+    st.title(team.team_name, anchor=f"hold-{team.reference.team_id}")
     st.caption(caption or f"{team.owner_name} · {team.reference.game.slug} · runde {round_number}")
+    status_text = _local_data_status(
+        located[0].generated_at if located is not None else snapshot.generated_at,
+        round_number,
+        None if summary is None else summary.round_status,
+    )
+    if summary is not None and summary.round_status == "complete":
+        st.caption(status_text)
+    elif summary is not None and summary.round_status == "in_progress":
+        st.warning(
+            f"{status_text}. Data vises, men giver ikke turneringspoint, "
+            "f\u00f8r runden er afsluttet og hentet igen."
+        )
+    elif summary is not None:
+        st.warning(
+            f"{status_text}. Hent holdet igen for at bekr\u00e6fte runden; "
+            "turneringspoint holdes tilbage."
+        )
     overview_tab, roster_tab, history_tab, export_tab = st.tabs(
         ("Overblik", "Holdopstilling", "Historik", "Eksport"),
         key=f"team-tabs-{team.reference.game.slug}-{team.reference.team_id}",
@@ -2074,9 +2400,14 @@ def _team_statistics_panel(
     selected = locked_reference or st.selectbox(
         "Hold",
         ordered,
+        index=None,
+        placeholder="V\u00e6lg et hold",
         format_func=lambda item: f"{item.team_name} — {item.account_label} (ID {item.team_id})",
         key=f"team-statistics-choice-{game.locale}-{game.slug}",
     )
+    if selected is None:
+        st.info("V\u00e6lg et hold for at se holdstatistik.")
+        return
     newest = index.newest(game, selected.team_id)
     error_key = _team_error_key(selected)
     error = st.session_state.get("team_statistics_errors", {}).get(error_key)
@@ -2093,7 +2424,7 @@ def _team_statistics_panel(
         if st.button(label, type="primary", key=f"fetch-team-{game.slug}-{selected.team_id}"):
             _fetch_team_statistics(selected)
     if newest is None:
-        st.info("Der findes endnu intet gemt teamsnapshot for holdet.")
+        st.info(_local_data_status(None))
         return
     _render_team_snapshot(newest, index, default_round=default_round, caption=caption)
 
@@ -2114,7 +2445,7 @@ def _standalone_team_statistics(
     groups: tuple[GroupDefinition, ...],
     index: SnapshotIndex,
 ) -> None:
-    st.title("Holdstatistik")
+    st.title("Holdstatistik", anchor="holdstatistik")
     st.caption("Vælg et gemt spil, eller indtast en Holdet-URL eller slug. Spillet bliver ikke føjet til Mine managerspil.")
     known: dict[tuple[str, str], tuple[GameUrl, str]] = {
         game.identity: (game.game, game.name) for game in games
@@ -2122,8 +2453,18 @@ def _standalone_team_statistics(
     for snapshot in index.snapshots:
         game = snapshot.team.reference.game
         known.setdefault(_game_identity(game), (game, game.slug))
-    suggestions = [item[0].slug if item[0].locale.casefold() == "da" else _canonical_game_url(item[0]) for item in sorted(known.values(), key=_game_label_sort_key)]
-    source = st.selectbox("Managerspil", suggestions, accept_new_options=True, key="standalone-team-game")
+    sorted_known = sorted(known.values(), key=_game_label_sort_key)
+    option_values = [item[0].original for item in sorted_known]
+    option_labels = {item[0].original: item[1] for item in sorted_known}
+    source = st.selectbox(
+        "Managerspil",
+        option_values,
+        index=None,
+        accept_new_options=True,
+        placeholder="V\u00e6lg et spil, eller indtast URL/slug",
+        format_func=lambda value: option_labels.get(value, value),
+        key="standalone-team-game",
+    )
     if not source:
         st.info("Vælg eller indtast et managerspil.")
         return
@@ -2544,7 +2885,7 @@ def _manage_game(
                         f"{unique_count} hold · top {preview_config.knockout_size} "
                         f"går videre · gruppespil runde {start_round}–"
                         f"{preview_config.group_end_round} · "
-                        f"{stage_count} knockoutfase(r)"
+                        f"{count_label(stage_count, 'knockoutfase', 'knockoutfaser')}"
                     )
                     if unique_count == 2:
                         st.warning(
@@ -2642,7 +2983,8 @@ def _manage_game(
                     f"Aktiv revision {group.active_revision} · runde "
                     f"{group.tournament.start_round}–{group.tournament.final_round} · "
                     f"top {group.tournament.knockout_size} · "
-                    f"{group.tournament.rounds_per_tie} runde(r) pr. opgør"
+                    f"{count_label(group.tournament.rounds_per_tie, 'runde', 'runder')} "
+                    "pr. opgør"
                 )
                 st.caption(
                     "Lodtrækningsseed: "

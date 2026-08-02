@@ -8,6 +8,7 @@ import random
 import secrets
 from typing import Callable, TYPE_CHECKING
 
+from ._formatting import count_label
 from .errors import PayloadError
 from .models import GameUrl
 from .storage import SnapshotIndex
@@ -335,7 +336,10 @@ def _change(
     snapshots: SnapshotIndex, game: GameUrl, team_id: int, round_number: int
 ) -> int | None:
     located = snapshots.summary_for(game, team_id, round_number)
-    return located[1].change if located is not None else None
+    if located is None:
+        return None
+    summary = located[1]
+    return summary.change if summary.round_status == "complete" else None
 
 
 def _group_results(group: GroupDefinition, snapshots: SnapshotIndex, as_of_round: int):
@@ -567,13 +571,19 @@ def build_tournament_state(
         if match.fixture.round_number <= as_of and not match.complete
     ]
     if missing_group:
-        warnings.append(f"{len(missing_group)} gruppespilskamp(e) afventer rundedata")
+        warnings.append(
+            f"{count_label(len(missing_group), 'gruppespilskamp', 'gruppespilskampe')} "
+            "afventer rundedata"
+        )
     missing_knockout = [
         match for match in knockout
         if match.round_numbers[-1] <= as_of and not match.complete
     ]
     if missing_knockout:
-        warnings.append(f"{len(missing_knockout)} knockoutkamp(e) afventer rundedata")
+        warnings.append(
+            f"{count_label(len(missing_knockout), 'knockoutkamp', 'knockoutkampe')} "
+            "afventer rundedata"
+        )
     if champion is not None:
         phase = "Afsluttet"
     elif as_of < group.tournament.start_round:

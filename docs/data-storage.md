@@ -89,7 +89,9 @@ Præcedensen er specifikt CLI-argument, samlet CLI-root, specifik miljøvariabel
 
 ## Schemaer og kompatibilitet
 
-Produktversionen `0.1.0` er uafhængig af lokale dataformater. Aktuelt bruges blandt andet gruppekonfiguration schema 7, teamsnapshot schema 1 og spillersnapshot schema 2. Læsere accepterer dokumenterede ældre schemaer, når data kan fortolkes sikkert, men omskriver dem ikke ved opstart.
+Produktversionen `0.1.0` er uafhængig af lokale dataformater. Aktuelt bruges blandt andet gruppekonfiguration schema 7, teamsnapshot schema 2 og spillersnapshot schema 3.
+
+Nye spiller- og teamsnapshots gemmer rundestatus og rundens officielle sluttid. Ældre kompatible snapshots indlæses som `unknown`, omskrives ikke ved opstart og kan vises, men de giver ikke turneringspoint før en manuel genhentning har bekræftet runden som `complete`.
 
 Gamle cykelsnapshots uden en sikker enhed kan kræve en ny hentning. Defekte eller inkompatible snapshots ignoreres med en synlig advarsel frem for at stoppe hele dashboardet.
 

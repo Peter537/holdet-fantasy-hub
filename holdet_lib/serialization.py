@@ -4,12 +4,13 @@ from __future__ import annotations
 
 from datetime import datetime
 import json
-from typing import Any
+from typing import Any, cast
 
 from .errors import PayloadError
 from .models import (
     GameUrl,
     RosterEntry,
+    RoundStatus,
     RoundSummary,
     ScrapedTeam,
     TeamOverview,
@@ -18,7 +19,7 @@ from .models import (
 from .output import team_to_dict
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def team_to_json(team: ScrapedTeam, *, generated_at: datetime) -> str:
@@ -59,10 +60,43 @@ def _text(value: object, label: str, *, optional: bool = False) -> str | None:
     return value
 
 
-def _round_from_dict(raw: object) -> RoundSummary:
+def _round_status(value: object, label: str) -> RoundStatus:
+    if value not in {"complete", "in_progress", "unknown"}:
+        raise PayloadError(f"snapshot {label} has an invalid round status")
+    return cast(RoundStatus, value)
+
+
+def _datetime(
+    value: object, label: str, *, optional: bool = False
+) -> datetime | None:
+    if value is None and optional:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise PayloadError(f"snapshot {label} must be an ISO timestamp")
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise PayloadError(f"snapshot {label} must be an ISO timestamp") from exc
+
+
+def _round_from_dict(raw: object, *, schema_version: int) -> RoundSummary:
     item = _object(raw, "history item")
     return RoundSummary(
         round_number=_integer(item.get("round"), "history.round"),
+        round_status=(
+            _round_status(item.get("round_status"), "history.round_status")
+            if schema_version >= 2
+            else "unknown"
+        ),
+        round_end_at=(
+            _datetime(
+                item.get("round_end_at"),
+                "history.round_end_at",
+                optional=True,
+            )
+            if schema_version >= 2
+            else None
+        ),
         total=_integer(item.get("total"), "history.total"),
         change=_integer(item.get("change"), "history.change"),
         bank=_integer(item.get("bank"), "history.bank", optional=True),
@@ -128,12 +162,13 @@ def _roster_from_dict(raw: object) -> RosterEntry:
 
 
 def team_from_dict(payload: object) -> ScrapedTeam:
-    """Deserialize and validate a compatible schema-version 1 snapshot."""
+    """Deserialize and validate a compatible team snapshot."""
 
     root = _object(payload, "root")
-    if root.get("schema_version") != SCHEMA_VERSION:
+    schema_version = root.get("schema_version")
+    if schema_version not in {1, SCHEMA_VERSION}:
         raise PayloadError(
-            f"unsupported team snapshot schema: {root.get('schema_version')!r}"
+            f"unsupported team snapshot schema: {schema_version!r}"
         )
     source = _object(root.get("source"), "source")
     game_data = _object(root.get("game"), "game")
@@ -191,7 +226,11 @@ def team_from_dict(payload: object) -> ScrapedTeam:
         ),
     )
     roster = tuple(_roster_from_dict(item) for item in _list(root.get("roster"), "roster"))
-    history = tuple(_round_from_dict(item) for item in _list(root.get("history"), "history"))
+    assert isinstance(schema_version, int)
+    history = tuple(
+        _round_from_dict(item, schema_version=schema_version)
+        for item in _list(root.get("history"), "history")
+    )
     return ScrapedTeam(
         reference=reference,
         variant=_text(game_data.get("variant"), "game.variant"),
