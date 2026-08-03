@@ -205,6 +205,7 @@ class DashboardTests(unittest.TestCase):
                 "Menuspil",
                 "Undergruppe",
                 "Arkiverede managerspil",
+                "Hall of Fame",
                 "Data og lager",
             ],
         )
@@ -477,6 +478,13 @@ class DashboardTests(unittest.TestCase):
             app = AppTest.from_file(APP_PATH).run(timeout=15)
             self.assertFalse(app.exception)
             self.assertTrue(any("Mine managerspil" in item.value for item in app.markdown))
+            self.assertFalse(
+                any(item.value == "Rundecenter" for item in (*app.title, *app.subheader))
+            )
+            tools_heading = "V" + chr(0xC6) + "RKT" + chr(0xD8) + "JER"
+            self.assertFalse(
+                any(tools_heading in item.value for item in app.markdown)
+            )
             labels = [item.label for item in app.button]
             self.assertIn("Mine managerspil", labels)
             self.assertNotIn("Hjem", labels)
@@ -502,18 +510,26 @@ class DashboardTests(unittest.TestCase):
                 )
             )
             self.assertFalse(
-                any("Brug Administrer grupper" in item.value for item in app.caption)
+                any("Brug Administration" in item.value for item in app.caption)
             )
             navigate(app, "game", locale=team.reference.game.locale, game=team.reference.game.slug)
             self.assertTrue(any(item.value == "Tourspillet 2026" for item in app.title))
             self.assertEqual(
                 [item.label for item in app.tabs],
-                ["Grupper", "Spillerstatistik", "Holdstatistik", "Administrer grupper", "Spilindstillinger"],
+                [
+                    "Rundecenter",
+                    "Grupper",
+                    "Spillerstatistik",
+                    "Holdstatistik",
+                    "Historik",
+                    "Administration",
+                    "Indstillinger",
+                ],
             )
             self.assertFalse(any(item.label == "Tilbage til forsiden" for item in app.button))
-            self.assertFalse(any(item.label == "Administrer grupper" for item in app.button))
-            self.assertFalse(any(item.label == "Spilindstillinger" for item in app.expander))
-            select_game_tab(app, team.reference.game, "Administrer grupper")
+            self.assertFalse(any(item.label == "Administration" for item in app.button))
+            self.assertFalse(any(item.label == "Indstillinger" for item in app.expander))
+            select_game_tab(app, team.reference.game, "Administration")
             self.assertTrue(
                 any(
                     str(team.reference.team_id) in option
@@ -527,7 +543,7 @@ class DashboardTests(unittest.TestCase):
                 if item.label.startswith("Direkte fantasy-team")
             ).input(str(team.reference.team_id))
             button(app, "Opret gruppe").click()
-            select_game_tab(app, team.reference.game, "Administrer grupper")
+            select_game_tab(app, team.reference.game, "Administration")
             groups = holdet.GroupStore(config / "groups.json").load()
             self.assertEqual(len(groups), 1)
             self.assertEqual(groups[0].name, "Tour venner")
@@ -563,14 +579,14 @@ class DashboardTests(unittest.TestCase):
                     app, "game", locale=manager_game.game.locale,
                     game=manager_game.game.slug,
                 )
-                select_game_tab(app, manager_game.game, "Spilindstillinger")
+                select_game_tab(app, manager_game.game, "Indstillinger")
                 button(app, "Arkiv" + chr(0xE9) + "r managerspil").click()
-                select_game_tab(app, manager_game.game, "Spilindstillinger")
+                select_game_tab(app, manager_game.game, "Indstillinger")
                 self.assertTrue(
                     any("data bevares" in item.value for item in app.warning)
                 )
                 button(app, "Bekr" + chr(0xE6) + "ft arkivering").click()
-                select_game_tab(app, manager_game.game, "Spilindstillinger")
+                select_game_tab(app, manager_game.game, "Indstillinger")
                 archived = store.load_configuration().games[0]
                 self.assertTrue(archived.is_archived)
                 self.assertEqual(store.load(), (group,))
@@ -609,11 +625,11 @@ class DashboardTests(unittest.TestCase):
                     any("er arkiveret" in item.value for item in app.warning)
                 )
                 self.assertTrue(button(app, "Opdater managerspil").disabled)
-                select_game_tab(app, manager_game.game, "Administrer grupper")
+                select_game_tab(app, manager_game.game, "Administration")
                 self.assertTrue(
                     any("skrivebeskyttet" in item.value for item in app.info)
                 )
-                select_game_tab(app, manager_game.game, "Spilindstillinger")
+                select_game_tab(app, manager_game.game, "Indstillinger")
                 self.assertTrue(
                     any("skrivebeskyttede" in item.value for item in app.info)
                 )
@@ -702,10 +718,10 @@ class DashboardTests(unittest.TestCase):
                 self.assertEqual(configuration.groups, ())
                 self.assertEqual(configuration.games[0].game.locale, "da")
 
-                select_game_tab(app, configuration.games[0].game, "Spilindstillinger")
+                select_game_tab(app, configuration.games[0].game, "Indstillinger")
                 widget(app, "text_input", "Visningsnavn").input("Nyt navn")
                 button(app, "Gem navn").click()
-                select_game_tab(app, configuration.games[0].game, "Spilindstillinger")
+                select_game_tab(app, configuration.games[0].game, "Indstillinger")
                 self.assertEqual(
                     holdet.GroupStore(config / "groups.json")
                     .load_configuration().games[0].name,
@@ -728,7 +744,15 @@ class DashboardTests(unittest.TestCase):
 
             self.assertFalse(app.exception)
             self.assertTrue(any(item.value == "Data og lager" for item in app.title))
-            self.assertEqual([item.label for item in app.tabs], ["Gemte konti", "Lagerplaceringer"])
+            self.assertEqual(
+                [item.label for item in app.tabs],
+                [
+                    "Gemte konti",
+                    "Datastatus",
+                    "Lagerplaceringer",
+                    "Backup og gendannelse",
+                ],
+            )
             app.session_state["data-storage-tabs"] = "Lagerplaceringer"
             app.run(timeout=15)
             displayed = {item.value for item in app.code}
@@ -893,10 +917,10 @@ class DashboardTests(unittest.TestCase):
                 self.assertEqual(fake.calls, [])
                 navigate(app, "game", locale=game.locale, game=game.slug)
                 self.assertEqual(fake.calls, [])
-                select_game_tab(app, game, "Administrer grupper")
+                select_game_tab(app, game, "Administration")
                 self.assertEqual(fake.calls, [])
                 button(app, "Find hold på konfigurerede konti").click()
-                select_game_tab(app, game, "Administrer grupper")
+                select_game_tab(app, game, "Administration")
 
                 self.assertEqual(fake.calls, ["konto-a", "konto-b", "konto-c"])
                 self.assertTrue(
@@ -910,7 +934,7 @@ class DashboardTests(unittest.TestCase):
                 choices.select("da:super-manager-fall-2026:777")
                 widget(app, "text_input", "Gruppenavn").input("Opdaget gruppe")
                 button(app, "Opret gruppe").click()
-                select_game_tab(app, game, "Administrer grupper")
+                select_game_tab(app, game, "Administration")
 
             group = holdet.GroupStore(config / "groups.json").load()[0]
             self.assertEqual(len(group.teams), 1)
@@ -949,7 +973,7 @@ class DashboardTests(unittest.TestCase):
                 navigate(app, "group", group=group.group_id)
                 self.assertFalse(app.exception)
                 self.assertTrue(any(item.value == group.name for item in app.title))
-                self.assertEqual({item.value for item in app.radio}, {"Overall"})
+                self.assertEqual({item.value for item in app.segmented_control}, {"Overall"})
                 expected_columns = [
                     "Rang", "Manager", "Hold", "Værdi",
                     "Vækst", "Afstand", "Hold-ID",
@@ -963,8 +987,8 @@ class DashboardTests(unittest.TestCase):
                         {"Hold": "Beta", "Værdi": 400, "Vækst": 30, "Afstand": -100},
                     ],
                 )
-                app.radio[0].set_value("Runde").run(timeout=15)
-                self.assertEqual(app.radio[0].value, "Runde")
+                app.segmented_control[0].set_value("Runde").run(timeout=15)
+                self.assertEqual(app.segmented_control[0].value, "Runde")
                 self.assertEqual(len(app.dataframe), 1)
                 self.assertTrue(app.dataframe[0].key.startswith("standing-"))
                 round_frame = app.dataframe[0].value

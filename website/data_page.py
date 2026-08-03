@@ -13,6 +13,7 @@ from holdet_lib.groups import GroupDefinition, GroupStore, HubConfiguration
 from holdet_lib.models import AccountConfig
 from holdet_lib.paths import AppPaths, open_in_explorer
 from holdet_lib.storage import SnapshotIndex
+from website.hub_pages import backup_view, data_quality_panel
 
 def _clear_account_discovery_cache() -> None:
     st.session_state.pop("discovered_teams", None)
@@ -261,6 +262,36 @@ def _saved_accounts_tab(
             st.rerun()
 
 
+
+
+def _data_tabs():
+    labels = (
+        "Gemte konti",
+        "Datastatus",
+        "Lagerplaceringer",
+        "Backup og gendannelse",
+    )
+    slugs = ("accounts", "quality", "locations", "backup")
+    key = "data-storage-tabs"
+    requested = str(st.query_params.get("section", ""))
+    desired = labels[slugs.index(requested)] if requested in slugs else labels[0]
+    if (
+        requested in slugs
+        or key not in st.session_state
+        or st.session_state[key] not in labels
+    ):
+        st.session_state[key] = desired
+
+    def sync_tab() -> None:
+        selected = st.session_state[key]
+        st.query_params["section"] = slugs[labels.index(selected)]
+
+    return st.tabs(
+        labels,
+        default=st.session_state[key],
+        key=key,
+        on_change=sync_tab,
+    )
 def data_storage_view(
     account_store: AccountStore,
     group_store: GroupStore,
@@ -270,8 +301,7 @@ def data_storage_view(
 ) -> None:
     st.title("Data og lager", anchor="data-og-lager")
     st.caption(
-        "Administrer gemte Holdet-konti og se, hvor Holdet Fantasy Hub "
-        "opbevarer lokale data."
+        "Konti, datastatus, lagerplaceringer og en samlet backup af Hubben."
     )
     try:
         accounts: tuple[AccountConfig, ...] | None = account_store.load()
@@ -280,17 +310,22 @@ def data_storage_view(
         accounts = None
         account_error = str(exc)
 
-    metrics = st.columns(4)
-    metrics[0].metric("Gemte konti", len(accounts) if accounts is not None else "–")
-    metrics[1].metric("Managerspil", len(configuration.games))
-    metrics[2].metric("Grupper", len(configuration.groups))
-    metrics[3].metric("Teamsnapshots", len(index.snapshots))
+    with st.container(horizontal=True):
+        st.metric(
+            "Gemte konti",
+            len(accounts) if accounts is not None else "–",
+            border=True,
+        )
+        st.metric("Managerspil", len(configuration.games), border=True)
+        st.metric("Grupper", len(configuration.groups), border=True)
+        st.metric("Teamsnapshots", len(index.snapshots), border=True)
 
-    accounts_tab, locations_tab = st.tabs(
-        ("Gemte konti", "Lagerplaceringer"),
-        key="data-storage-tabs",
-        on_change="rerun",
-    )
+    (
+        accounts_tab,
+        quality_tab,
+        locations_tab,
+        backup_tab,
+    ) = _data_tabs()
     if accounts_tab.open:
         with accounts_tab:
             _saved_accounts_tab(
@@ -300,7 +335,22 @@ def data_storage_view(
                 configuration.groups,
                 account_error,
             )
+    if quality_tab.open:
+        with quality_tab:
+            st.subheader("Datastatus")
+            st.caption(
+                "Se om de lokale data kan bruges, hvad der mangler, og hvor "
+                "du kan opdatere manuelt."
+            )
+            data_quality_panel(
+                configuration.games,
+                configuration.groups,
+                index,
+                app_paths,
+            )
     if locations_tab.open:
         with locations_tab:
             _storage_locations_tab(app_paths)
-
+    if backup_tab.open:
+        with backup_tab:
+            backup_view(app_paths)

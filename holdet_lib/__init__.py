@@ -181,6 +181,77 @@ from .teams import (
     round_status_for,
     select_accounts,
 )
+from .analytics import (
+    DataQualityReport,
+    DataQualityRound,
+    HistoryPoint,
+    PlayerHistoryPoint,
+    PlayerSnapshotChange,
+    SnapshotDiff,
+    TeamRankChange,
+    TeamSnapshotDiff,
+    build_data_quality_report,
+    build_history_series,
+    build_player_history,
+    compare_round_snapshots,
+    compare_snapshots,
+    compare_team_rounds,
+    compare_team_snapshots,
+    latest_snapshot_diff,
+)
+from .backup import (
+    BACKUP_SCHEMA_VERSION,
+    BackupManifest,
+    BackupManifestEntry,
+    BackupValidation,
+    RestoreResult,
+    create_backup,
+    create_backup_bytes,
+    restore_backup,
+    validate_backup,
+)
+from .game_metadata import (
+    GAME_METADATA_SCHEMA_VERSION,
+    GameMetadata,
+    GameMetadataStore,
+    game_metadata_from_context,
+)
+from .hall_of_fame import (
+    HALL_OF_FAME_EVENT_SCHEMA_VERSION,
+    HallOfFame,
+    HallOfFameEvent,
+    HallOfFamePlacement,
+    HallOfFameRow,
+    HallOfFameStore,
+    build_hall_of_fame,
+    build_live_hall_of_fame_events,
+)
+from .hub_settings import (
+    HUB_SETTINGS_SCHEMA_VERSION,
+    HallOfFameScoreProfile,
+    HubSettings,
+    HubSettingsStore,
+    ManagerAlias,
+    WatchlistEntry,
+    manager_identity_keys,
+    player_identity,
+    resolve_manager_identity,
+    watchlist_entry,
+)
+from .transfers import (
+    CYCLING_RULES,
+    FOOTBALL_RULES,
+    GOLF_RULES,
+    MOTOR_RULES,
+    UNKNOWN_RULES,
+    ScenarioPlayer,
+    TransferRuleProfile,
+    TransferScenario,
+    TransferValidation,
+    simulate_transfers,
+    transfer_rule_profile,
+)
+
 from .version import VERSION
 
 __all__ = [
@@ -202,5 +273,23 @@ __all__ = [
     "normalize_manager_game", "player_statistics_from_dict",
     "player_statistics_to_dict", "player_statistics_to_json", "refresh_game",
     "refresh_group", "resolve_paths", "serialize_player_export",
+    "BackupManifest", "BackupManifestEntry", "BackupValidation",
+    "RestoreResult", "DataQualityReport", "DataQualityRound", "HistoryPoint",
+    "PlayerHistoryPoint", "PlayerSnapshotChange", "SnapshotDiff",
+    "TeamRankChange", "TeamSnapshotDiff", "GameMetadata", "GameMetadataStore",
+    "HubSettings", "HubSettingsStore", "ManagerAlias", "WatchlistEntry",
+    "HallOfFame", "HallOfFameEvent", "HallOfFamePlacement", "HallOfFameRow",
+    "HallOfFameScoreProfile", "HallOfFameStore", "ScenarioPlayer",
+    "TransferRuleProfile", "TransferScenario", "TransferValidation",
+    "CYCLING_RULES", "FOOTBALL_RULES", "GOLF_RULES", "MOTOR_RULES",
+    "UNKNOWN_RULES", "build_data_quality_report", "build_hall_of_fame",
+    "build_history_series", "build_live_hall_of_fame_events",
+    "build_player_history", "compare_round_snapshots", "compare_snapshots",
+    "compare_team_rounds", "compare_team_snapshots", "create_backup",
+    "create_backup_bytes", "game_metadata_from_context", "latest_snapshot_diff",
+    "manager_identity_keys", "player_identity", "resolve_manager_identity",
+    "restore_backup", "simulate_transfers", "transfer_rule_profile",
+    "validate_backup", "watchlist_entry",
+
     "serialize_team_export", "team_from_dict", "team_to_json",
 ]

@@ -1,65 +1,62 @@
 # Tests
 
-Projektet bruger kun standardbibliotekets `unittest` til sin testsuite. Streamlit følger med website-extraen og bruges af `streamlit.testing.v1`-testene.
+Pytest er projektets autoritative test runner. Suiten indeholder både unittest-baserede klasser, pytest-funktioner og Streamlit AppTest-scenarier; pytest samler dem alle. Den tidligere discovery-kommando overså de pytest-baserede Hub-tests og må derfor ikke bruges som fuld suite.
 
-## Komplet lokal suite
+## Installation og komplet suite
 
-Installer først projektet med website-afhængigheden, og kør derefter fra repositoryets rod:
-
-```powershell
-py -3.14 -m pip install -e ".[website]"
-```
+Installer website- og testafhængigheder fra repositoryets rod:
 
 ```powershell
-py -3.14 -m unittest discover -s tests -v
+py -3.14 -m pip install -e ".[website,test]"
 ```
 
-De almindelige tests må ikke kontakte Holdet.dk. HTTP-svar leveres af små lokale fixtures eller injicerede fetch-funktioner, og filesystemtests bruger test-ejede midlertidige mapper.
+Kør derefter hele suiten:
+
+```powershell
+py -3.14 -m pytest tests -q
+```
+
+De almindelige tests må ikke kontakte Holdet.dk. HTTP-svar kommer fra lokale fixtures eller injicerede fetch-funktioner, og filesystemtests bruger test-ejede midlertidige `AppPaths`.
 
 ## Live-smoke-tests
 
-Live-tests er opt-in og kontakter Holdets offentlige endpoints:
+Den ene eksisterende live-test er opt-in og kontakter offentlige Holdet-endpoints:
 
 ```powershell
-$env:HOLDET_LIVE_TESTS="1"; py -3.14 -m unittest discover -s tests -v
+$env:HOLDET_LIVE_TESTS="1"; py -3.14 -m pytest tests -q
 ```
 
-De kontrollerer aktuelle offentlige spillerpayloads for fodbold, pengebaseret og pointbaseret cykling, Motor Manager og Golf Manager. De afhænger ikke af private profiler eller fantasyhold og antager ikke ustabile, eksakte spillerantal.
-
-Fjern miljøvariablen igen i den aktuelle PowerShell-session med:
+Fjern miljøvariablen igen:
 
 ```powershell
 Remove-Item Env:HOLDET_LIVE_TESTS
 ```
 
+Live-testen afhænger ikke af private profiler eller fantasyhold og antager ikke ustabile eksakte spillerantal.
+
 ## Testområder
 
 | Område | Eksempler på dækning |
 | --- | --- |
-| URL og parsere | Normalisering, Flight-dekodning, payloadvalidering og Unicode |
-| HTTP | Retries, HTTP-statusser, connection refused, proxyregistrering og redaction |
-| Spillere | Formater, enheder, runder, filtre, statusser og sortering |
-| Hold | Kontoopdagelse, roster, historik, ranks og inkonsistente værdier |
-| Lagring | AppData-overrides, atomiske writes, snapshots, manifester og kollisioner |
-| Eksport | TXT, JSON, Markdown, scopes, metadata og identiske downloadbytes |
-| Grupper | Schema-kompatibilitet, managerspil, arkivering og refresh |
+| URL, parsere og HTTP | Normalisering, Flight-dekodning, payloadvalidering, retries, proxy og redaction |
+| Spillere | Formater, enheder, filtre, watchlist-identitet, 2–5 sammenligninger og round-aware diffing |
+| Hold | Kontoopdagelse, roster, historik, rang, gruppeplacering og ændringer |
+| Transfer | Fire regelprofiler, gebyr, kontrakter, formation, klubgrænser, kaptajnregler og `final`/`preliminary`/`unverified` |
+| Historik | Huller, seneste snapshot pr. runde og omvendte rangakser på spil-, gruppe- og holdniveau |
+| Hall of Fame | Ties, managerdeduplikering, aliaser, redigerbare point og idempotent frysning |
+| Lagring og backup | AppData, atomiske writes, schemaer, SHA-256, path traversal, preview, staging og rollback |
 | Turnering | Fairness, draw seed, revisioner, bracket, H2H og historisk genberegning |
-| Dashboard | Offline opstart, navigation, dialogs, cache, fejl og eksplicitte handlinger |
-| Dokumentation | Links, kommandoformer, Mermaid-hegn, filnavne og privacy-regler |
+| Dashboard | Kontekstuelle deeplinks, tomme tilstande, cache-only navigation og fravær af globale værktøjsroutes |
+| Dokumentation og API | Links, Mermaid-hegn, kommandoer, AppData-stier, `holdet_lib.__all__` og evaluerbare type hints |
+
+## Streamlit AppTest
+
+AppTest åbner hovedroutes og query-parametre uden en virkelig server. Tests beviser blandt andet, at forsiden ikke indeholder Rundecenter, at sidebaren ikke har Værktøjer, og at Data og lager indeholder Datastatus og Backup og gendannelse. Navigation og transfersimulation må hverken kalde netværk eller skrive persistent data.
 
 ## Fixtures og privatliv
 
-Tests må ikke læse repositoryets tidligere `/config` eller en brugers AppData. Konfiguration oprettes direkte i en midlertidig mappe eller som dataclasses.
-
-Fiktive identiteter skal bruges til:
-
-- kontonavne og tekniske nøgler;
-- profil- og bruger-ID'er;
-- fantasy-team-ID'er og holdnavne;
-- outputstier afledt af konti eller hold.
-
-Offentlige sportsnavne i spillerfixtures er tilladt, fordi de ikke repræsenterer brugerens profiler eller fantasyhold. Fiktive URL'er bruges kun som parserinput og må aldrig hentes i en lokal test.
+Tests læser ikke brugerens AppData eller repositoryets tidligere `/config`. Konfiguration, snapshots og backuptræer oprettes i midlertidige mapper. Konto-, profil-, bruger- og fantasy-team-identiteter skal være fiktive; offentlige sportsnavne må bruges som parserfixtures.
 
 ## Sideeffektfrihed
 
-Tests skal særskilt bevise, at import, stiresolution, cacheindeksering og almindelig dashboardnavigation ikke opretter mapper, skriver filer eller starter netværkskald. Kun eksplicitte save-, export-, discovery- og fetch-handlinger må have de respektive sideeffekter.
+Import, `resolve_paths()`, cacheindeksering, type-hint-evaluering og almindelig dashboardnavigation må ikke oprette mapper, skrive filer eller starte netværkskald. Kun eksplicitte save-, export-, backup-, restore-, discovery- og fetch-handlinger må have deres respektive sideeffekter.

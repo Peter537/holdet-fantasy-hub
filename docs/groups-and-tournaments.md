@@ -4,29 +4,31 @@ Dashboardets hierarki er `Managerspil → Gruppe → Hold`. Et managerspil kan h
 
 ## Managerspil
 
-Et managerspil identificeres af locale og slug og har et redigerbart visningsnavn. Det kan oprettes fra en Holdet-URL eller en bar slug uden netværkskald. **Hent spilinfo** kan senere hente det officielle navn og den autoritative finalerunde; det officielle navn overskriver aldrig automatisk brugerens navn.
+Et managerspil identificeres af locale og slug og har et redigerbart navn. Det kan oprettes uden netværk. **Hent spilinfo** gemmer senere officielt navn, schedule, deadlines og autoritativ finalerunde, men overskriver ikke automatisk brugerens navn.
 
-Et managerspil kan arkiveres uden at flytte eller slette grupper, snapshots, manifester eller eksporter. Arkiverede spil er skrivebeskyttede i deres normale visninger og kan gendannes fra managerspillets hovedside.
+Rundecenter er managerspillets første fane. De øvrige er Grupper, Spillerstatistik, Holdstatistik, Historik, Administration og Indstillinger. Managerspillets Historik sammenligner holdtrends og kan filtreres til en gruppe. Arkivering flytter eller sletter ikke grupper, snapshots, manifester, metadata eller Hall of Fame-resultater.
 
-## Gruppestilling
+## Almindelige grupper
 
-En Gruppestilling har faste medlemmer, som senere kan tilføjes eller fjernes. Den historiske rundevælger bruger den nuværende medlemsliste og nyeste gyldige rundesammendrag.
+En almindelig gruppe har fanerne **Stilling** og **Historik**. Historikken genbruger gruppens managerspil og medlemmer uden nye vælgere og viser værdi/point, rundevækst og grupperang. Manglende runder forbliver huller, og rangaksen vender førsteplads øverst.
 
-Tabellen viser altid `Rang · Manager · Hold · Værdi · Vækst · Afstand`:
+Stillingen viser `Rang · Manager · Hold · Værdi · Vækst · Afstand`:
 
-- **Overall** rangerer efter round-ending total; afstand er forskellen til totallederen.
+- **Overall** rangerer efter rundens sluttotal; afstand er forskellen til totallederen.
 - **Runde** rangerer efter rundens ændring; afstand er forskellen til rundelederen.
 
 Competition ranking bruges ved ties, og holdnavn er den deterministiske sekundære sortering.
 
-## Turneringsforløb
+## Turneringer
+
+Turneringer har fanerne **Overblik**, **Gruppestilling**, **Kampe**, **Knockout** og **Historik**.
 
 ```mermaid
 flowchart LR
     Create["Opret turnering\nmed faste rammer"] --> Draw["Seedet round-robin-plan"]
     Draw --> Group["Gruppespil\n3/1/0 point"]
     Group --> Seed["Seed top 2/4/8/16/32"]
-    Seed --> Knockout["Knockout\n1 eller 2 runder pr. opgør"]
+    Seed --> Knockout["Visuel knockout-bracket"]
     Knockout --> Champion["Mester"]
     Edit["Ændr deltagere eller finalerunde"] --> Archive["Arkivér aktiv revision"]
     Archive --> Draw
@@ -34,36 +36,36 @@ flowchart LR
     Recalculate --> Group
 ```
 
-### Kalender og felt
+Turneringen kræver mindst to hold, positiv startrunde og én eller to Holdet-runder pr. knockoutopgør. Knockoutfeltet er den største 2-potens, som ikke overstiger deltagerantallet, dog højst 32. Der skal være mindst én gruppespilsrunde.
 
-Turneringen kræver mindst to hold, en positiv startrunde og én eller to Holdet-runder pr. knockoutopgør. Finalerunden kommer fra Holdets schedule. Knockoutfeltet er den største 2-potens, som ikke overstiger deltagerantallet, dog højst 32. Der skal være mindst én gruppespilsrunde før knockout.
+Circle/round-robin-planen sikrer højst én kamp pr. hold pr. runde. Samme `draw_seed`, medlemmer og rammer giver samme plan. Nye lodtrækninger får et nyt seed og undgår kendte plan-signaturer, når alternativer findes.
 
-### Lodtrækning
+En kamp giver kun point, når begge rundesammendrag er `complete`. Sejr giver 3, uafgjort 1 og nederlag 0. `in_progress`, `unknown` eller manglende data efterlader kampen afventende.
 
-Circle/round-robin-algoritmen sikrer højst én kamp pr. hold pr. Holdet-runde. En hel modstandercyklus gennemføres, før par gentages; ved ulige antal hold fordeles pauser så jævnt som muligt.
+Seedning afgøres af point, samlet rundevækst-forskel, scoret rundevækst, indbyrdes point og til sidst holdnavn/ID. To-runders knockout summerer runderne; ved lighed går højeste seed videre.
 
-Nye planer har et tilfældigt `draw_seed`. Samme seed, samme sorterede medlemmer og samme rammer giver samme plan. **Ny lodtrækning** skaber et nyt seed. Når flere planer er mulige, undgås signaturer fra tilsvarende turneringer og arkiverede revisioner i samme managerspil.
+### Visuel bracket
 
-### Resultater og seedning
+Knockout viser et responsivt, horisontalt CSS-grid med seed, deltagere, score, runde, vinder, kommende kampe og pladsholdere for senere stadier. Den bruger sanitiseret `st.html` uden JavaScript. Før gruppespillet er færdigt mærkes seeds som foreløbige. En holdvælger fremhæver holdets aktuelle eller mulige vej til finalen.
 
-En gruppespilskamp sammenligner holdenes `RoundSummary.change`, men kun når begge rundesammendrag er mærket `complete`. Sejr giver 3 point, uafgjort 1 og nederlag 0. `in_progress`, `unknown` og manglende rundedata efterlader kampen som afventende uden point, seedning eller knockoutresultat.
+Turneringen genberegnes fra nyeste gyldige snapshots. Deltager- eller finalerundeændringer arkiverer den aktive plan som en uforanderlig revision; en ren navneændring gør ikke. Under Kampe kan to deltagere sammenlignes i H2H til og med valgt runde.
 
-Seedning afgøres af:
+## Global Hall of Fame
 
-1. Point.
-2. Samlet rundevækst-forskel.
-3. Samlet scoret rundevækst.
-4. Indbyrdes point blandt fortsat lige hold.
-5. Holdnavn og hold-ID.
+Hall of Fame er en selvstændig destination på samme nederste navigationsniveau som Data og lager. Den samler resultater på tværs af alle grupper, turneringer, spil og sæsoner.
 
-Knockout bruger standard rekursiv seedning, eksempelvis `1–8`, `4–5`, `2–7`, `3–6` i et top 8-felt. To-runders opgør summerer begge runders vækst. Ved samlet lighed går højeste seed videre.
+Manageridentitet findes i rækkefølgen `owner_user_id`, `account_user_id`/kontonøgle og en tydelig fallback. Aliaser i `hub-settings.json` kan samle identiteter. Har samme manager flere hold i samme konkurrence eller runde, tæller kun det bedste resultat.
 
-### Historik, revisioner og H2H
+Standardprofilen giver:
 
-Turneringen genberegnes fra de nyeste gyldige snapshots, så Holdets historiske rettelser kan ændre seedning, bracket og mester. En deltager- eller finalerundeændring arkiverer den aktive plan som en uforanderlig revision og opretter en ny lodtrækning fra den oprindelige startrunde. En ren navneændring opretter ingen revision.
+- gruppeslutstilling top 4: 10/6/3/1;
+- turneringsvinder/finalist/tabende semifinalist: 10/6/3;
+- global rundesejr: 1.
 
-Under **Kampe** kan to deltagere sammenlignes på tværs af gruppespil og knockout til og med valgt runde. En to-runders knockout tæller som to H2H-kampe. Byes tæller ikke, og afventende kampe vises uden at påvirke statistikken.
+Turneringsgruppespil og knockout kan begge give point. Pointprofilen kan redigeres og genberegner leaderboardet uden at omskrive frosne råresultater. Visningen indeholder titler, podier, konkurrencesejrsrate, bedste runde og længste rundesejrsstreak.
+
+Live-preview kan ændre sig med cachen. Komplette resultater fryses idempotent efter en eksplicit slutrunde-refresh eller ved arkivering. Ufuldstændigt arkiverede spil bevares uden point og kan færdiggøres efter gendannelse.
 
 ## Opdatering
 
-**Opdater managerspil** deduplikerer hold på tværs af grupper. En direkte **Opdater turnering** henter alle turneringsdeltagere, også eliminerede og deltagere i en afsluttet turnering, så historiske rettelser kan genberegnes. Resultatet gemmes i snapshots og et uforanderligt manifest; delvise fejl bruger seneste gyldige cache, når den findes.
+**Opdater managerspil** deduplikerer hold på tværs af grupper. **Opdater turnering** henter alle deltagere, også eliminerede og afsluttede, så rettelser kan genberegnes. Resultatet gemmes som snapshots og et uforanderligt manifest; delvise fejl bruger seneste gyldige cache, når den findes.

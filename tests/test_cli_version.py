@@ -32,6 +32,33 @@ class VersionAndDispatchTests(unittest.TestCase):
         self.assertNotIn("HH-mm-ss-ffff", corpus)
         self.assertIn("data-round<round>_<MMDD>_<HHmmss>[_N]", corpus)
         self.assertIn("team-round<round>_<MMDD>_<HHmmss>[_N]", corpus)
+        self.assertIn('py -3.14 -m pip install -e ".[website,test]"', corpus)
+        self.assertIn("py -3.14 -m pytest tests -q", corpus)
+        self.assertNotIn("py -3.14 -m unittest discover", corpus)
+
+        required_documentation = {
+            "Rundecenter",
+            "Sammenligning og watchlist",
+            "Transferlaboratorium",
+            "Hall of Fame",
+            "Datastatus",
+            "Backup og gendannelse",
+            "hub-settings.json",
+            "data/game-metadata",
+            "data/hall-of-fame",
+            "exports/backups",
+            "compare_round_snapshots",
+            "compare_snapshots",
+            "build_history_series",
+            "simulate_transfers",
+            "build_hall_of_fame",
+            "build_data_quality_report",
+            "create_backup",
+            "validate_backup",
+            "restore_backup",
+        }
+        for expected in required_documentation:
+            self.assertIn(expected, corpus)
 
         link_pattern = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
         mermaid_blocks = 0

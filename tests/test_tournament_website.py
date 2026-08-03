@@ -34,22 +34,22 @@ class TournamentDashboardTests(unittest.TestCase):
                 )
                 app = AppTest.from_file(APP_PATH).run(timeout=15)
                 navigate(app, "game", locale=first.reference.game.locale, game=first.reference.game.slug)
-                select_game_tab(app, first.reference.game, "Administrer grupper")
+                select_game_tab(app, first.reference.game, "Administration")
                 widget(app, "segmented_control", "Gruppetype").set_value(
                     "Turnering"
                 )
-                select_game_tab(app, first.reference.game, "Administrer grupper")
+                select_game_tab(app, first.reference.game, "Administration")
                 choices = widget(app, "multiselect", "Fundne hold")
                 choices.set_value(list(choices.options))
-                select_game_tab(app, first.reference.game, "Administrer grupper")
+                select_game_tab(app, first.reference.game, "Administration")
                 client_type.return_value.fetch_game_info.return_value.final_round = 4
                 button(app, "Hent spilinfo").click()
-                select_game_tab(app, first.reference.game, "Administrer grupper")
+                select_game_tab(app, first.reference.game, "Administration")
                 widget(app, "text_input", "Gruppenavn").input("Sommercup")
                 self.assertTrue(any(item.label == "Ny lodtrækning" for item in app.button))
                 self.assertTrue(app.code)
                 button(app, "Opret gruppe").click()
-                select_game_tab(app, first.reference.game, "Administrer grupper")
+                select_game_tab(app, first.reference.game, "Administration")
 
             group = holdet.GroupStore(config / "groups.json").load()[0]
             self.assertEqual(group.kind, "tournament")
@@ -66,7 +66,7 @@ class TournamentDashboardTests(unittest.TestCase):
             self.assertTrue(any(item.value == group.name for item in app.title))
             self.assertEqual(
                 [item.label for item in app.tabs],
-                ["Overblik", "Gruppestilling", "Kampe", "Knockout"],
+                ["Overblik", "Gruppestilling", "Kampe", "Knockout", "Historik"],
             )
             self.assertEqual(
                 widget(app, "selectbox", "Vis turneringen til og med runde").value,
@@ -223,7 +223,7 @@ class TournamentDashboardTests(unittest.TestCase):
             )
             app = AppTest.from_file(APP_PATH).run(timeout=15)
             navigate(app, "game", locale=teams[0].reference.game.locale, game=teams[0].reference.game.slug)
-            select_game_tab(app, teams[0].reference.game, "Administrer grupper")
+            select_game_tab(app, teams[0].reference.game, "Administration")
             self.assertTrue(
                 any(item.label == "Gem ændringer" for item in app.button)
             )
@@ -258,19 +258,19 @@ class TournamentDashboardTests(unittest.TestCase):
             with patch("holdet_lib.HoldetClient", return_value=fake):
                 app = AppTest.from_file(APP_PATH).run(timeout=15)
                 navigate(app, "game", locale=teams[0].reference.game.locale, game=teams[0].reference.game.slug)
-                select_game_tab(app, teams[0].reference.game, "Administrer grupper")
+                select_game_tab(app, teams[0].reference.game, "Administration")
                 button(app, "Hent aktuel spilinfo").click()
-                select_game_tab(app, teams[0].reference.game, "Administrer grupper")
+                select_game_tab(app, teams[0].reference.game, "Administration")
                 choices = widget(app, "multiselect", "Hold")
                 choices.set_value(list(choices.options))
-                select_game_tab(app, teams[0].reference.game, "Administrer grupper")
+                select_game_tab(app, teams[0].reference.game, "Administration")
                 button(app, "Gem ændringer").click()
-                select_game_tab(app, teams[0].reference.game, "Administrer grupper")
+                select_game_tab(app, teams[0].reference.game, "Administration")
                 self.assertTrue(
                     any("Hele turneringen genberegnes" in item.value for item in app.warning)
                 )
                 button(app, "Genberegn turnering").click()
-                select_game_tab(app, teams[0].reference.game, "Administrer grupper")
+                select_game_tab(app, teams[0].reference.game, "Administration")
 
             rebuilt = holdet.GroupStore(config / "groups.json").load()[0]
             self.assertEqual(rebuilt.active_revision, 2)

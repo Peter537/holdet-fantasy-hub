@@ -2,30 +2,30 @@
 
 Biblioteket henter offentligt server-renderet HTML og JSON fra Holdet.dk. Det bruger ikke login, cookies, Selenium, browser-scrolling eller skjulte browserprofiler.
 
-## Fra URL til model
+## Fra klik til cache
 
 ```mermaid
 sequenceDiagram
     actor User as Bruger
-    participant Client as Dashboard eller CLI
+    participant Web as Dashboard eller CLI
     participant Lib as HoldetClient
-    participant Nexus as Nexus HTML/API
+    participant Nexus as Offentlige Holdet-endpoints
     participant Parser as Flight/JSON-parser
     participant Store as Eksplicit store
 
-    User->>Client: Klik på Hent/Opdater
-    Client->>Lib: URL og eventuel runde
-    Lib->>Nexus: Hent spilside og cartridge
-    Nexus-->>Lib: Variant, ruleset og metadata
-    Lib->>Nexus: Hent statistik eller teamdata
-    Nexus-->>Parser: Flight-scripts og JSON
+    User->>Web: Klik Hent/Opdater
+    Web->>Lib: Spil, hold og eventuel runde
+    Lib->>Nexus: Spilside, cartridge og schedule
+    Nexus-->>Parser: HTML og JSON
     Parser-->>Lib: Validerede dataclasses
-    Lib-->>Client: ScrapedGame/ScrapedTeam
-    Client->>Store: Gem snapshot eller eksport
-    Store-->>Client: Oprettet sti
+    Lib-->>Web: ScrapedGame/ScrapedTeam + metadata
+    Web->>Store: Gem snapshot/metadata/manifest
+    Store-->>Web: Publiceret atomisk
 ```
 
-### 1. URL-normalisering
+Navigation, Rundecenter, Datastatus, historik, watchlist, sammenligning, ændringer og Transferlaboratorium stopper før første netværkspil. De bruger kun eksisterende snapshots og metadata. Manglende metadata vises som en datamangel og udløser aldrig automatisk kontakt til Holdet.
+
+## URL, variant og spilpolitik
 
 En spiladresse normaliseres til locale og slug fra:
 
@@ -33,25 +33,11 @@ En spiladresse normaliseres til locale og slug fra:
 https://www.holdet.dk/<locale>/fantasy/<slug>/...
 ```
 
-En bar slug i dashboardet bruger locale `da`. Ukendte hosts og ugyldige stier afvises, før der foretages en netværksanmodning.
+En bar slug bruger locale `da`. Ukendte hosts og ugyldige stier afvises før en netværksanmodning. Den offentlige Nexus-rod er `https://nexus-app-fantasy.holdet.dk/<locale>/<slug>`.
 
-### 2. Variant og spilpolitik
+Cartridge-data leverer ruleset og metadata. Biblioteket skelner mellem rå route-variant, normaliseret format (`soccer`, `cycling`, `formula1`, `golf`) og enhed (`money`, `points`). `salaryCap > 0` betyder penge; `salaryCap = 0` betyder point. Det er nødvendigt for cykling, hvor route-navnet alene ikke afgør enheden.
 
-Den offentlige Nexus-rod er:
-
-```text
-https://nexus-app-fantasy.holdet.dk/<locale>/<slug>
-```
-
-Her findes den rå route-variant. Cartridge-data fra `/api/cartridges/<slug>` leverer ruleset og metadata. Biblioteket skelner mellem:
-
-- route-varianten, som bruges til Nexus-URL'er;
-- det normaliserede format `soccer`, `cycling`, `formula1` eller `golf`;
-- enheden `money` eller `points`.
-
-`salaryCap > 0` betyder penge, mens `salaryCap = 0` betyder point. Det er vigtigt for cykling, hvor Tourspillet og Tour Manager kan bruge samme format, men forskellige enheder. Den ældre variant `cycling_world_tour` behandles som cykling.
-
-### 3. Spillerstatistik
+## Spillerstatistik
 
 Statistiksiden hentes fra:
 
@@ -59,41 +45,36 @@ Statistiksiden hentes fra:
 /<locale>/<slug>/<route-variant>/statistics[?round=<runde>]
 ```
 
-Next.js Flight-strenge samles fra sidens scripts. Parseren finder den gyldige `rows`-liste og dens tilhørende runde og bygger `PlayerEntry`-modeller med navn, hold/land, position/kategori, pris/point, vækst og statusfelter. Hele serverpayloaden bruges, så den virtualiserede tabels synlige rækkeantal er irrelevant.
+Next.js Flight-strenge samles fra scripts, og parseren finder den gyldige `rows`-liste og runde. Hele serverpayloaden bruges uanset den virtualiserede tabels synlige rækker. Et eksplicit spiller-refresh gemmer både det komplette spillersnapshot og de tilgængelige spilmetadata.
 
-### 4. Fantasyhold og historik
+Round-aware ændringer sammenligner bagefter de seneste lokale hentninger i valgt og foregående tilgængelige runde; selve sammenligningen foretager ingen ny hentning.
 
-En teamhentning kombinerer:
+## Fantasyhold, historik og schedule
 
-- den server-renderede fantasyteam-side for aktuelt overblik og opstilling;
-- `/api/fantasyteams/<id>/history` for rundesammendrag;
-- standardligaens overall- og runde-leaderboards, når de er offentligt tilgængelige;
-- cartridge-data for format, enhed, salary cap og schedule-ID.
+En teamhentning kombinerer fantasyteam-siden, `/api/fantasyteams/<id>/history`, offentlige overall-/rundelister og cartridge-data. `/api/schedules/<schedule-id>` hentes sammen med manuelle spiller- og holdhentninger.
 
-`/api/schedules/<schedule-id>` hentes sammen med manuelle spiller- og holdhentninger. Parseren gemmer hver rundes `start`, `close` og `end`; `end` afgør, om snapshotstatus er `complete` eller `in_progress`. Hvis schedulekaldet fejler, gemmes de øvrige gyldige data med `unknown`.
+Schedule-parseren gemmer hver rundes `start`, `close` og `end`. Sluttid og hentetid afgør, om en sammenligning eller transfersimulation kan kaldes `final`, mens snapshotstatus er `complete`, `in_progress` eller `unknown`. Hvis schedulekaldet fejler, gemmes øvrige gyldige data med `unknown` og UI'et markerer grundlaget som foreløbigt.
 
-For pengebaserede spil kontrolleres opstillingens samlede spillerværdi mod historikkens total minus bank; uoverensstemmelse genhentes én gang og giver derefter fejl.
+For pengebaserede spil kontrolleres opstillingens værdi mod historikkens total minus bank. Uoverensstemmelse genhentes én gang og giver derefter fejl.
+
+## Manuelle opdateringer og frysning
+
+Kun eksplicitte manager-, spiller-, hold-, gruppe- og turneringshandlinger skriver nye snapshots eller metadata. En slutrunde-refresh eller arkivering kan desuden fryse komplette Hall of Fame-events. Ufuldstændige arkiverede spil bevares uden point, indtil komplette data senere hentes eksplicit.
 
 ## HTTP, retries og proxy
 
-`HttpClient` bruger et beskrivende user-agent, en afgrænset timeout og genforsøg:
+`HttpClient` bruger user-agent, afgrænset timeout og kontrollerede retries:
 
-- Transiente HTTP-statusser, timeouts og almindelige netværksfejl får op til tre samlede forsøg.
-- Aktivt afviste forbindelser får op til fem samlede forsøg med eksponentiel ventetid.
-- Permanente 4xx-fejl og inkompatible payloads forsøges ikke unødigt igen.
-- Windows- og miljøkonfigurerede proxyer respekteres og omgås aldrig automatisk.
-- Proxy-credentials skjules i tekniske fejlbeskeder.
+- transiente HTTP-statusser, timeouts og netværksfejl får op til tre samlede forsøg;
+- aktivt afviste forbindelser får op til fem med eksponentiel ventetid;
+- permanente 4xx-fejl og inkompatible payloads genforsøges ikke unødigt;
+- Windows- og miljøproxyer respekteres;
+- proxy-credentials skjules i tekniske fejl.
 
-Dashboardet bevarer en gyldig cache ved fejl og tilbyder et eksplicit retry. Navigation alene foretager aldrig automatiske genforsøg.
+Ved fejl bevarer dashboardet en gyldig cache og tilbyder et eksplicit retry. Navigation starter aldrig automatiske genforsøg.
 
-## Fejlprincipper
+## Fejlprincipper og begrænsninger
 
-Nødvendige felter valideres strengt. En tom spillerliste, manglende runde, ukendt format eller uforenelig historik giver en konkret fejl, og der skrives ikke et delvist snapshot. Valgfrie felter som visse offentlige rangeringer kan være `None`.
+Nødvendige felter valideres strengt. Tom spillerliste, manglende runde, ukendt format eller uforenelig historik giver en konkret fejl uden delvist snapshot. Valgfrie offentlige rangeringer kan være `None`.
 
-## Kendte begrænsninger
-
-- Holdets offentlige payloads og endpoints kan ændre struktur.
-- Historiske rundesammendrag findes, men projektet undersøger ikke et særskilt endpoint til historiske opstillinger.
-- En historisk opstilling vises kun, hvis et kanonisk snapshot blev gemt i præcis den runde.
-- Manglende værdier, top-procenter eller resultater estimeres aldrig.
-- Der er ingen baggrundspolling, scheduler eller automatisk opdatering.
+Der findes ingen baggrundspolling eller scheduler. Historiske opstillinger vises kun, hvis et kanonisk teamsnapshot blev gemt præcis i runden. Manglende værdier, top-procenter eller resultater estimeres aldrig.

@@ -1,24 +1,37 @@
 # Spillerstatistik
 
-Spillerstatistik kan bruges som en selvstændig dashboardside eller fra et registreret managerspil. En selvstændig hentning registrerer ikke spillet i **Mine managerspil**.
+Spillerstatistik kan bruges som selvstændig side eller inde i et managerspil. Den selvstændige side vælger ét managerspil; managerspilsfanen genbruger allerede valgt spil. Ingen af dem registrerer eller henter data ved almindelig navigation.
 
-## Data og runder
+## Runde og paneler
 
-Vælg en gemt spilreference, en slug eller en fuld Holdet-URL. En bar slug bruger locale `da`. Dashboardet viser nyeste kompatible cache med det samme og kontakter kun Holdet via:
+Én fælles rundevælger styrer tre paneler:
 
-- **Hent seneste spillerstatistik**;
-- **Hent manglende runder** for et valgt fra-/til-interval;
-- **Hent runde X**;
-- **Opdater runde X**;
-- **Prøv igen** efter en fejl.
+- **Spillerliste** med filtre, sortering og eksport.
+- **Sammenligning og watchlist** for 2–5 spillere fra samme managerspil og runde.
+- **Ændringer** mellem valgt runde og den foregående tilgængelige runde.
 
-Batchhentningen springer allerede gemte runder over, genbruger én klient, fortsætter efter enkeltfejl og viser en samlet opsummering. Enkeltrundehentningen bruges fortsat til korrektioner.
+Den nyeste kompatible cache vises med det samme. Netværk bruges kun af **Hent seneste spillerstatistik**, **Hent manglende runder**, **Hent runde X**, **Opdater runde X** eller **Prøv igen**. Hver hentning gemmer hele det ufiltrerede resultat som et kanonisk JSON-snapshot; rundestatus og hentetidspunkt fryses sammen med dataene.
 
-Hver hentning gemmer hele, ufiltrerede resultatet som et kanonisk JSON-snapshot. Datakilden vises med lokal dato og den frosne rundestatus fra hentetidspunktet; der foretages ingen automatisk statuskontrol.
+## Sammenligning og watchlist
+
+Vælg 2–5 spillere for at sammenligne pris eller point, totalvækst, rundevækst, status og historiske kurver. Spillere identificeres primært med spilidentitet og `entry_id`. Ældre snapshots uden sikker ID bruger en tydeligt markeret fallback med navn, hold og position.
+
+Watchlisten gemmes atomisk i `%APPDATA%\Holdet Fantasy Hub\config\hub-settings.json` og følger med i en Hub-backup. En favorit gemmer kun identiteten; visning og kurver bygges fortsat af lokale snapshots. Valg af eller navigation til en favorit starter ikke en hentning.
+
+Historikken bruger de seneste snapshots for hver runde. Runder uden data forbliver huller i grafen og forbindes ikke kunstigt.
+
+## Hvad har ændret sig?
+
+Ændringspanelet finder:
+
+1. det seneste spillersnapshot i den valgte runde;
+2. det seneste spillersnapshot i den foregående tilgængelige runde.
+
+Begge rundenumre og hentetidspunkter vises. Resultatet opdeles i nye, fjernede og ændrede spillere samt pris-/point- og statusskift. En manglende forgænger giver en forklarende tom tilstand i stedet for at sammenligne med et vilkårligt snapshot.
+
+Hvis en af runderne er `in_progress` eller `unknown`, eller den afsluttede runde ikke er genhentet efter sluttidspunktet, markeres sammenligningen som **Foreløbig**. Markeringen beskriver datagrundlaget og ændrer ikke de rå snapshots.
 
 ## Formater og enheder
-
-Holdets route-variant, normaliserede sportsformat og værdienhed behandles separat:
 
 | Spiltype | Enhed | Primære labels |
 | --- | --- | --- |
@@ -28,57 +41,20 @@ Holdets route-variant, normaliserede sportsformat og værdienhed behandles separ
 | Motor Manager | Penge | Pris, Totalvækst, Vækst |
 | Golf Manager | Point | Point, Totalændring, Rundeændring |
 
-Cykling kan altså ikke klassificeres som penge eller point ud fra route-navnet alene; rulesettets `salaryCap` afgør enheden.
+Cykling kan ikke klassificeres ud fra route-navnet alene; rulesettets `salaryCap` afgør enheden.
 
-## Filtre
+## Filtre og tabel
 
-Filtre påvirker kun den viste og eksporterede tabel, aldrig det kanoniske snapshot. De kan kombineres:
+Filtre påvirker kun den viste og eksporterede tabel, aldrig det kanoniske snapshot. De omfatter fritekst, hold/land, position/kategori, pris/point, vækst, status, kolonner og sortering. Status kan ignoreres, kræves eller udelukkes; flere krævede statustyper skal alle være til stede.
 
-- Fritekst i navn, hold/land og position/kategori.
-- Et eller flere hold/lande og positioner/kategorier.
-- Minimum og maksimum for pris/point, totalvækst og rundevækst.
-- Manglende vækst: medtag, udelad eller vis kun manglende.
-- Kolonnevalg; navn er altid obligatorisk.
-- Sorteringsfelt og stigende/faldende orden med navn som stabil tie-breaker.
-
-Hver status har tre tilstande:
-
-| Tilstand | Betydning |
-| --- | --- |
-| `Ignorér` | Status påvirker ikke filtret |
-| `Kræv` | Spilleren skal have statusmarkøren |
-| `Udeluk` | Spilleren fjernes, hvis statusmarkøren findes |
-
-Flere krævede statusser skal alle være til stede. En spiller fjernes, hvis bare én udelukket status er til stede. Status vises i rækkefølgen `Inaktiv · Deaktiveret · Skadet · Karantæne`.
-
-## Tabel og sortering
-
-Tabellen beholder pris-, point- og vækstværdier som numeriske data, så Streamlits sortering virker. De vises med danske tusindtalsseparatorer, eksempelvis `12.345.000` og `-227.000`. Manglende værdier vises som `–`.
-
-Standardrækkefølgen er pris/point faldende og derefter navn. Den valgte sortering anvendes før eksport.
+Numeriske felter bevares som tal, så Streamlits sortering virker, men vises med danske tusindtalsseparatorer. Manglende værdier vises som `–`. Navn bruges som stabil tie-breaker.
 
 ## Eksport
 
-Vælg en eller flere af TXT, JSON og Markdown. **Opret eksport** fryser det aktuelle filtrerede resultat, gemmer filerne lokalt og opretter browserdownloads med præcis de samme bytes.
-
-Alle formater indeholder spil, locale, format, enhed, runde, kilde, tidspunkt, filtre, kolonner og rækkeantal:
-
-- TXT bruger danske metadata og en tab-separeret tabel.
-- Markdown bruger en titel, metadata og en Markdown-tabel.
-- JSON bruger stabile engelske nøgler og rå numeriske værdier.
-
-Filer gemmes under:
+**Opret eksport** fryser det aktuelle filtrerede resultat som TXT, JSON og/eller Markdown, gemmer filerne og opretter downloads med præcis de samme bytes. Et tomt filterresultat kan ikke eksporteres.
 
 ```text
 %LOCALAPPDATA%\Holdet Fantasy Hub\exports\players\<game-slug>\data-round<round>_<MMDD>_<HHmmss>[_N].<format>
 ```
 
-De valgte formater deler samme stem og kollisionssuffix. Et tomt filterresultat kan ikke eksporteres.
-
-## CLI
-
-Den samme filter- og eksportmotor bruges af CLI'en. Se de korte eksempler i [Klienter](clients.md), og brug den aktuelle hjælpevisning for samtlige flag:
-
-```powershell
-py -3.14 .\cli\main.py players --help
-```
+Se [Klienter](clients.md) for CLI-eksempler og [Datalagring](data-storage.md) for forskellen mellem snapshots, Hub-indstillinger og afledte eksporter.

@@ -12,21 +12,74 @@ py -3.14 -m streamlit run .\website\app.py
 
 Åbn [http://localhost:8501](http://localhost:8501). `.streamlit/config.toml` binder serveren til `127.0.0.1`; standardporten er 8501.
 
-Dashboardets vigtigste områder er:
+### Sidebar
 
-- **Mine managerspil**: vedvarende spil med grupper, hold og seneste lokale datarunde.
-- **Spillerstatistik**: hent, filtrér og eksportér et vilkårligt spil uden at registrere det.
-- **Holdstatistik**: åbn cachede hold, find hold på gemte konti eller brug en direkte hold-URL/ID.
-- **Arkiverede managerspil**: se arkiverede spil offline og gendan dem fra spillets hovedside.
-- **Data og lager**: administrér gemte konti og se de effektive Windows-stier.
+Destinationerne står i denne rækkefølge:
 
-Et managerspil indeholder faner til grupper, spillerstatistik, holdstatistik, gruppeadministration og spilindstillinger. Navigering, faneskift, rundeskift og cachevisning udløser ingen hentning. Netværk bruges kun af tydeligt navngivne handlinger som **Hent**, **Find hold** eller **Opdater**.
+1. **Mine managerspil** – kun managerspilskort og overordnede handlinger; Rundecenter vises ikke her.
+2. **Tilføj managerspil**.
+3. **Spillerstatistik** og **Holdstatistik** – selvstændige paneler med én nødvendig managerspilvælger.
+4. Aktive managerspil med deres grupper.
+5. **Arkiverede managerspil**.
+6. **Hall of Fame**.
+7. **Data og lager**.
 
-Læs mere om [spillerstatistik](player-statistics.md), [holdstatistik](team-statistics.md) og [grupper og turneringer](groups-and-tournaments.md).
+Der findes ingen global Værktøjer-sektion. De tidligere globale views `transfer`, `compare`, `history`, `changes`, `quality` og `backup` er fjernet og viser den kontrollerede side **Siden findes ikke**.
+
+### Managerspil og kontekst
+
+Et managerspil åbner på **Rundecenter** og har syv lazy-loadede faner:
+
+- Rundecenter
+- Grupper
+- Spillerstatistik
+- Holdstatistik
+- Historik
+- Administration
+- Indstillinger
+
+Rundecenter viser aktiv runde, næste deadline, seneste spiller- og holddata, seneste manuelle refresh, manglende snapshots med holdnavne, skader, karantæner og væsentlige rangbevægelser. Links fører direkte til den relevante spiller-, hold-, gruppe- eller datavisning. Opdateringsknappen er eksplicit; oversigten foretager ikke selv netværkskald.
+
+Spillerstatistik genbruger managerspil og runde til Spillerliste, Sammenligning og watchlist samt Ændringer. Holdstatistik vælger hold og runde én gang og genbruger dem til Overblik, Holdopstilling, Transferlaboratorium, Historik, Ændringer og Eksport. En gruppe, som allerede har valgt spil eller hold, åbner de samme paneler uden overflødige vælgere.
+
+### Deeplinks og session state
+
+Query-parametrene kan kombineres:
+
+| Parameter | Betydning |
+| --- | --- |
+| `view` | Hoveddestination, eksempelvis et managerspil, Hall of Fame eller Data og lager |
+| `section` | Managerspillets hovedfane |
+| `panel` | Underfane i spiller-, hold-, gruppe- eller datavisningen |
+| `round` | Valgt runde |
+| `team` | Valgt hold |
+| `group` | Valgt gruppe |
+
+Valg i Streamlit-state navngives efter spil, gruppe, hold og runde, så de ikke lækker mellem managerspil. Faner læses først, når de vises.
+
+### Offline-first
+
+Navigation, faneskift, rundeskift, grafer, sammenligning, ændringsvisning og transfersimulation læser kun kompatible snapshots. Netværk bruges kun af tydeligt navngivne handlinger som **Hent**, **Find hold**, **Opdater** eller **Prøv igen**. Simuleringer lever i `st.session_state` og skriver hverken snapshots eller konfiguration.
+
+Læs mere om [Spillerstatistik](player-statistics.md), [Holdstatistik](team-statistics.md), [Grupper og turneringer](groups-and-tournaments.md) og [Datalagring](data-storage.md).
+
+### Sikker genstart
+
+Hvis port 8501 indeholder en gammel Streamlit-session, kontrollér både lytteren og kommandolinjen:
+
+```powershell
+netstat -ano | Select-String ":8501"
+```
+
+```powershell
+Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like "*streamlit*website\app.py*" } | Select-Object ProcessId, ParentProcessId, CommandLine
+```
+
+Stop kun de bekræftede app-processer og deres konkrete launcherproces, bekræft at porten er fri, og start én ny instans med den normale kommando. Stop aldrig alle `python.exe`- eller `py.exe`-processer. Brug eventuelt `/_stcore/health` og en ny browsernavigation til at undgå at genbruge en gammel WebSocket-session.
 
 ## Kildebaseret CLI
 
-CLI'en køres direkte fra projektets kildekode. Brug `--help` som autoritativ og opdateret oversigt:
+CLI'en køres direkte fra projektets kildekode. Brug `--help` som autoritativ oversigt:
 
 ```powershell
 py -3.14 .\cli\main.py --help
@@ -42,57 +95,33 @@ py -3.14 .\cli\main.py teams --help
 
 ### Spillerstatistik
 
-Hent den aktuelle statistik og opret standardeksporten som TXT:
-
 ```powershell
 py -3.14 .\cli\main.py players https://www.holdet.dk/da/fantasy/super-manager-fall-2026
 ```
-
-Hent en historisk runde i flere formater:
 
 ```powershell
 py -3.14 .\cli\main.py players https://www.holdet.dk/da/fantasy/tour-de-france-2026 --round 7 --format txt --format json --format md
 ```
 
-Et eksempel med filtrering og kolonnevalg:
-
-```powershell
-py -3.14 .\cli\main.py players https://www.holdet.dk/da/fantasy/super-manager-fall-2026 --min-value 5000000 --status disabled=exclude --column name --column team --column value --column status
-```
-
-Hver hentning gemmer et komplet kanonisk spillersnapshot. Filtre og kolonnevalg påvirker kun eksporten.
+Filtre og kolonnevalg påvirker kun eksporten; hver hentning gemmer det komplette kanoniske spillersnapshot.
 
 ### Fantasyhold
-
-Hent alle matchende hold fra konfigurerede konti:
 
 ```powershell
 py -3.14 .\cli\main.py teams https://www.holdet.dk/da/fantasy/tour-de-france-2026
 ```
 
-Brug en direkte, fiktiv fantasy-team-URL uden kontoopdagelse:
-
-```powershell
-py -3.14 .\cli\main.py teams https://www.holdet.dk/da/fantasy/tour-de-france-2026/fantasyteams/900000000001
-```
-
-Eksportér én historisk runde som Markdown og JSON:
-
 ```powershell
 py -3.14 .\cli\main.py teams https://www.holdet.dk/da/fantasy/tour-de-france-2026/fantasyteams/900000000001 --round 7 --format md --format json
 ```
 
-Uden `--round` indeholder eksporten seneste overblik, aktuel opstilling og komplet offentlig historik. Med `--round` kræves et rundesammendrag; en opstilling følger kun med, hvis et snapshot blev gemt præcis i runden.
+Uden `--round` indeholder eksporten seneste overblik, aktuel opstilling og komplet offentlig historik. Med `--round` kræves et rundesammendrag; opstillingen følger kun med, hvis et snapshot blev gemt præcis i runden.
 
 ### Dataplaceringer
-
-Vis de effektive stier:
 
 ```powershell
 py -3.14 .\cli\main.py data paths
 ```
-
-Åbn konfigurations-, snapshot- eller eksportmappen i Stifinder:
 
 ```powershell
 py -3.14 .\cli\main.py data open --config
@@ -106,8 +135,8 @@ py -3.14 .\cli\main.py data open --snapshots
 py -3.14 .\cli\main.py data open --exports
 ```
 
-Se [Datalagring](data-storage.md) for overrides og forskellen mellem snapshots og eksporter.
+Se [Datalagring](data-storage.md) for overrides og forskellen mellem kanoniske snapshots og afledte eksporter.
 
 ## Batchadfærd
 
-Flere URL'er eller teams behandles uafhængigt. En fejl rapporteres for det konkrete input, mens resterende input fortsætter. Kommandoen afslutter med en fejlkode, hvis mindst ét input fejlede, og opretter ikke en delvis eksport for det fejlede input.
+Flere URL'er eller teams behandles uafhængigt. En fejl rapporteres for det konkrete input, mens resten fortsætter. Kommandoen afslutter med en fejlkode, hvis mindst ét input fejlede, og opretter ikke en delvis eksport for det fejlede input.

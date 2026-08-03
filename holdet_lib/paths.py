@@ -19,12 +19,16 @@ class AppPaths:
     config_dir: Path
     accounts_file: Path
     groups_file: Path
+    hub_settings_file: Path
     data_dir: Path
     snapshot_dir: Path
     manifest_dir: Path
     group_revision_dir: Path
+    game_metadata_dir: Path
+    hall_of_fame_dir: Path
     export_dir: Path
     player_export_dir: Path
+    backup_dir: Path
     team_export_dir: Path
 
 
@@ -118,12 +122,16 @@ def resolve_paths(
         accounts_file=Path(accounts_file),
         groups_file=config_dir / "groups.json",
         data_dir=data_dir,
+        hub_settings_file=config_dir / "hub-settings.json",
         snapshot_dir=data_dir / "snapshots",
         manifest_dir=data_dir / "manifests",
         group_revision_dir=data_dir / "group-revisions",
         export_dir=export_dir,
+        game_metadata_dir=data_dir / "game-metadata",
+        hall_of_fame_dir=data_dir / "hall-of-fame",
         player_export_dir=export_dir / "players",
         team_export_dir=export_dir / "teams",
+        backup_dir=export_dir / "backups",
     )
 
 
