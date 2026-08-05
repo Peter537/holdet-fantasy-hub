@@ -182,7 +182,7 @@ class TournamentScheduleTests(unittest.TestCase):
             payload = json.loads(
                 (temporary / "groups.json").read_text(encoding="utf-8")
             )
-            self.assertEqual(payload["schema_version"], 7)
+            self.assertEqual(payload["schema_version"], 8)
             self.assertEqual(
                 payload["groups"][1]["tournament"]["draw_seed"], "seed-b"
             )
@@ -570,7 +570,7 @@ class TournamentStorageTests(unittest.TestCase):
                 shuffle=lambda values: None,
             )
             payload = json.loads(path.read_text(encoding="utf-8"))
-            self.assertEqual(payload["schema_version"], 7)
+            self.assertEqual(payload["schema_version"], 8)
             loaded = store.load()[1]
             self.assertEqual(loaded.tournament, tournament.tournament)
             store.update(replace(loaded, name="Nyt navn"))
@@ -611,7 +611,7 @@ class TournamentStorageTests(unittest.TestCase):
             loaded = store.load()[0]
             self.assertEqual(loaded, rebuilt)
             payload = json.loads(path.read_text(encoding="utf-8"))
-            self.assertEqual(payload["schema_version"], 7)
+            self.assertEqual(payload["schema_version"], 8)
             revision_entry = payload["groups"][0]["tournament_revisions"][0]
             self.assertEqual(revision_entry["file"], "cup/revision-1.json")
             self.assertNotIn("teams", revision_entry)

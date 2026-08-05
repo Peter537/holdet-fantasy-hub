@@ -238,10 +238,10 @@ class SnapshotStore:
             try:
                 payload = json.loads(path.read_text(encoding="utf-8"))
                 if not isinstance(payload, dict):
-                    raise PayloadError("snapshot root must be an object")
+                    raise PayloadError("Snapshottets rod skal være et objekt")
                 generated_raw = payload.get("generated_at")
                 if not isinstance(generated_raw, str):
-                    raise PayloadError("snapshot generated_at must be text")
+                    raise PayloadError("Snapshottets generated_at skal være tekst")
                 generated_at = datetime.fromisoformat(generated_raw)
                 if generated_at.tzinfo is None:
                     generated_at = generated_at.astimezone()
@@ -301,10 +301,10 @@ class PlayerStatisticsStore:
             try:
                 payload = json.loads(path.read_text(encoding="utf-8"))
                 if not isinstance(payload, dict):
-                    raise PayloadError("player snapshot root must be an object")
+                    raise PayloadError("Spillersnapshottets rod skal være et objekt")
                 generated_raw = payload.get("generated_at")
                 if not isinstance(generated_raw, str):
-                    raise PayloadError("player snapshot generated_at must be text")
+                    raise PayloadError("Spillersnapshottets generated_at skal være tekst")
                 generated_at = datetime.fromisoformat(generated_raw)
                 if generated_at.tzinfo is None:
                     generated_at = generated_at.astimezone()
@@ -312,7 +312,7 @@ class PlayerStatisticsStore:
                 if game is not None and (
                     statistics.game.locale.casefold(), statistics.game.slug
                 ) != (game.locale.casefold(), game.slug):
-                    raise PayloadError("player snapshot belongs to another game")
+                    raise PayloadError("Spillersnapshottet tilhører et andet spil")
                 snapshots.append(
                     PlayerStatisticsSnapshot(
                         path.resolve(), generated_at, statistics
@@ -329,9 +329,9 @@ class PlayerStatisticsStore:
         self, statistics: ScrapedGame, *, now: datetime | None = None
     ) -> Path:
         if statistics.round_number < 0:
-            raise PayloadError("player statistics round must be non-negative")
+            raise PayloadError("Spillerstatistikkens runde må ikke være negativ")
         if not statistics.entries:
-            raise PayloadError("refusing to save empty player statistics")
+            raise PayloadError("Tom spillerstatistik kan ikke gemmes")
         generated_at = aware_local(now)
         target_dir = self._game_directory(statistics.game)
         target_dir.mkdir(parents=True, exist_ok=True)

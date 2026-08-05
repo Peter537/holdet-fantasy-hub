@@ -10,10 +10,93 @@ from holdet_lib._formatting import count_label
 from holdet_lib.accounts import AccountStore, rename_account_and_groups
 from holdet_lib.errors import PayloadError
 from holdet_lib.groups import GroupDefinition, GroupStore, HubConfiguration
+from holdet_lib.hall_of_fame import HallOfFameStore
 from holdet_lib.models import AccountConfig
+from holdet_lib.seasons import SeasonStore
+from holdet_lib.tournament_pairings import TournamentPairingStore
 from holdet_lib.paths import AppPaths, open_in_explorer
 from holdet_lib.storage import SnapshotIndex
 from website.hub_pages import backup_view, data_quality_panel
+
+def _local_store_health(
+    group_store: GroupStore,
+    configuration: HubConfiguration,
+    app_paths: AppPaths,
+) -> list[dict[str, str]]:
+    """Read each additive store independently and report bounded failures."""
+
+    rows: list[dict[str, str]] = []
+
+    try:
+        _, revision_warnings = group_store.load_configuration_with_warnings()
+    except (OSError, PayloadError, ValueError) as exc:
+        rows.append({
+            "Lager": "Turneringsrevisioner",
+            "Status": "Fejl",
+            "Detalje": str(exc),
+        })
+    else:
+        rows.append({
+            "Lager": "Turneringsrevisioner",
+            "Status": "Advarsel" if revision_warnings else "OK",
+            "Detalje": (
+                " | ".join(revision_warnings)
+                if revision_warnings
+                else "Alle arkiverede revisioner kan læses."
+            ),
+        })
+
+    try:
+        seasons = SeasonStore(app_paths.seasons_file).load()
+    except (OSError, PayloadError, ValueError) as exc:
+        rows.append({"Lager": "Sæsoner", "Status": "Fejl", "Detalje": str(exc)})
+    else:
+        rows.append({
+            "Lager": "Sæsoner",
+            "Status": "OK",
+            "Detalje": f"{len(seasons)} sæsondefinitioner kan læses.",
+        })
+
+    events, ledger_warnings = HallOfFameStore(app_paths.hall_of_fame_dir).scan()
+    rows.append({
+        "Lager": "Managerhistorik",
+        "Status": "Advarsel" if ledger_warnings else "OK",
+        "Detalje": (
+            " | ".join(ledger_warnings)
+            if ledger_warnings
+            else f"{len(events)} eventrevisioner kan læses."
+        ),
+    })
+
+    pairing_store = TournamentPairingStore(app_paths.tournament_pairing_dir)
+    pairing_warnings: list[str] = []
+    pairing_count = 0
+    for group in configuration.groups:
+        config = group.tournament
+        if config is None or config.template != "swiss":
+            continue
+        try:
+            revision = pairing_store.load_for_tournament(
+                group.group_id,
+                group.active_revision,
+                config,
+                tuple(item.team_id for item in group.teams),
+            )
+        except (OSError, PayloadError, ValueError) as exc:
+            pairing_warnings.append(f"{group.name}: {exc}")
+        else:
+            pairing_count += len(revision.pairings)
+    rows.append({
+        "Lager": "Turneringsparringer",
+        "Status": "Advarsel" if pairing_warnings else "OK",
+        "Detalje": (
+            " | ".join(pairing_warnings)
+            if pairing_warnings
+            else f"{pairing_count} publicerede parringer kan læses."
+        ),
+    })
+    return rows
+
 
 def _clear_account_discovery_cache() -> None:
     st.session_state.pop("discovered_teams", None)
@@ -347,6 +430,16 @@ def data_storage_view(
                 configuration.groups,
                 index,
                 app_paths,
+            )
+            st.subheader("Lokale stores")
+            st.caption(
+                "Sæsoner, managerhistorik og turneringsdata kontrolleres "
+                "uafhængigt, så en fejl ikke skjuler de øvrige data."
+            )
+            st.dataframe(
+                _local_store_health(group_store, configuration, app_paths),
+                hide_index=True,
+                width="stretch",
             )
     if locations_tab.open:
         with locations_tab:

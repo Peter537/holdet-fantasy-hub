@@ -30,20 +30,20 @@ class GamePolicy:
     def __post_init__(self) -> None:
         if self.route_variant not in KNOWN_ROUTE_VARIANTS:
             raise UnsupportedGameError(
-                f"unsupported Holdet.dk game variant: {self.route_variant}"
+                f"Ikke-understøttet spilvariant fra Holdet.dk: {self.route_variant}"
             )
         if self.format not in KNOWN_GAME_FORMATS:
             raise UnsupportedGameError(
-                f"unsupported Holdet.dk game format: {self.format}"
+                f"Ikke-understøttet spilformat fra Holdet.dk: {self.format}"
             )
         expected = ROUTE_VARIANT_FORMATS[self.route_variant]
         if self.format != expected:
             raise PayloadError(
-                "Nexus route variant and ruleset format conflict: "
+                "Nexus-rutevarianten er i konflikt med ruleset-formatet: "
                 f"{self.route_variant} != {self.format}"
             )
         if self.unit not in VALUE_UNITS:
-            raise PayloadError(f"unsupported Holdet value unit: {self.unit}")
+            raise PayloadError(f"Ikke-understøttet værdienhed fra Holdet: {self.unit}")
 
 
 def format_for_variant(route_variant: str) -> str:
@@ -51,7 +51,7 @@ def format_for_variant(route_variant: str) -> str:
         return ROUTE_VARIANT_FORMATS[route_variant]
     except KeyError as exc:
         raise UnsupportedGameError(
-            f"unsupported Holdet.dk game variant: {route_variant}"
+            f"Ikke-understøttet spilvariant fra Holdet.dk: {route_variant}"
         ) from exc
 
 
@@ -64,13 +64,13 @@ def policy_from_ruleset(
     """Build a strict policy from the public cartridge ruleset."""
 
     if not isinstance(salary_cap, int) or isinstance(salary_cap, bool):
-        raise PayloadError("game ruleset salaryCap must be an integer")
+        raise PayloadError("Spillets ruleset-felt salaryCap skal være et heltal")
     if salary_cap < 0:
-        raise PayloadError("game ruleset salaryCap must be non-negative")
+        raise PayloadError("Spillets ruleset-felt salaryCap må ikke være negativt")
     if ruleset_format is None:
         normalized_format = format_for_variant(route_variant)
     elif not isinstance(ruleset_format, str) or not ruleset_format.strip():
-        raise PayloadError("game ruleset properties.Format must be non-empty text")
+        raise PayloadError("Spillets ruleset-felt properties.Format skal være udfyldt tekst")
     else:
         normalized_format = ruleset_format.strip().casefold()
     return GamePolicy(

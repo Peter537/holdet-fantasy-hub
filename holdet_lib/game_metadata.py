@@ -98,7 +98,7 @@ def _text(value: object, label: str, *, optional: bool = False) -> str | None:
     if value is None and optional:
         return None
     if not isinstance(value, str) or not value.strip():
-        raise PayloadError(f"metadata {label} skal være tekst")
+        raise PayloadError(f"Metadatafeltet {label} skal være tekst")
     return value.strip()
 
 
@@ -106,7 +106,7 @@ def _integer(value: object, label: str, *, optional: bool = False) -> int | None
     if value is None and optional:
         return None
     if not isinstance(value, int) or isinstance(value, bool):
-        raise PayloadError(f"metadata {label} skal være et heltal")
+        raise PayloadError(f"Metadatafeltet {label} skal være et heltal")
     return value
 
 
@@ -116,23 +116,23 @@ def _timestamp(value: object, label: str) -> datetime:
     try:
         parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError as exc:
-        raise PayloadError(f"metadata {label} skal være et ISO-tidspunkt") from exc
+        raise PayloadError(f"Metadatafeltet {label} skal være et ISO-tidspunkt") from exc
     return parsed.astimezone() if parsed.tzinfo is None else parsed
 
 
 def _metadata_from_dict(payload: object) -> GameMetadata:
     if not isinstance(payload, dict):
-        raise PayloadError("metadata-roden skal være et objekt")
+        raise PayloadError("Metadataroden skal være et objekt")
     if payload.get("schema_version") != GAME_METADATA_SCHEMA_VERSION:
-        raise PayloadError("ukendt schema for spilmetadata")
+        raise PayloadError("Ukendt skema for spilmetadata")
     game = payload.get("game")
     rounds = payload.get("rounds")
     if not isinstance(game, dict) or not isinstance(rounds, list):
-        raise PayloadError("spilmetadata mangler game eller rounds")
+        raise PayloadError("Spilmetadata mangler game eller rounds")
     parsed_rounds: list[ScheduleRound] = []
     for index, raw in enumerate(rounds):
         if not isinstance(raw, dict):
-            raise PayloadError(f"metadata rounds[{index}] skal være et objekt")
+            raise PayloadError(f"Metadatafeltet rounds[{index}] skal være et objekt")
         round_number = _integer(raw.get("round"), "round")
         assert round_number is not None
         parsed_rounds.append(
@@ -197,12 +197,12 @@ class GameMetadataStore:
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except OSError as exc:
-            raise PayloadError(f"spilmetadata kunne ikke læses: {exc}") from exc
+            raise PayloadError(f"Spilmetadata kunne ikke læses: {exc}") from exc
         except json.JSONDecodeError as exc:
-            raise PayloadError("spilmetadata indeholder ugyldig JSON") from exc
+            raise PayloadError("Spilmetadata indeholder ugyldig JSON") from exc
         metadata = _metadata_from_dict(payload)
         if metadata.identity != (game.locale.casefold(), game.slug):
-            raise PayloadError("spilmetadata tilhører et andet spil")
+            raise PayloadError("Spilmetadata tilhører et andet spil")
         return metadata
 
     def scan(self) -> tuple[tuple[GameMetadata, ...], tuple[str, ...]]:

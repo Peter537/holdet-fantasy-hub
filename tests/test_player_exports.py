@@ -84,9 +84,9 @@ class PlayerFilterTests(unittest.TestCase):
         )
 
     def test_name_is_required_and_ranges_are_validated(self) -> None:
-        with self.assertRaisesRegex(ValueError, "name column"):
+        with self.assertRaisesRegex(ValueError, "Navnekolonnen"):
             holdet.PlayerStatisticsQuery(columns=("value",))
-        with self.assertRaisesRegex(ValueError, "minimum value"):
+        with self.assertRaisesRegex(ValueError, "Minimum for value"):
             holdet.PlayerStatisticsQuery(min_value=10, max_value=5)
 
     def test_dynamic_golf_labels_and_danish_statuses(self) -> None:

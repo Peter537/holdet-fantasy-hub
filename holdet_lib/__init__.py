@@ -72,6 +72,7 @@ from .groups import (
     TournamentRevision,
     group_team_from_snapshot,
     normalize_manager_game,
+    validate_official_group_url,
 )
 from .standings import StandingRow, build_standings
 from .refresh import (
@@ -225,6 +226,7 @@ from .hall_of_fame import (
     HallOfFameStore,
     build_hall_of_fame,
     build_live_hall_of_fame_events,
+    remap_manager_events,
 )
 from .hub_settings import (
     HUB_SETTINGS_SCHEMA_VERSION,
@@ -232,7 +234,9 @@ from .hub_settings import (
     HubSettings,
     HubSettingsStore,
     ManagerAlias,
+    ManagerProfile,
     WatchlistEntry,
+    build_effective_manager_settings,
     manager_identity_keys,
     player_identity,
     resolve_manager_identity,
@@ -252,6 +256,63 @@ from .transfers import (
     transfer_rule_profile,
 )
 
+from .calendar import CalendarEvent, build_calendar_events
+from .manager_features import (
+    HeadToHeadMeeting,
+    ManagerCareer,
+    ManagerEvent,
+    ManagerHeadToHead,
+    ManagerRating,
+    ManagerRoundResult,
+    RoundAward,
+    RoundStory,
+    build_manager_careers,
+    build_manager_head_to_head,
+    build_manager_ratings,
+    build_manager_round_results,
+    build_round_awards,
+    build_round_story,
+    manager_events_from_hall_of_fame,
+)
+from .seasons import (
+    SEASON_SCHEMA_VERSION,
+    SeasonDefinition,
+    SeasonStanding,
+    SeasonStore,
+    active_season_competitions,
+    build_season_standings,
+)
+from .tournament import (
+    DoubleEliminationMatch,
+    DoubleEliminationTemplateConfig,
+    GroupKnockoutTemplateConfig,
+    LeagueTemplateConfig,
+    SeedRule,
+    SwissParticipant,
+    SwissTemplateConfig,
+    TournamentDefinition,
+    TournamentPairing,
+    TournamentTemplateConfig,
+    SwissPairingConflict,
+    build_swiss_participants,
+    build_swiss_pairing_conflicts,
+    TournamentTemplate,
+    build_double_elimination_bracket,
+    calculate_buchholz,
+    create_tournament_definition,
+    generate_league_fixtures,
+    generate_group_stage_fixtures,
+    generate_swiss_pairings,
+    resolve_knockout_tie,
+    tournament_standing_sort_key,
+    tournament_template_config,
+)
+from .tournament_pairings import (
+    PAIRING_SCHEMA_VERSION,
+    TournamentPairingRevision,
+    TournamentPairingStore,
+    validate_tournament_pairing_revision,
+)
 from .version import VERSION
 
 __all__ = [
@@ -293,3 +354,27 @@ __all__ = [
 
     "serialize_team_export", "team_from_dict", "team_to_json",
 ]
+__all__ += [
+    "CalendarEvent", "ManagerCareer", "ManagerEvent", "ManagerHeadToHead",
+    "ManagerProfile", "ManagerRating", "ManagerRoundResult", "RoundAward",
+    "RoundStory", "SeasonDefinition", "SeasonStanding", "SeasonStore",
+    "TournamentDefinition", "TournamentPairing", "TournamentPairingRevision",
+    "TournamentPairingStore", "TournamentTemplate", "SeedRule",
+    "LeagueTemplateConfig", "SwissTemplateConfig",
+    "GroupKnockoutTemplateConfig", "DoubleEliminationTemplateConfig",
+    "DoubleEliminationMatch", "SwissParticipant", "HeadToHeadMeeting",
+    "active_season_competitions", "build_calendar_events",
+    "build_double_elimination_bracket", "build_manager_careers",
+    "build_manager_head_to_head", "build_manager_ratings",
+    "build_manager_round_results", "build_round_awards", "build_round_story",
+    "build_season_standings", "calculate_buchholz",
+    "build_swiss_participants",
+    "create_tournament_definition", "generate_group_stage_fixtures", "generate_league_fixtures",
+    "generate_swiss_pairings", "manager_events_from_hall_of_fame",
+    "build_effective_manager_settings", "remap_manager_events",
+    "SwissPairingConflict", "build_swiss_pairing_conflicts",
+    "resolve_knockout_tie", "tournament_standing_sort_key",
+    "TournamentTemplateConfig", "tournament_template_config",
+    "validate_tournament_pairing_revision",
+]
+__all__ += ["validate_official_group_url"]

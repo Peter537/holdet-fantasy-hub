@@ -89,7 +89,7 @@ class HoldetClient:
             reference = parse_direct_team_url(source)
             if reference is None:
                 raise ValueError(
-                    "team source must be a Holdet.dk fantasyteams/<id> URL"
+                    "Holdkilden skal være en Holdet.dk-URL med fantasyteams/<id>"
                 )
         return self._teams.scrape(reference)
 

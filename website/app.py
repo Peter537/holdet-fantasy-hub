@@ -21,11 +21,11 @@ from holdet_lib.team_exports import (
     TEAM_EXPORT_FORMATS, TeamExportStore, build_team_export,
 )
 from holdet_lib.version import VERSION
+from holdet_lib.seasons import SeasonStore
 from website.data_page import data_storage_view
 from website.hub_pages import (
     game_history_panel,
     group_history_panel,
-    hall_of_fame_view,
     history_panel,
     manager_round_center,
     player_changes_panel,
@@ -34,9 +34,14 @@ from website.hub_pages import (
     team_changes_panel,
     transfer_lab_panel,
 )
+from website.hub_pages import (
+    calendar_view,
+    managers_view,
+)
 
 
 from holdet_lib import (
+    GroupFixture,
     GroupDefinition,
     GroupMatch,
     HubConfiguration,
@@ -48,6 +53,9 @@ from holdet_lib import (
     HubSettingsStore,
     build_live_hall_of_fame_events,
 
+    build_manager_ratings,
+    build_round_story,
+    resolve_manager_identity,
     FetchError,
     HoldetClient,
     KnockoutMatch,
@@ -66,6 +74,11 @@ from holdet_lib import (
     SnapshotIndex,
     SnapshotStore,
     StandingRow,
+    TournamentPairing,
+    TournamentPairingRevision,
+    TournamentPairingStore,
+    build_swiss_pairing_conflicts,
+    build_swiss_participants,
     STAGE_NAMES,
     TournamentState,
     TeamSnapshot,
@@ -75,6 +88,7 @@ from holdet_lib import (
     build_tournament_head_to_head,
     build_tournament_state,
     filter_player_statistics,
+    generate_swiss_pairings,
     format_integer,
     generate_draw_seed,
     group_team_from_snapshot,
@@ -144,6 +158,116 @@ def _freeze_complete_hall_of_fame(
         st.session_state["hall_of_fame_freeze_warning"] = str(exc)
         return 0
     return len(paths)
+
+def _with_published_tournament_pairings(
+    groups: tuple[GroupDefinition, ...],
+    index: SnapshotIndex,
+) -> tuple[tuple[GroupDefinition, ...], tuple[str, ...]]:
+    """Read and validate frozen pairings without mutating configuration."""
+
+    store = TournamentPairingStore(APP_PATHS.tournament_pairing_dir)
+    resolved: list[GroupDefinition] = []
+    warnings: list[str] = []
+    for group in groups:
+        config = group.tournament
+        if config is None or config.template != "swiss":
+            resolved.append(group)
+            continue
+        try:
+            published = store.load_for_tournament(
+                group.group_id,
+                group.active_revision,
+                config,
+                tuple(item.team_id for item in group.teams),
+            )
+        except PayloadError as exc:
+            warnings.append(
+                f"{group.name}: publicerede parringer kunne ikke l\u00e6ses: {exc}"
+            )
+            resolved.append(group)
+            continue
+        existing = {
+            (item.round_number, item.team_a_id, item.team_b_id)
+            for item in config.group_fixtures
+        }
+        extras = tuple(
+            GroupFixture(item.round_number, item.team_a_id, item.team_b_id)
+            for item in published.pairings
+            if (
+                item.round_number,
+                item.team_a_id,
+                item.team_b_id,
+            ) not in existing
+        )
+        fixtures = tuple(
+            sorted(
+                (*config.group_fixtures, *extras),
+                key=lambda item: (
+                    item.round_number,
+                    item.team_a_id,
+                    -1 if item.team_b_id is None else item.team_b_id,
+                ),
+            )
+        )
+        merged = replace(
+            group,
+            tournament=replace(config, group_fixtures=fixtures),
+        )
+        conflicts = build_swiss_pairing_conflicts(merged, index)
+        if conflicts:
+            rounds = ", ".join(str(item.round_number) for item in conflicts)
+            warnings.append(
+                f"{group.name}: de frosne Swiss-parringer i runde {rounds} "
+                "afviger fra de korrigerede resultater. Opret en ny "
+                "turneringsrevision for at genberegne dem."
+            )
+        resolved.append(merged)
+    return tuple(resolved), tuple(warnings)
+
+
+def _publish_next_swiss_round(
+    group: GroupDefinition,
+    index: SnapshotIndex,
+) -> TournamentPairingRevision | None:
+    """Publish at most one next Swiss round after an explicit refresh."""
+
+    config = group.tournament
+    if config is None or config.template != "swiss":
+        return None
+    published_round = max(
+        (item.round_number for item in config.group_fixtures),
+        default=config.start_round - 1,
+    )
+    if published_round >= config.final_round:
+        return None
+    state = build_tournament_state(group, index, published_round)
+    previous_matches = tuple(
+        item
+        for item in state.group_matches
+        if item.fixture.round_number == published_round
+    )
+    if not previous_matches or not all(item.complete for item in previous_matches):
+        return None
+    participants = build_swiss_participants(config, state.group_matches)
+    next_round = published_round + 1
+    fixtures = generate_swiss_pairings(participants, next_round)
+    pairings = tuple(
+        TournamentPairing(
+            item.round_number,
+            item.team_a_id,
+            item.team_b_id,
+        )
+        for item in fixtures
+    )
+    return TournamentPairingStore(
+        APP_PATHS.tournament_pairing_dir
+    ).publish_round(
+        group.group_id,
+        group.active_revision,
+        next_round,
+        pairings,
+        previous_round_complete=True,
+    )
 
 
 
@@ -275,7 +399,7 @@ def _format_table_integer(value: object) -> str:
         return "–"
     integer = int(value)
     if isinstance(value, bool) or value != integer:
-        raise ValueError(f"table value must be a whole number, got {value!r}")
+        raise ValueError(f"Tabelværdien skal være et helt tal, men var {value!r}")
     return format_integer(integer)
 
 
@@ -616,12 +740,21 @@ def _sidebar(
 
         st.divider()
         if st.button(
-            "Hall of Fame",
+            "Managers",
+            key="managers-sidebar",
             icon=":material/military_tech:",
             width="stretch",
-            type="primary" if view == "hall-of-fame" else "secondary",
+            type="primary" if view in {"managers", "hall-of-fame"} else "secondary",
         ):
-            _navigate("hall-of-fame")
+            _navigate("managers")
+        if st.button(
+            "Kalender",
+            key="calendar-sidebar",
+            icon=":material/calendar_month:",
+            width="stretch",
+            type="primary" if view == "calendar" else "secondary",
+        ):
+            _navigate("calendar")
 
         if st.button(
             "Data og lager",
@@ -1580,7 +1713,7 @@ def _confirm_archive_manager_game(
         st.rerun()
     if confirm:
         try:
-            _freeze_complete_hall_of_fame(groups, include_round_wins=False)
+            _freeze_complete_hall_of_fame(groups, include_round_wins=True)
 
             store.archive_manager_game(manager_game.game)
         except PayloadError as exc:
@@ -1625,8 +1758,28 @@ def _game_round_center_tab(
                     ManifestStore(MANIFEST_DIR),
                 )
             _invalidate_snapshot_index()
+            refreshed_index = _scan_snapshots(str(OUTPUT_DIR.resolve()))
+            published_count = 0
+            pairing_errors: list[str] = []
+            for game_group in game_groups:
+                try:
+                    published = _publish_next_swiss_round(
+                        game_group,
+                        refreshed_index,
+                    )
+                except (OSError, PayloadError, ValueError) as exc:
+                    pairing_errors.append(f"{game_group.name}: {exc}")
+                else:
+                    published_count += published is not None
+            resolved_game_groups, pairing_warnings = (
+                _with_published_tournament_pairings(
+                    game_groups,
+                    refreshed_index,
+                )
+            )
+            pairing_errors.extend(pairing_warnings)
             _freeze_complete_hall_of_fame(
-                groups,
+                resolved_game_groups,
                 include_round_wins=True,
             )
             successes = sum(
@@ -1635,9 +1788,16 @@ def _game_round_center_tab(
             fallbacks = sum(
                 item.status == "cached_fallback" for item in result.teams
             )
+            pairing_detail = (
+                f" {published_count} Swiss-runder publiceret."
+                if published_count
+                else ""
+            )
+            if pairing_errors:
+                pairing_detail += " " + " | ".join(pairing_errors)
             st.session_state["game_refresh_notice"] = (
                 f"{successes} hold opdateret. {fallbacks} bruger cache. "
-                f"Manifest: {result.manifest_path.name}"
+                f"Manifest: {result.manifest_path.name}.{pairing_detail}"
             )
             st.rerun()
     if notice := st.session_state.pop("game_refresh_notice", None):
@@ -1892,6 +2052,38 @@ def _standings_table(
 
 
 
+
+def _round_story_panel(
+    group: GroupDefinition,
+    index: SnapshotIndex,
+    round_number: int,
+) -> None:
+    try:
+        settings = HubSettingsStore(APP_PATHS.hub_settings_file).load()
+    except (OSError, PayloadError, ValueError) as exc:
+        st.warning(f"Rundens historie kunne ikke l\u00e6ses: {exc}")
+        return
+    story = build_round_story(
+        (group,),
+        index,
+        settings,
+        group.game.slug,
+        round_number,
+        game_locale=group.game.locale,
+    )
+    st.subheader("Rundens historie")
+    if story.preliminary:
+        st.warning(story.headline)
+    else:
+        st.markdown(f"**{story.headline}**")
+    for paragraph in story.paragraphs:
+        st.write(paragraph)
+    if story.awards:
+        with st.container(horizontal=True):
+            for award in story.awards:
+                st.metric(award.title, award.detail, border=True)
+
+
 def _standings_group_view(group: GroupDefinition, index: SnapshotIndex) -> None:
     color, _ = _colors(group.game.slug)
     st.markdown(
@@ -1899,6 +2091,12 @@ def _standings_group_view(group: GroupDefinition, index: SnapshotIndex) -> None:
         unsafe_allow_html=True,
     )
     st.title(group.name, anchor=f"gruppe-{group.group_id}")
+    if group.official_url:
+        st.link_button(
+            "Åbn officiel gruppe",
+            group.official_url,
+            icon=":material/open_in_new:",
+        )
     st.caption(f"{group.game.slug} · {len(group.teams)} faste hold")
     if not group.teams:
         st.info("Gruppen har ingen hold endnu.")
@@ -1932,16 +2130,17 @@ def _standings_group_view(group: GroupDefinition, index: SnapshotIndex) -> None:
                 with controls[1]:
                     label = st.segmented_control(
                         "Visning",
-                        ("Overall", "Runde"),
-                        default="Overall",
+                        ("Samlet", "Runde"),
+                        default="Samlet",
                         key=f"mode-{group.group_id}",
                     )
                 _standings_table(
                     group,
                     index,
                     int(round_number),
-                    "overall" if label == "Overall" else "round",
+                    "overall" if label == "Samlet" else "round",
                 )
+                _round_story_panel(group, index, int(round_number))
     if history_tab.open:
         with history_tab:
             group_history_panel(group, index)
@@ -2150,7 +2349,11 @@ def _tournament_matches(
 ) -> None:
     _tournament_head_to_head(group, state, index)
     st.divider()
-    st.subheader("Alle gruppespilskampe")
+    st.subheader(
+        "Alle gruppespilskampe"
+        if group.tournament is not None and group.tournament.template == "group_knockout"
+        else "Alle kampe"
+    )
     rows: list[dict[str, object]] = []
     for match in state.group_matches:
         if match.fixture.is_bye:
@@ -2179,6 +2382,36 @@ def _tournament_matches(
                 "Status": status,
             }
         )
+    if group.tournament is not None and group.tournament.template == "double_elimination":
+        for match in state.knockout_matches:
+            participants = tuple(
+                team_id
+                for team_id in (match.team_a_id, match.team_b_id)
+                if team_id is not None
+            )
+            if match.complete:
+                status = "Færdig" if len(participants) == 2 else "Automatisk videre"
+            elif len(participants) < 2:
+                status = "Afventer tidligere kamp"
+            elif match.round_numbers[-1] <= state.as_of_round:
+                status = _round_data_label(
+                    _round_data_state(
+                        index, group.game, participants, match.round_numbers
+                    )
+                )
+            else:
+                status = "Planlagt"
+            rows.append(
+                {
+                    "Fase": match.stage,
+                    "Runde": "–".join(str(value) for value in match.round_numbers),
+                    "Hold A": match.team_a_name or "Afventer",
+                    "Vækst A": match.team_a_change,
+                    "Hold B": match.team_b_name or "Afventer",
+                    "Vækst B": match.team_b_change,
+                    "Status": status,
+                }
+            )
     st.dataframe(
         _style_integer_columns(rows, ("Vækst A", "Vækst B")),
         hide_index=True,
@@ -2309,7 +2542,11 @@ def _tournament_data_status(
 
 
 def _tournament_view(
-    group: GroupDefinition, index: SnapshotIndex, *, read_only: bool = False
+    group: GroupDefinition,
+    all_groups: tuple[GroupDefinition, ...],
+    index: SnapshotIndex,
+    *,
+    read_only: bool = False,
 ) -> None:
     assert group.tournament is not None
     color, _ = _colors(group.game.slug)
@@ -2319,6 +2556,12 @@ def _tournament_view(
         unsafe_allow_html=True,
     )
     st.title(group.name, anchor=f"gruppe-{group.group_id}")
+    if group.official_url:
+        st.link_button(
+            "Åbn officiel gruppe",
+            group.official_url,
+            icon=":material/open_in_new:",
+        )
     st.caption(f"{group.game.slug} · Turnering · {len(group.teams)} faste hold")
 
     round_key = f"tournament-round-{group.group_id}"
@@ -2339,7 +2582,40 @@ def _tournament_view(
                 ManifestStore(MANIFEST_DIR),
             )
         _invalidate_snapshot_index()
-        _freeze_complete_hall_of_fame((group,), include_round_wins=False)
+        refreshed_index = _scan_snapshots(str(OUTPUT_DIR.resolve()))
+        pairing_notice: tuple[str, str] | None = None
+        try:
+            published_pairing = _publish_next_swiss_round(
+                group,
+                refreshed_index,
+            )
+        except (OSError, PayloadError, ValueError) as exc:
+            pairing_notice = ("error", str(exc))
+        else:
+            if published_pairing is not None:
+                pairing_notice = (
+                    "success",
+                    "N\u00e6ste Swiss-runde blev publiceret.",
+                )
+        resolved_groups, pairing_warnings = _with_published_tournament_pairings(
+            (group,),
+            refreshed_index,
+        )
+        resolved_group = resolved_groups[0]
+        freeze_groups = tuple(
+            resolved_group
+            if item.group_id == group.group_id
+            else item
+            for item in all_groups
+            if _game_identity(item.game) == _game_identity(group.game)
+        )
+        _freeze_complete_hall_of_fame(
+            freeze_groups,
+            include_round_wins=True,
+        )
+        if pairing_warnings and pairing_notice is None:
+            pairing_notice = ("error", pairing_warnings[0])
+
 
         successes = sum(item.status == "success" for item in result.teams)
         fallbacks = sum(item.status == "cached_fallback" for item in result.teams)
@@ -2349,6 +2625,7 @@ def _tournament_view(
             "fallbacks": fallbacks,
             "failures": tuple((item.team_name, item.error) for item in failures),
             "manifest": result.manifest_path.name,
+            "pairing": pairing_notice,
         }
         st.session_state[round_key] = max(
             group.tournament.start_round,
@@ -2366,6 +2643,12 @@ def _tournament_view(
         )
         for team_name, error in notice["failures"]:
             st.error(f"{team_name}: {error or 'Opdateringen mislykkedes'}")
+        if notice.get("pairing"):
+            level, message = notice["pairing"]
+            if level == "error":
+                st.error(f"Swiss-parringen kunne ikke publiceres: {message}")
+            else:
+                st.success(message)
 
     rounds = list(range(group.tournament.start_round, group.tournament.final_round + 1))
     if round_key not in st.session_state or st.session_state[round_key] not in rounds:
@@ -2379,35 +2662,47 @@ def _tournament_view(
     )
     state = build_tournament_state(group, index, round_number)
     _tournament_data_status(group, state, index)
+    has_bracket = group.tournament.template in {
+        "group_knockout",
+        "double_elimination",
+    }
+    standing_label = (
+        "Gruppestilling"
+        if group.tournament.template == "group_knockout"
+        else "Stilling"
+    )
+    bracket_label = (
+        "Knockout"
+        if group.tournament.template == "group_knockout"
+        else "Bracket"
+    )
+    tab_labels = ["Overblik", standing_label, "Kampe"]
+    tab_routes = ["overview", "standings", "matches"]
+    if has_bracket:
+        tab_labels.append(bracket_label)
+        tab_routes.append("knockout")
+    tab_labels.append("Historik")
+    tab_routes.append("history")
     tabs = _stateful_tabs(
-        (
-            "Overblik",
-            "Gruppestilling",
-            "Kampe",
-            "Knockout",
-            "Historik",
-        ),
-        ("overview", "standings", "matches", "knockout", "history"),
+        tuple(tab_labels),
+        tuple(tab_routes),
         key=f"tournament-tabs-{group.group_id}",
         parameter="section",
     )
-    (
-        overview_tab,
-        standings_tab,
-        matches_tab,
-        knockout_tab,
-        history_tab,
-    ) = tabs
+    overview_tab, standings_tab, matches_tab = tabs[:3]
+    knockout_tab = tabs[3] if has_bracket else None
+    history_tab = tabs[-1]
     if overview_tab.open:
         with overview_tab:
             _tournament_overview(group, state)
+            _round_story_panel(group, index, round_number)
     if standings_tab.open:
         with standings_tab:
             _tournament_standings_table(group, state, round_number)
     if matches_tab.open:
         with matches_tab:
             _tournament_matches(group, state, index)
-    if knockout_tab.open:
+    if knockout_tab is not None and knockout_tab.open:
         with knockout_tab:
             _tournament_bracket(group, state)
     if history_tab.open:
@@ -2502,9 +2797,9 @@ def _team_history_rows(team) -> list[dict[str, object]]:
             "Specialbonus": summary.special_bonus,
             "Udskiftninger": summary.substitutions_used,
             "Runderang": summary.round_rank,
-            "Overall-rang": summary.overall_rank,
+            "Samlet placering": summary.overall_rank,
             "Runderangændring": summary.round_rank_change,
-            "Overall-rangændring": summary.overall_rank_change,
+            "Ændring i samlet placering": summary.overall_rank_change,
         }
         if team.overview.unit == "money":
             row.update({
@@ -2638,7 +2933,7 @@ def _render_team_snapshot(
                 metrics = st.columns(4)
                 metrics[0].metric("Total", _format_number(summary.total))
                 metrics[1].metric("Rundevækst", _format_number(summary.change, signed=True))
-                metrics[2].metric("Overall-rang", _format_number(summary.overall_rank))
+                metrics[2].metric("Samlet placering", _format_number(summary.overall_rank))
                 metrics[3].metric("Runderang", _format_number(summary.round_rank))
                 details = st.columns(4)
                 if team.overview.unit == "money":
@@ -2656,7 +2951,7 @@ def _render_team_snapshot(
                     ("Kaptajnbonus", summary.captain_bonus),
                     ("Specialbonus", summary.special_bonus),
                     ("Runderangændring", summary.round_rank_change),
-                    ("Overall-rangændring", summary.overall_rank_change),
+                    ("Ændring i samlet placering", summary.overall_rank_change),
                 ]
                 st.dataframe(_style_integer_columns(
                     [{"Del": label, "Ændring": value} for label, value in growth if value is not None],
@@ -3118,6 +3413,10 @@ def _confirm_tournament_rebuild(
     name: str,
     members: tuple[GroupTeam, ...],
     final_round: int,
+    template: str,
+    definition_options: dict[str, object],
+    start_round: int,
+    rounds_per_tie: int,
 ) -> None:
     assert group.tournament is not None
     old_ids = {team.team_id for team in group.teams}
@@ -3131,6 +3430,16 @@ def _confirm_tournament_rebuild(
     st.write(f"**Hold:** {len(old_ids)} → {len(new_ids)}")
     st.write(
         f"**Finalerunde:** {group.tournament.final_round} → {final_round}"
+    )
+    template_names = {
+        "league": "Liga",
+        "swiss": "Schweizersystem",
+        "group_knockout": "Gruppespil + knockout",
+        "double_elimination": "Double elimination",
+    }
+    st.write(
+        f"**Format:** {template_names[group.tournament.template]} → "
+        f"{template_names[template]}"
     )
     added = sorted(new_ids - old_ids)
     removed = sorted(old_ids - new_ids)
@@ -3152,6 +3461,10 @@ def _confirm_tournament_rebuild(
                 members,
                 final_round=final_round,
                 name=name,
+                template=template,
+                definition_options=definition_options,
+                start_round=start_round,
+                rounds_per_tie=rounds_per_tie,
             )
         except (PayloadError, ValueError) as exc:
             st.error(str(exc))
@@ -3256,10 +3569,34 @@ def _manage_game(
         start_round = 1
         rounds_per_tie = 1
         draw_seed: str | None = None
+        template = "group_knockout"
+        seed_rule = "random"
+        definition_options: dict[str, object] = {}
         draw_seed_key = (
             f"create-tournament-seed-{game.locale.casefold()}-{game.slug}"
         )
         if group_type == "Turnering":
+            template_labels = {
+                "Liga": "league",
+                "Schweizersystem": "swiss",
+                "Gruppespil + knockout": "group_knockout",
+                "Double elimination": "double_elimination",
+            }
+            template_label = st.segmented_control(
+                "Turneringsformat",
+                tuple(template_labels),
+                default="Gruppespil + knockout",
+                key="create-tournament-template",
+            )
+            template = template_labels[template_label or "Gruppespil + knockout"]
+            st.caption(
+                {
+                    "league": "Alle m\u00f8der alle en eller to gange.",
+                    "swiss": "Scoregrupper med rematch-undgåelse og fair bye.",
+                    "group_knockout": "Gruppespil efterfulgt af krydsseedet bracket.",
+                    "double_elimination": "Andet nederlag eliminerer; reset-finale er reserveret.",
+                }[template]
+            )
             settings = st.columns(3)
             with settings[0]:
                 start_round = int(st.number_input(
@@ -3274,6 +3611,89 @@ def _manage_game(
                 rounds_per_tie = int(st.selectbox(
                     "Runder pr. knockoutopgør", (1, 2),
                 ))
+            rule_labels = {
+                "Tilfældig": "random",
+                "Manuel rækkefølge": "manual",
+                "Aktuel Elo": "elo",
+            }
+            rule_label = st.selectbox(
+                "Seedning",
+                tuple(rule_labels),
+                key="create-tournament-seed-rule",
+            )
+            seed_rule = rule_labels[rule_label]
+            point_columns = st.columns(3)
+            with point_columns[0]:
+                win_points = int(st.number_input(
+                    "Point for sejr", min_value=1, value=3, step=1,
+                ))
+            with point_columns[1]:
+                draw_points = int(st.number_input(
+                    "Point for uafgjort", min_value=0, value=1, step=1,
+                ))
+            with point_columns[2]:
+                loss_points = int(st.number_input(
+                    "Point for nederlag", min_value=0, value=0, step=1,
+                ))
+            standing_options = {
+                "Scoreforskel": "score_difference",
+                "Opnået score": "score_for",
+                "Indbyrdes": "head_to_head",
+                "Buchholz": "buchholz",
+                "Seed": "entry_seed",
+            }
+            selected_standing_rules = st.multiselect(
+                "Tie-breakers i stillingen (i rækkefølge)",
+                tuple(standing_options),
+                default=("Scoreforskel", "Opnået score", "Indbyrdes", "Seed"),
+            )
+            knockout_options = {
+                "Sidste rundes vækst": "last_round_growth",
+                "Samlet Holdet-total": "overall_total",
+            }
+            selected_knockout_rules = st.multiselect(
+                "Tie-breakers i knockout",
+                tuple(knockout_options),
+                default=tuple(knockout_options),
+                help="Højere seed anvendes altid som sidste sportslige reservekriterium.",
+            )
+            definition_options = {
+                "match_points": (win_points, draw_points, loss_points),
+                "seed_rule": seed_rule,
+                "standings_tiebreakers": tuple(
+                    standing_options[item] for item in selected_standing_rules
+                ),
+                "knockout_tiebreakers": (
+                    *(knockout_options[item] for item in selected_knockout_rules),
+                    "higher_seed",
+                ),
+            }
+            if template == "league":
+                definition_options["league_legs"] = int(st.selectbox(
+                    "Indbyrdes kampe", (1, 2),
+                ))
+            elif template == "swiss":
+                definition_options["swiss_rounds"] = int(st.number_input(
+                    "Schweizerrunder", min_value=1, value=3, step=1,
+                ))
+            elif template == "group_knockout":
+                group_count = int(st.number_input(
+                    "Antal grupper", min_value=1, max_value=8, value=1, step=1,
+                ))
+                definition_options["group_count"] = group_count
+                if group_count > 1:
+                    definition_options["qualifiers_per_group"] = int(
+                        st.number_input(
+                            "Direkte kvalificerede pr. gruppe",
+                            min_value=0,
+                            value=1,
+                            step=1,
+                        )
+                    )
+                definition_options["bronze_match"] = st.checkbox(
+                    "Spil bronzekamp",
+                    value=False,
+                )
             draw_seed = st.session_state.setdefault(
                 draw_seed_key, generate_draw_seed()
             )
@@ -3296,6 +3716,47 @@ def _manage_game(
                 except (PayloadError, ValueError) as exc:
                     preview_error = exc
             unique_count = len({member.team_id for member in preview_members})
+            if preview_error is None and seed_rule in {"manual", "elo"}:
+                seed_order = tuple(member.team_id for member in preview_members)
+                if seed_rule == "elo":
+                    try:
+                        manager_settings = HubSettingsStore(
+                            APP_PATHS.hub_settings_file
+                        ).load()
+                        ratings_by_manager = {
+                            item.manager_id: item.rating
+                            for item in build_manager_ratings(
+                                groups, index, manager_settings
+                            )
+                        }
+
+                        def elo_for(member: GroupTeam) -> tuple[float, int]:
+                            snapshot = index.newest(game, member.team_id)
+                            if snapshot is None:
+                                return (-1500.0, member.team_id)
+                            manager_id, _ = resolve_manager_identity(
+                                manager_settings,
+                                owner_user_id=snapshot.team.owner_user_id,
+                                account_user_id=member.account_user_id,
+                                account_key=member.account_key,
+                                owner_name=snapshot.team.owner_name,
+                                fallback_key=(
+                                    f"{game.locale}:{game.slug}:team:"
+                                    f"{member.team_id}"
+                                ),
+                            )
+                            return (
+                                -ratings_by_manager.get(manager_id, 1500.0),
+                                member.team_id,
+                            )
+
+                        seed_order = tuple(
+                            member.team_id
+                            for member in sorted(preview_members, key=elo_for)
+                        )
+                    except (OSError, PayloadError, ValueError) as exc:
+                        preview_error = exc
+                definition_options["seed_order"] = seed_order
             if preview_error is not None:
                 st.warning(str(preview_error))
             elif not isinstance(final_round_value, int):
@@ -3306,19 +3767,46 @@ def _manage_game(
                         game, tuple(preview_members), start_round=start_round,
                         final_round=final_round_value,
                         rounds_per_tie=rounds_per_tie, draw_seed=draw_seed,
+                        template=template,
+                        definition_options=definition_options,
                     )
                 except (PayloadError, ValueError) as exc:
                     st.warning(str(exc))
                 else:
                     draw_seed = preview_config.draw_seed
                     st.session_state[draw_seed_key] = draw_seed
-                    stage_count = preview_config.knockout_stage_count
-                    st.info(
-                        f"{unique_count} hold · top {preview_config.knockout_size} "
-                        f"går videre · gruppespil runde {start_round}–"
-                        f"{preview_config.group_end_round} · "
-                        f"{count_label(stage_count, 'knockoutfase', 'knockoutfaser')}"
-                    )
+                    if template == "league":
+                        series_label = (
+                            "kampserie"
+                            if preview_config.league_legs == 1
+                            else "kampserier"
+                        )
+                        preview_message = (
+                            f"{unique_count} hold · {preview_config.league_legs} "
+                            f"indbyrdes {series_label} · runde {start_round}–"
+                            f"{preview_config.final_round}"
+                        )
+                    elif template == "swiss":
+                        preview_message = (
+                            f"{unique_count} hold · {preview_config.swiss_rounds} "
+                            f"schweizerrunder · første parring er klar i runde {start_round}"
+                        )
+                    elif template == "double_elimination":
+                        match_count = 4 * len(preview_config.group_fixtures) - 1
+                        preview_message = (
+                            f"{unique_count} hold · {match_count} bracketpladser inkl. "
+                            f"betinget reset-finale · runde {start_round}–"
+                            f"{preview_config.final_round}"
+                        )
+                    else:
+                        stage_count = preview_config.knockout_stage_count
+                        preview_message = (
+                            f"{unique_count} hold · top {preview_config.knockout_size} "
+                            f"går videre · gruppespil runde {start_round}–"
+                            f"{preview_config.group_end_round} · "
+                            f"{count_label(stage_count, 'knockoutfase', 'knockoutfaser')}"
+                        )
+                    st.info(preview_message)
                     if unique_count == 2:
                         st.warning(
                             "Med to hold findes der kun én mulig modstanderplan. "
@@ -3360,6 +3848,8 @@ def _manage_game(
                         final_round=final_round_value,
                         rounds_per_tie=rounds_per_tie,
                         draw_seed=draw_seed,
+                        template=template,
+                        definition_options=definition_options,
                     )
                 else:
                     store.create(name, game, members)
@@ -3373,6 +3863,35 @@ def _manage_game(
     for group in groups:
         type_label = "Turnering" if group.kind == "tournament" else "Gruppestilling"
         with st.expander(f"{group.name} · {type_label} · {group.game.slug}"):
+            with st.form(f"official-link-{group.group_id}"):
+                official_url = st.text_input(
+                    "Officiel Holdet-gruppe eller miniliga",
+                    value=group.official_url or "",
+                    placeholder=f"https://www.holdet.dk/{group.game.locale}/...",
+                )
+                link_types = ("group", "minileague")
+                current_type = group.official_link_type or "group"
+                official_link_type = st.selectbox(
+                    "Linktype",
+                    link_types,
+                    index=link_types.index(current_type),
+                )
+                save_official = st.form_submit_button("Gem officielt link")
+            if save_official:
+                try:
+                    store.update(
+                        replace(
+                            group,
+                            official_url=official_url.strip() or None,
+                            official_link_type=(
+                                official_link_type if official_url.strip() else None
+                            ),
+                        )
+                    )
+                except PayloadError as exc:
+                    st.error(str(exc))
+                else:
+                    st.rerun()
             if st.button(
                 "Find flere hold på konfigurerede konti", icon=":material/search:",
                 key=f"discover-edit-{group.group_id}",
@@ -3411,12 +3930,20 @@ def _manage_game(
 
             if group.kind == "tournament":
                 assert group.tournament is not None
+                active_format = {
+                    "league": "Liga",
+                    "swiss": "Schweizersystem",
+                    "group_knockout": "Gruppespil + knockout",
+                    "double_elimination": "Double elimination",
+                }[group.tournament.template]
+                tie_detail = (
+                    f" · {count_label(group.tournament.rounds_per_tie, 'runde', 'runder')} pr. opgør"
+                    if group.tournament.template in {"group_knockout", "double_elimination"}
+                    else ""
+                )
                 st.caption(
-                    f"Aktiv revision {group.active_revision} · runde "
-                    f"{group.tournament.start_round}–{group.tournament.final_round} · "
-                    f"top {group.tournament.knockout_size} · "
-                    f"{count_label(group.tournament.rounds_per_tie, 'runde', 'runder')} "
-                    "pr. opgør"
+                    f"Aktiv revision {group.active_revision} · {active_format} · runde "
+                    f"{group.tournament.start_round}–{group.tournament.final_round}{tie_detail}"
                 )
                 st.caption(
                     "Lodtrækningsseed: "
@@ -3424,12 +3951,38 @@ def _manage_game(
                 )
                 info = _known_game_info(group.game)
                 fetched_final = getattr(info, "final_round", None)
-                if isinstance(fetched_final, int) and fetched_final != group.tournament.final_round:
+                if (
+                    group.tournament.template == "group_knockout"
+                    and isinstance(fetched_final, int)
+                    and fetched_final != group.tournament.final_round
+                ):
                     st.warning(
                         f"Holdet angiver nu finalerunde {fetched_final}; den aktive "
                         f"revision bruger {group.tournament.final_round}. Gem ændringer "
                         "for at vælge, om turneringen skal genberegnes."
                     )
+                format_options = {
+                    "Liga": "league",
+                    "Schweizersystem": "swiss",
+                    "Gruppespil + knockout": "group_knockout",
+                    "Double elimination": "double_elimination",
+                }
+                current_format = next(
+                    label
+                    for label, value in format_options.items()
+                    if value == group.tournament.template
+                )
+                standing_labels = {
+                    "score_difference": "Scoreforskel",
+                    "score_for": "Opnået score",
+                    "head_to_head": "Indbyrdes",
+                    "buchholz": "Buchholz",
+                    "entry_seed": "Seed",
+                }
+                knockout_labels = {
+                    "last_round_growth": "Sidste rundes vækst",
+                    "overall_total": "Samlet Holdet-total",
+                }
                 with st.form(f"edit-{group.group_id}"):
                     renamed = st.text_input("Navn", value=group.name)
                     selected = st.multiselect(
@@ -3437,6 +3990,97 @@ def _manage_game(
                         format_func=lambda key: labels[key],
                     )
                     direct = st.text_area("Tilføj direkte fantasy-team URLs eller ID'er")
+                    edited_format_label = st.selectbox(
+                        "Format",
+                        tuple(format_options),
+                        index=tuple(format_options).index(current_format),
+                    )
+                    edited_template = format_options[edited_format_label]
+                    structure = st.columns(2)
+                    with structure[0]:
+                        edited_start_round = int(st.number_input(
+                            "Startrunde",
+                            min_value=1,
+                            value=group.tournament.start_round,
+                            step=1,
+                        ))
+                    with structure[1]:
+                        edited_rounds_per_tie = int(st.selectbox(
+                            "Runder pr. knockoutopgør",
+                            (1, 2),
+                            index=(1, 2).index(group.tournament.rounds_per_tie),
+                        ))
+                    point_columns = st.columns(3)
+                    edited_points = tuple(
+                        int(column.number_input(
+                            label, min_value=minimum, value=value, step=1
+                        ))
+                        for column, label, minimum, value in zip(
+                            point_columns,
+                            ("Point for sejr", "Point for uafgjort", "Point for nederlag"),
+                            (1, 0, 0),
+                            group.tournament.match_points,
+                        )
+                    )
+                    edited_seed_rule = st.selectbox(
+                        "Seedregel",
+                        ("random", "manual", "elo"),
+                        index=("random", "manual", "elo").index(group.tournament.seed_rule),
+                    )
+                    edited_standing_rules = tuple(st.multiselect(
+                        "Tie-breakers i stillingen",
+                        tuple(standing_labels),
+                        default=group.tournament.standings_tiebreakers,
+                        format_func=lambda value: standing_labels[value],
+                    ))
+                    edited_knockout_rules = tuple(st.multiselect(
+                        "Tie-breakers i knockout",
+                        tuple(knockout_labels),
+                        default=tuple(
+                            value
+                            for value in group.tournament.knockout_tiebreakers
+                            if value != "higher_seed"
+                        ),
+                        format_func=lambda value: knockout_labels[value],
+                        help="Højere seed er altid det sidste sportslige reservekriterium.",
+                    ))
+                    league_legs = group.tournament.league_legs
+                    swiss_rounds = group.tournament.swiss_rounds
+                    group_count = group.tournament.group_count
+                    qualifiers_per_group = group.tournament.qualifiers_per_group
+                    bronze_match = group.tournament.bronze_match
+                    if edited_template == "league":
+                        league_legs = int(st.selectbox(
+                            "Indbyrdes kampe",
+                            (1, 2),
+                            index=(1, 2).index(group.tournament.league_legs),
+                        ))
+                    elif edited_template == "swiss":
+                        swiss_rounds = int(st.number_input(
+                            "Schweizerrunder",
+                            min_value=1,
+                            value=group.tournament.swiss_rounds or 3,
+                            step=1,
+                        ))
+                    elif edited_template == "group_knockout":
+                        group_count = int(st.number_input(
+                            "Antal grupper",
+                            min_value=1, max_value=8,
+                            value=group.tournament.group_count, step=1,
+                        ))
+                        qualifiers_per_group = (
+                            int(st.number_input(
+                                "Direkte kvalificerede pr. gruppe",
+                                min_value=0,
+                                value=group.tournament.qualifiers_per_group or 1,
+                                step=1,
+                            ))
+                            if group_count > 1
+                            else None
+                        )
+                        bronze_match = st.checkbox(
+                            "Spil bronzekamp", value=group.tournament.bronze_match
+                        )
                     save = st.form_submit_button("Gem ændringer")
                 if save:
                     try:
@@ -3446,29 +4090,80 @@ def _manage_game(
                         old_ids = tuple(team.team_id for team in group.teams)
                         new_ids = tuple(dict.fromkeys(team.team_id for team in members_tuple))
                         membership_changed = set(old_ids) != set(new_ids)
+                        edited_options: dict[str, object] = {
+                            "match_points": edited_points,
+                            "seed_rule": edited_seed_rule,
+                            "standings_tiebreakers": edited_standing_rules,
+                            "knockout_tiebreakers": (
+                                *edited_knockout_rules, "higher_seed"
+                            ),
+                            "league_legs": league_legs,
+                            "swiss_rounds": swiss_rounds,
+                            "group_count": group_count,
+                            "qualifiers_per_group": qualifiers_per_group,
+                            "bronze_match": bronze_match,
+                        }
+                        if edited_seed_rule in {"manual", "elo"}:
+                            prior_order = group.tournament.seed_order or old_ids
+                            edited_options["seed_order"] = (
+                                *(team_id for team_id in prior_order if team_id in set(new_ids)),
+                                *(team_id for team_id in new_ids if team_id not in set(prior_order)),
+                            )
+                        target_knockout_rules = (
+                            *edited_knockout_rules, "higher_seed"
+                        )
+                        structural_changed = any((
+                            edited_template != group.tournament.template,
+                            edited_start_round != group.tournament.start_round,
+                            edited_rounds_per_tie != group.tournament.rounds_per_tie,
+                            edited_points != group.tournament.match_points,
+                            edited_seed_rule != group.tournament.seed_rule,
+                            edited_standing_rules != group.tournament.standings_tiebreakers,
+                            target_knockout_rules != group.tournament.knockout_tiebreakers,
+                            league_legs != group.tournament.league_legs,
+                            swiss_rounds != group.tournament.swiss_rounds,
+                            group_count != group.tournament.group_count,
+                            qualifiers_per_group != group.tournament.qualifiers_per_group,
+                            bronze_match != group.tournament.bronze_match,
+                        ))
                         final_changed = (
-                            isinstance(fetched_final, int)
+                            edited_template == "group_knockout"
+                            and isinstance(fetched_final, int)
                             and fetched_final != group.tournament.final_round
                         )
-                        if membership_changed and not isinstance(fetched_final, int):
+                        if (
+                            membership_changed
+                            and edited_template == "group_knockout"
+                            and not isinstance(fetched_final, int)
+                        ):
                             raise PayloadError(
                                 "Hent aktuel spilinfo før deltagerne ændres."
                             )
-                        if membership_changed or final_changed:
+                        if membership_changed or final_changed or structural_changed:
                             target_final = (
-                                fetched_final if isinstance(fetched_final, int)
+                                fetched_final
+                                if isinstance(fetched_final, int)
                                 else group.tournament.final_round
                             )
-                            size = knockout_size_for(len(set(new_ids)))
-                            group_end = target_final - (
-                                size.bit_length() - 1
-                            ) * group.tournament.rounds_per_tie
-                            if group_end < group.tournament.start_round:
-                                raise PayloadError(
-                                    "Ændringen efterlader ikke mindst én gruppespilsrunde."
-                                )
+                            store.plan_tournament(
+                                group.game,
+                                members_tuple,
+                                start_round=edited_start_round,
+                                final_round=target_final,
+                                rounds_per_tie=edited_rounds_per_tie,
+                                draw_seed=group.tournament.draw_seed,
+                                template=edited_template,
+                                definition_options=edited_options,
+                            )
                             pending = (
-                                group, renamed.strip(), members_tuple, target_final
+                                group,
+                                renamed.strip(),
+                                members_tuple,
+                                target_final,
+                                edited_template,
+                                edited_options,
+                                edited_start_round,
+                                edited_rounds_per_tie,
                             )
                             st.session_state["pending_tournament_rebuild"] = pending
                             _confirm_tournament_rebuild(store, *pending)
@@ -3527,16 +4222,28 @@ def _manage_game(
             if st.button(
                 "Slet gruppe", key=f"delete-{group.group_id}", disabled=not confirm,
             ):
-                store.delete(group.group_id)
-                st.rerun()
+                try:
+                    active_competitions = {
+                        competition
+                        for season in SeasonStore(APP_PATHS.seasons_file).load()
+                        if not season.is_archived
+                        for competition in season.competition_ids
+                    }
+                    if group.group_id in active_competitions:
+                        raise PayloadError("Fjern gruppen fra den aktive sæson før sletning.")
+                    store.delete(group.group_id)
+                except PayloadError as exc:
+                    st.error(str(exc))
+                else:
 
+                    st.rerun()
 
 
 
 def _not_found_view() -> None:
     st.title("Siden findes ikke")
     st.error(
-        "Linket peger på en route, som ikke længere findes. "
+        "Linket peger på en rute, som ikke længere findes. "
         "Åbn funktionen fra dens managerspil-, hold-, spiller- eller datasammenhæng."
     )
     st.link_button(
@@ -3557,14 +4264,20 @@ def main() -> None:
     group_store = GroupStore(GROUPS_PATH, APP_PATHS.group_revision_dir)
     account_store = AccountStore(ACCOUNTS_PATH)
     try:
-        configuration = group_store.load_configuration()
+        configuration, configuration_warnings = (
+            group_store.load_configuration_with_warnings()
+        )
     except PayloadError as exc:
         configuration = HubConfiguration((), ())
+        configuration_warnings = ()
         st.error(f"Hubkonfigurationen kunne ikke læses: {exc}")
     games = configuration.games
     active_games = tuple(game for game in games if not game.is_archived)
-    groups = configuration.groups
     index = _scan_snapshots(str(OUTPUT_DIR.resolve()))
+    groups, pairing_warnings = _with_published_tournament_pairings(
+        configuration.groups,
+        index,
+    )
 
     view = st.query_params.get("view", "home")
     group_id = st.query_params.get("group")
@@ -3587,6 +4300,8 @@ def main() -> None:
 
     _sidebar(games, groups, selected_game, group, str(view))
     _warning_panel(index)
+    for warning in (*configuration_warnings, *pairing_warnings):
+        st.warning(warning)
     read_only = bool(selected_game and selected_game.is_archived)
     if read_only and selected_game is not None and view in {"game", "group", "team"}:
         _archived_banner(
@@ -3606,7 +4321,11 @@ def main() -> None:
             selected_game, groups, index, group_store, read_only=read_only
         )
     elif view == "hall-of-fame":
-        hall_of_fame_view(groups, index, APP_PATHS)
+        _navigate("managers")
+    elif view == "managers":
+        managers_view(groups, index, APP_PATHS)
+    elif view == "calendar":
+        calendar_view(groups, APP_PATHS, index)
     elif view == "data":
         data_storage_view(
             account_store,
@@ -3621,7 +4340,12 @@ def main() -> None:
         _standalone_team_statistics(games, groups, index)
     elif view == "group" and group is not None:
         if group.kind == "tournament":
-            _tournament_view(group, index, read_only=read_only)
+            _tournament_view(
+                group,
+                groups,
+                index,
+                read_only=read_only,
+            )
         else:
             _standings_group_view(group, index)
     elif view == "team" and group is not None:

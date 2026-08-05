@@ -166,7 +166,7 @@ class PlayerSerializationTests(unittest.TestCase):
         cycling["schema_version"] = 1
         cycling["game"].pop("format")
         cycling["game"].pop("unit")
-        with self.assertRaisesRegex(holdet.PayloadError, "fetch this round again"):
+        with self.assertRaisesRegex(holdet.PayloadError, "hent denne runde igen"):
             holdet.player_statistics_from_dict(cycling)
 
         soccer = json.loads(

@@ -86,7 +86,7 @@ class HttpClient:
         proxy_resolver: Callable[[str], str | None] = _configured_proxy_for_url,
     ) -> None:
         if retries < 0 or connection_refused_retries < 0:
-            raise ValueError("retry counts must be non-negative")
+            raise ValueError("Antallet af genforsøg må ikke være negativt")
         self.timeout = timeout
         self.retries = retries
         self.connection_refused_retries = connection_refused_retries
@@ -113,7 +113,7 @@ class HttpClient:
                         return body.decode(charset)
                     except (LookupError, UnicodeDecodeError) as exc:
                         raise FetchError(
-                            f"could not decode {url} using {charset!r}"
+                            f"URL'en {url} kunne ikke afkodes med {charset!r}"
                         ) from exc
             except HTTPError as exc:
                 last_error = exc
@@ -122,7 +122,7 @@ class HttpClient:
                     or attempt >= self.retries
                 ):
                     raise FetchError(
-                        f"HTTP {exc.code} while fetching {url}"
+                        f"HTTP {exc.code} under hentning af {url}"
                     ) from exc
                 self.sleep(_retry_delay(exc, attempt))
             except (TimeoutError, URLError, OSError) as exc:
@@ -144,18 +144,18 @@ class HttpClient:
                         else ""
                     )
                     raise FetchError(
-                        f"could not fetch {url}{route}: {reason}"
+                        f"Kunne ikke hente {url}{route}: {reason}"
                     ) from exc
                 self.sleep(_retry_delay(None, attempt))
             attempt += 1
-        raise FetchError(f"could not fetch {url}: {last_error}")
+        raise FetchError(f"Kunne ikke hente {url}: {last_error}")
 
     def fetch_json(self, url: str) -> object:
         text = self.fetch_text(url, accept="application/json")
         try:
             return json.loads(text)
         except json.JSONDecodeError as exc:
-            raise PayloadError(f"invalid JSON returned by {url}") from exc
+            raise PayloadError(f"URL'en {url} returnerede ugyldig JSON") from exc
 
 
 def fetch_html(

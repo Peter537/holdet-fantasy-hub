@@ -16,7 +16,7 @@ class TeamEdgeCaseTests(unittest.TestCase):
         )
 
     def test_history_rejects_missing_scoring_bucket(self) -> None:
-        with self.assertRaisesRegex(scraper.PayloadError, "lacks assets"):
+        with self.assertRaisesRegex(scraper.PayloadError, "mangler assets"):
             scraper.parse_history(
                 {"items": [{"round": 1, "points": {"value": 2}}]},
                 salary_cap=True,

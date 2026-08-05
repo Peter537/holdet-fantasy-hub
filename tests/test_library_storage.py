@@ -252,7 +252,7 @@ class GroupTests(unittest.TestCase):
             ))
             self.assertEqual(store.load()[0].name, "Nyt navn")
             wrong = sample_team(team_id=202, slug="golf-manager-2026")
-            with self.assertRaisesRegex(holdet.PayloadError, "belongs to"):
+            with self.assertRaisesRegex(holdet.PayloadError, "tilhører"):
                 store.update(
                     holdet.GroupDefinition(
                         group.group_id,

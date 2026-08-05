@@ -47,7 +47,7 @@ def build_standings(
     """Build competition-ranked standings for one historical round."""
 
     if mode not in {"overall", "round"}:
-        raise ValueError("standings mode must be 'overall' or 'round'")
+        raise ValueError("Stillingstilstanden skal være 'overall' eller 'round'")
     provisional: list[StandingRow] = []
     for member in group.teams:
         located = snapshots.summary_for(group.game, member.team_id, round_number)

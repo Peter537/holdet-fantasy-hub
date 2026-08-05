@@ -64,6 +64,7 @@ def _canonical_files(paths: AppPaths) -> tuple[tuple[str, Path], ...]:
         ("data/snapshots", paths.snapshot_dir),
         ("data/manifests", paths.manifest_dir),
         ("data/group-revisions", paths.group_revision_dir),
+        ("data/tournament-pairings", paths.tournament_pairing_dir),
         ("data/game-metadata", paths.game_metadata_dir),
         ("data/hall-of-fame", paths.hall_of_fame_dir),
     )
@@ -158,7 +159,7 @@ def _source_bytes(source: bytes | bytearray | Path | str | BinaryIO) -> bytes:
     if hasattr(source, "read"):
         value = source.read()
         if not isinstance(value, bytes):
-            raise PayloadError("backupkilden skal levere bytes")
+            raise PayloadError("Backupkilden skal levere bytes")
         return value
     return Path(source).read_bytes()
 
@@ -186,8 +187,20 @@ def _known_schema(path: str, data: bytes) -> str | None:
     if not isinstance(payload, dict):
         return f"{path}: JSON-roden skal være et objekt"
     version = payload.get("schema_version")
+    if path == "config/groups.json" and version == 8:
+        return None
     if path == "config/groups.json" and version not in {1, 2, 3, 4, 5, 6, 7}:
         return f"{path}: ukendt gruppeschema"
+    if path == "config/groups.json" and version == 8:
+        return None
+    if path == "config/hub-settings.json" and version == 2:
+        return None
+    if path == "config/seasons.json" and version == 1:
+        return None
+    if path.startswith("data/tournament-pairings/") and version == 1:
+        return None
+    if path.startswith("data/hall-of-fame/") and version == 2:
+        return None
     if path == "config/hub-settings.json" and version != 1:
         return f"{path}: ukendt Hub-schema"
     if path.startswith("data/game-metadata/") and version != 1:
@@ -209,16 +222,16 @@ def _parse_manifest(data: bytes) -> BackupManifest:
     try:
         payload = json.loads(data.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise PayloadError("backupmanifestet indeholder ugyldig JSON") from exc
+        raise PayloadError("Backupmanifestet indeholder ugyldig JSON") from exc
     if not isinstance(payload, dict) or payload.get("schema_version") != 1:
-        raise PayloadError("ukendt backupmanifest-schema")
+        raise PayloadError("Ukendt skema for backupmanifest")
     files = payload.get("files")
     if not isinstance(files, list):
-        raise PayloadError("backupmanifestet mangler fillisten")
+        raise PayloadError("Backupmanifestet mangler fillisten")
     parsed: list[BackupManifestEntry] = []
     for raw in files:
         if not isinstance(raw, dict):
-            raise PayloadError("backupmanifestet har en ugyldig filpost")
+            raise PayloadError("Backupmanifestet har en ugyldig filpost")
         path = raw.get("path")
         size = raw.get("size")
         digest = raw.get("sha256")
@@ -231,17 +244,17 @@ def _parse_manifest(data: bytes) -> BackupManifest:
             or not isinstance(digest, str)
             or len(digest) != 64
         ):
-            raise PayloadError("backupmanifestet har en ugyldig filpost")
+            raise PayloadError("Backupmanifestet har en ugyldig filpost")
         parsed.append(BackupManifestEntry(path, size, digest))
     try:
         created = datetime.fromisoformat(str(payload["created_at"]))
     except (KeyError, ValueError) as exc:
-        raise PayloadError("backupmanifestet har et ugyldigt tidspunkt") from exc
+        raise PayloadError("Backupmanifestet har et ugyldigt tidspunkt") from exc
     if created.tzinfo is None:
         created = created.astimezone()
     total = payload.get("total_bytes")
     if not isinstance(total, int) or isinstance(total, bool) or total < 0:
-        raise PayloadError("backupmanifestet har en ugyldig totalstørrelse")
+        raise PayloadError("Backupmanifestet har en ugyldig totalstørrelse")
     return BackupManifest(1, created, tuple(parsed), total)
 
 
@@ -370,11 +383,11 @@ def restore_backup(
                 os.replace(old_config, paths.config_dir)
         except Exception as rollback_exc:
             raise PayloadError(
-                f"Gendannelse fejlede, og rollback fejlede: {rollback_exc}. "
+                f"Gendannelsen mislykkedes, og tilbagerulningen mislykkedes: {rollback_exc}. "
                 f"Rollback-ZIP: {rollback}"
             ) from exc
         raise PayloadError(
-            f"Gendannelse fejlede; den oprindelige installation er lagt tilbage: {exc}"
+            f"Gendannelsen mislykkedes; den oprindelige installation er lagt tilbage: {exc}"
         ) from exc
     finally:
         shutil.rmtree(config_temp, ignore_errors=True)

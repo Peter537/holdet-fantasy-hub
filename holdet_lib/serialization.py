@@ -34,13 +34,13 @@ def team_to_json(team: ScrapedTeam, *, generated_at: datetime) -> str:
 
 def _object(value: object, label: str) -> dict[str, Any]:
     if not isinstance(value, dict):
-        raise PayloadError(f"snapshot {label} must be an object")
+        raise PayloadError(f"Snapshottets {label} skal være et objekt")
     return value
 
 
 def _list(value: object, label: str) -> list[Any]:
     if not isinstance(value, list):
-        raise PayloadError(f"snapshot {label} must be a list")
+        raise PayloadError(f"Snapshottets {label} skal være en liste")
     return value
 
 
@@ -48,7 +48,7 @@ def _integer(value: object, label: str, *, optional: bool = False) -> int | None
     if value is None and optional:
         return None
     if not isinstance(value, int) or isinstance(value, bool):
-        raise PayloadError(f"snapshot {label} must be an integer")
+        raise PayloadError(f"Snapshottets {label} skal være et heltal")
     return value
 
 
@@ -56,13 +56,13 @@ def _text(value: object, label: str, *, optional: bool = False) -> str | None:
     if value is None and optional:
         return None
     if not isinstance(value, str) or not value.strip():
-        raise PayloadError(f"snapshot {label} must be non-empty text")
+        raise PayloadError(f"Snapshottets {label} skal være udfyldt tekst")
     return value
 
 
 def _round_status(value: object, label: str) -> RoundStatus:
     if value not in {"complete", "in_progress", "unknown"}:
-        raise PayloadError(f"snapshot {label} has an invalid round status")
+        raise PayloadError(f"Snapshottets {label} har en ugyldig rundestatus")
     return cast(RoundStatus, value)
 
 
@@ -72,11 +72,11 @@ def _datetime(
     if value is None and optional:
         return None
     if not isinstance(value, str) or not value.strip():
-        raise PayloadError(f"snapshot {label} must be an ISO timestamp")
+        raise PayloadError(f"Snapshottets {label} skal være et ISO-tidspunkt")
     try:
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError as exc:
-        raise PayloadError(f"snapshot {label} must be an ISO timestamp") from exc
+        raise PayloadError(f"Snapshottets {label} skal være et ISO-tidspunkt") from exc
 
 
 def _round_from_dict(raw: object, *, schema_version: int) -> RoundSummary:
@@ -137,7 +137,7 @@ def _roster_from_dict(raw: object) -> RosterEntry:
     item = _object(raw, "roster item")
     statuses = item.get("statuses", [])
     if not isinstance(statuses, list) or not all(isinstance(value, str) for value in statuses):
-        raise PayloadError("snapshot roster.statuses must be a string list")
+        raise PayloadError("Snapshottets roster.statuses skal være en liste med tekstværdier")
     status_set = set(statuses)
     return RosterEntry(
         source_index=_integer(item.get("source_index"), "roster.source_index"),
@@ -168,7 +168,7 @@ def team_from_dict(payload: object) -> ScrapedTeam:
     schema_version = root.get("schema_version")
     if schema_version not in {1, SCHEMA_VERSION}:
         raise PayloadError(
-            f"unsupported team snapshot schema: {schema_version!r}"
+            f"Ikke-understøttet skema for holdsnapshot: {schema_version!r}"
         )
     source = _object(root.get("source"), "source")
     game_data = _object(root.get("game"), "game")

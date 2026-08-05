@@ -56,7 +56,7 @@ class TeamExportTests(unittest.TestCase):
                 self.assertEqual(artifact.path.read_bytes(), artifact.content)
 
     def test_missing_round_summary_is_an_error(self) -> None:
-        with self.assertRaisesRegex(Exception, "no round 99"):
+        with self.assertRaisesRegex(Exception, "ingen runde 99"):
             build_team_export(self.team, scope="round", round_number=99)
 
 

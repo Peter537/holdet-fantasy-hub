@@ -23,7 +23,7 @@ sequenceDiagram
     Store-->>Web: Publiceret atomisk
 ```
 
-Navigation, Rundecenter, Datastatus, historik, watchlist, sammenligning, ændringer og Transferlaboratorium stopper før første netværkspil. De bruger kun eksisterende snapshots og metadata. Manglende metadata vises som en datamangel og udløser aldrig automatisk kontakt til Holdet.
+Navigation, Rundecenter, Managers, H2H, sæsoner, Kalender, Datastatus, historik, watchlist, sammenligning, ændringer og Transferlaboratorium stopper før første netværkspil. De bruger kun eksisterende snapshots, publicerede parringer og metadata. Manglende metadata vises som en datamangel og udløser aldrig automatisk kontakt til Holdet.
 
 ## URL, variant og spilpolitik
 
@@ -51,15 +51,19 @@ Round-aware ændringer sammenligner bagefter de seneste lokale hentninger i valg
 
 ## Fantasyhold, historik og schedule
 
-En teamhentning kombinerer fantasyteam-siden, `/api/fantasyteams/<id>/history`, offentlige overall-/rundelister og cartridge-data. `/api/schedules/<schedule-id>` hentes sammen med manuelle spiller- og holdhentninger.
+En teamhentning kombinerer fantasyteam-siden, `/api/fantasyteams/<id>/history`, offentlige samlede lister og rundelister samt cartridge-data. `/api/schedules/<schedule-id>` hentes sammen med manuelle spiller- og holdhentninger.
 
 Schedule-parseren gemmer hver rundes `start`, `close` og `end`. Sluttid og hentetid afgør, om en sammenligning eller transfersimulation kan kaldes `final`, mens snapshotstatus er `complete`, `in_progress` eller `unknown`. Hvis schedulekaldet fejler, gemmes øvrige gyldige data med `unknown` og UI'et markerer grundlaget som foreløbigt.
 
 For pengebaserede spil kontrolleres opstillingens værdi mod historikkens total minus bank. Uoverensstemmelse genhentes én gang og giver derefter fejl.
 
-## Manuelle opdateringer og frysning
+## Manuelle opdateringer og eventrevisioner
 
-Kun eksplicitte manager-, spiller-, hold-, gruppe- og turneringshandlinger skriver nye snapshots eller metadata. En slutrunde-refresh eller arkivering kan desuden fryse komplette Hall of Fame-events. Ufuldstændige arkiverede spil bevares uden point, indtil komplette data senere hentes eksplicit.
+Kun eksplicitte manager-, spiller-, hold-, gruppe- og turneringshandlinger skriver nye snapshots eller metadata. En komplet slutrunde-refresh, arkivering eller **Genopbyg historik fra cache** kan desuden publicere manager-events.
+
+Et komplet resultat er append-only. Hvis kildedata rettes, gemmes en højere eventrevision med reference til den supersedede revision; den gamle payload overskrives ikke. Schema-1 Hall of Fame-events læses som legacy-revisioner og remappes gennem de aktuelle managerprofiler.
+
+Almindelig navigation beregner kun Elo, awards, historier, H2H, sæsonstillinger og kalender-events som previews. Ufuldstændige runder markeres foreløbige og fryses ikke. Swiss-parringer publiceres først efter en eksplicit refresh, som har gjort den foregående runde komplet.
 
 ## HTTP, retries og proxy
 
@@ -77,4 +81,4 @@ Ved fejl bevarer dashboardet en gyldig cache og tilbyder et eksplicit retry. Nav
 
 Nødvendige felter valideres strengt. Tom spillerliste, manglende runde, ukendt format eller uforenelig historik giver en konkret fejl uden delvist snapshot. Valgfrie offentlige rangeringer kan være `None`.
 
-Der findes ingen baggrundspolling eller scheduler. Historiske opstillinger vises kun, hvis et kanonisk teamsnapshot blev gemt præcis i runden. Manglende værdier, top-procenter eller resultater estimeres aldrig.
+Der findes ingen baggrundspolling eller scheduler. Kalenderen er cache-only og opretter ikke ICS-filer eller påmindelser. Historiske opstillinger vises kun, hvis et kanonisk teamsnapshot blev gemt præcis i runden. Manglende værdier, top-procenter eller resultater estimeres aldrig.

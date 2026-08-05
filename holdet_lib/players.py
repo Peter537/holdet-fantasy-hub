@@ -27,28 +27,28 @@ def normalize_game_url(raw_url: str) -> GameUrl:
         parsed = urlsplit(value)
         port = parsed.port
     except ValueError as exc:
-        raise UrlValidationError(f"invalid URL: {exc}") from exc
+        raise UrlValidationError(f"Ugyldig URL: {exc}") from exc
 
     if parsed.scheme.casefold() != "https":
-        raise UrlValidationError("URL must use https://")
+        raise UrlValidationError("URL'en skal bruge https://")
     if parsed.username or parsed.password:
-        raise UrlValidationError("URL must not contain credentials")
+        raise UrlValidationError("URL'en må ikke indeholde loginoplysninger")
     if parsed.hostname is None or parsed.hostname.casefold() not in SUPPORTED_HOSTS:
-        raise UrlValidationError("URL host must be www.holdet.dk")
+        raise UrlValidationError("URL'ens værtsnavn skal være www.holdet.dk")
     if port not in (None, 443):
-        raise UrlValidationError("URL must not use a non-standard port")
+        raise UrlValidationError("URL'en må ikke bruge et ikke-standardiseret portnummer")
 
     segments = [unquote(segment) for segment in parsed.path.split("/") if segment]
     if len(segments) < 3 or segments[1].casefold() != "fantasy":
         raise UrlValidationError(
-            "expected https://www.holdet.dk/<locale>/fantasy/<game-slug>"
+            "URL'en skal følge formatet https://www.holdet.dk/<locale>/fantasy/<game-slug>"
         )
 
     locale, slug = segments[0], segments[2]
     if not re.fullmatch(r"[A-Za-z]{2}(?:-[A-Za-z]{2})?", locale):
-        raise UrlValidationError(f"unsupported locale segment: {locale!r}")
+        raise UrlValidationError(f"Ikke-understøttet sprogsegment: {locale!r}")
     if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", slug):
-        raise UrlValidationError(f"invalid game slug: {slug!r}")
+        raise UrlValidationError(f"Ugyldig spilslug: {slug!r}")
     return GameUrl(original=value, locale=locale, slug=slug)
 
 
@@ -64,7 +64,7 @@ def discover_variant(html: str) -> str:
     ]
     if len(recognized) > 1:
         raise PayloadError(
-            "game payload contained conflicting variants: "
+            "Spilpayloaden indeholdt modstridende varianter: "
             + ", ".join(recognized)
         )
     if recognized:
@@ -73,9 +73,9 @@ def discover_variant(html: str) -> str:
         return variant
     if found:
         raise UnsupportedGameError(
-            "unsupported Holdet.dk game variant: " + ", ".join(found)
+            "Ikke-understøttet spilvariant fra Holdet.dk: " + ", ".join(found)
         )
-    raise PayloadError("could not find the game variant in the Nexus payload")
+    raise PayloadError("Spilvarianten kunne ikke findes i Nexus-payloaden")
 
 
 def _looks_like_player_row(value: object) -> bool:
@@ -111,7 +111,7 @@ def _row_to_entry(row: dict[str, object], source_index: int) -> PlayerEntry:
     team_name = str(team["name"]).strip()
     position_title = str(position["title"]).strip()
     if not name or not team_name or not position_title:
-        raise PayloadError(f"entry {source_index} has an empty required label")
+        raise PayloadError(f"Post {source_index} har et tomt påkrævet navn")
     return PlayerEntry(
         source_index=source_index,
         name=name,
@@ -137,10 +137,10 @@ def _row_to_entry(row: dict[str, object], source_index: int) -> PlayerEntry:
 
 def _integer_value(value: object, label: str) -> int:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise PayloadError(f"{label} must be an integer")
+        raise PayloadError(f"{label} skal være et heltal")
     if isinstance(value, float):
         if not value.is_integer():
-            raise PayloadError(f"{label} must be an integer: {value!r}")
+            raise PayloadError(f"{label} skal være et heltal: {value!r}")
         return int(value)
     return value
 
@@ -181,11 +181,11 @@ def extract_entries_and_round(html: str) -> tuple[tuple[PlayerEntry, ...], int]:
                 candidates.append((value, int(round_match.group(1)), marker_index))
     if not candidates:
         raise PayloadError(
-            "could not find a non-empty player rows array with an adjacent round"
+            "Kunne ikke finde en udfyldt liste med spillerrækker og en tilhørende runde"
         )
     rows, round_number, _ = max(candidates, key=lambda item: len(item[0]))
     if round_number < 0:
-        raise PayloadError(f"invalid current round number: {round_number}")
+        raise PayloadError(f"Ugyldigt aktuelt rundenummer: {round_number}")
     return (
         tuple(_row_to_entry(row, index) for index, row in enumerate(rows)),
         round_number,
@@ -228,9 +228,9 @@ def scrape_game(
 def sort_entries(    entries: Iterable[PlayerEntry], field: str, order: str
 ) -> list[PlayerEntry]:
     if field not in SORT_FIELDS:
-        raise ValueError(f"unsupported sort field: {field}")
+        raise ValueError(f"Ikke-understøttet sorteringsfelt: {field}")
     if order not in SORT_ORDERS:
-        raise ValueError(f"unsupported sort order: {order}")
+        raise ValueError(f"Ikke-understøttet sorteringsrækkefølge: {order}")
     values = list(entries)
     reverse = order == "desc"
     if field == "source":
@@ -295,5 +295,5 @@ def format_entry(
             f"{format_integer(entry.value)} p."
         )
     else:
-        raise UnsupportedGameError(f"cannot format unsupported variant: {variant}")
+        raise UnsupportedGameError(f"Kan ikke formatere en ikke-understøttet variant: {variant}")
     return line + _status_suffix(entry)

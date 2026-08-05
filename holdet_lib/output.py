@@ -167,7 +167,7 @@ def _format_round(summary: RoundSummary, *, unit: str) -> str:
             f"Kaptajnbonus {format_change(summary.captain_bonus, unit=unit)}",
             f"Speciel bonus {format_change(summary.special_bonus, unit=unit)}",
             f"Runderangering {_format_rank(summary.round_rank)}",
-            f"Overall {_format_rank(summary.overall_rank)}",
+            f"Samlet {_format_rank(summary.overall_rank)}",
         ]
     )
     return " | ".join(fields)

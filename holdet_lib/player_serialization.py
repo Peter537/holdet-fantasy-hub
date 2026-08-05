@@ -80,13 +80,13 @@ def player_statistics_to_json(
 
 def _object(value: object, label: str) -> dict[str, Any]:
     if not isinstance(value, dict):
-        raise PayloadError(f"player snapshot {label} must be an object")
+        raise PayloadError(f"Spillersnapshottets {label} skal være et objekt")
     return value
 
 
 def _text(value: object, label: str) -> str:
     if not isinstance(value, str) or not value.strip():
-        raise PayloadError(f"player snapshot {label} must be non-empty text")
+        raise PayloadError(f"Spillersnapshottets {label} skal være udfyldt tekst")
     return value
 
 
@@ -94,13 +94,13 @@ def _integer(value: object, label: str, *, optional: bool = False) -> int | None
     if value is None and optional:
         return None
     if not isinstance(value, int) or isinstance(value, bool):
-        raise PayloadError(f"player snapshot {label} must be an integer")
+        raise PayloadError(f"Spillersnapshottets {label} skal være et heltal")
     return value
 
 
 def _round_status(value: object) -> RoundStatus:
     if value not in {"complete", "in_progress", "unknown"}:
-        raise PayloadError("player snapshot game.round_status is invalid")
+        raise PayloadError("Spillersnapshottets game.round_status er ugyldig")
     return cast(RoundStatus, value)
 
 
@@ -108,12 +108,12 @@ def _datetime(value: object, label: str) -> datetime | None:
     if value is None:
         return None
     if not isinstance(value, str) or not value.strip():
-        raise PayloadError(f"player snapshot {label} must be an ISO timestamp")
+        raise PayloadError(f"Spillersnapshottets {label} skal være et ISO-tidspunkt")
     try:
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError as exc:
         raise PayloadError(
-            f"player snapshot {label} must be an ISO timestamp"
+            f"Spillersnapshottets {label} skal være et ISO-tidspunkt"
         ) from exc
 
 
@@ -124,18 +124,18 @@ def player_statistics_from_dict(payload: object) -> ScrapedGame:
     schema_version = root.get("schema_version")
     if schema_version not in {1, 2, PLAYER_STATISTICS_SCHEMA_VERSION}:
         raise PayloadError(
-            "unsupported player snapshot schema: "
+            "Ikke-understøttet skema for spillersnapshot: "
             f"{schema_version!r}"
         )
     source = _object(root.get("source"), "source")
     game_data = _object(root.get("game"), "game")
     raw_entries = root.get("entries")
     if not isinstance(raw_entries, list) or not raw_entries:
-        raise PayloadError("player snapshot entries must be a non-empty list")
+        raise PayloadError("Spillersnapshottets entries skal være en udfyldt liste")
     round_number = _integer(game_data.get("round"), "game.round")
     assert round_number is not None
     if round_number < 0:
-        raise PayloadError("player snapshot round must be non-negative")
+        raise PayloadError("Spillersnapshottets runde må ikke være negativ")
     game = GameUrl(
         original=_text(source.get("game_url"), "source.game_url"),
         locale=_text(game_data.get("locale"), "game.locale"),
@@ -149,7 +149,7 @@ def player_statistics_from_dict(payload: object) -> ScrapedGame:
             isinstance(value, str) for value in statuses
         ):
             raise PayloadError(
-                f"player snapshot entries[{index}].statuses must be a string list"
+                f"Spillersnapshottets entries[{index}].statuses skal være en liste med tekstværdier"
             )
         status_set = set(statuses)
         entries.append(
@@ -187,8 +187,8 @@ def player_statistics_from_dict(payload: object) -> ScrapedGame:
     if schema_version == 1:
         if variant in {"cycling", "cycling_world_tour"}:
             raise PayloadError(
-                "legacy cycling player snapshot has an unknown value unit; "
-                "fetch this round again"
+                "Det ældre cykelspillersnapshot har en ukendt værdienhed; "
+                "hent denne runde igen"
             )
         policy = legacy_policy(variant)
         game_format = policy.format

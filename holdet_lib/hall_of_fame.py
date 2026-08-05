@@ -14,15 +14,18 @@ from .groups import GroupDefinition
 from .hub_settings import (
     HallOfFameScoreProfile,
     HubSettings,
+    build_effective_manager_settings,
+    effective_manager_profiles,
+    manager_identity_keys,
     resolve_manager_identity,
 )
 from .persistence import aware_local, publish_immutable_text
 from .standings import build_standings
 from .storage import SnapshotIndex
-from .tournament import build_tournament_state
+from .tournament import build_tournament_state, resolve_knockout_tie
 
 
-HALL_OF_FAME_EVENT_SCHEMA_VERSION = 1
+HALL_OF_FAME_EVENT_SCHEMA_VERSION = 2
 EventKind = Literal["group", "tournament_group", "tournament", "round_win"]
 
 
@@ -34,6 +37,7 @@ class HallOfFamePlacement:
     team_name: str
     rank: int
     value: int | None = None
+    identity_keys: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,6 +53,10 @@ class HallOfFameEvent:
     complete: bool
     captured_at: datetime
     source: str = "live"
+    revision: int = 1
+    supersedes_revision: int | None = None
+    competition_revision: int = 1
+    match_id: str | None = None
 
     @property
     def game_identity(self) -> tuple[str, str]:
@@ -101,6 +109,7 @@ def _manager_for_team(
             account_user_id=None if member is None else member.account_user_id,
             account_key="" if member is None else member.account_key,
             owner_name="" if member is None else member.account_label,
+            fallback_key=f"{group.game.locale}:{group.game.slug}:team:{team_id}",
         )
     team = snapshot.team
     return resolve_manager_identity(
@@ -108,6 +117,38 @@ def _manager_for_team(
         owner_user_id=team.owner_user_id,
         account_user_id=team.reference.account_user_id,
         account_key=team.reference.account_key,
+        owner_name=team.owner_name,
+        fallback_key=f"{group.game.locale}:{group.game.slug}:team:{team_id}",
+    )
+
+
+
+def _manager_keys_for_team(
+    snapshots: SnapshotIndex,
+    group: GroupDefinition,
+    team_id: int,
+) -> tuple[str, ...]:
+    snapshot = snapshots.newest(group.game, team_id)
+    member = next((item for item in group.teams if item.team_id == team_id), None)
+    if snapshot is None:
+        return manager_identity_keys(
+            owner_user_id=None,
+            account_user_id=None if member is None else member.account_user_id,
+            account_key="" if member is None else member.account_key,
+            owner_name="" if member is None else member.account_label,
+        )
+    team = snapshot.team
+    return manager_identity_keys(
+        owner_user_id=team.owner_user_id,
+        account_user_id=(
+            team.reference.account_user_id
+            if team.reference.account_user_id is not None
+            else None if member is None else member.account_user_id
+        ),
+        account_key=(
+            team.reference.account_key
+            or ("" if member is None else member.account_key)
+        ),
         owner_name=team.owner_name,
     )
 
@@ -168,6 +209,17 @@ def _standing_event(
         for row in standings
         if row.value is not None
     )
+    placements = tuple(
+        replace(
+            item,
+            identity_keys=_manager_keys_for_team(
+                snapshots,
+                group,
+                item.team_id,
+            ),
+        )
+        for item in placements
+    )
     complete = bool(placements) and len(placements) == len(group.teams) and all(
         row.summary is not None and row.summary.round_status == "complete"
         for row in standings
@@ -206,10 +258,10 @@ def _tournament_event(
     assert group.tournament is not None
     state = build_tournament_state(group, snapshots, group.tournament.final_round)
     placements: list[HallOfFamePlacement] = []
-    final = next(
-        (match for match in state.knockout_matches if match.stage == "Finale"),
-        None,
+    finals = tuple(
+        match for match in state.knockout_matches if match.stage == "Finale"
     )
+    final = finals[-1] if finals else None
     if final is not None and final.winner_id is not None:
         loser = final.team_b_id if final.winner_id == final.team_a_id else final.team_a_id
         for rank, team_id in ((1, final.winner_id), (2, loser)):
@@ -225,27 +277,103 @@ def _tournament_event(
             placements.append(
                 HallOfFamePlacement(manager_id, manager_name, team_id, name, rank)
             )
-    for match in state.knockout_matches:
-        if match.stage != "Semifinaler" or match.winner_id is None:
-            continue
-        loser = match.team_b_id if match.winner_id == match.team_a_id else match.team_a_id
-        if loser is None:
-            continue
+    if final is None and state.champion_id is not None:
+        for rank, standing in enumerate(state.standings[:3], 1):
+            manager_id, manager_name = _manager_for_team(
+                snapshots, group, standing.team_id, settings
+            )
+            placements.append(
+                HallOfFamePlacement(
+                    manager_id,
+                    manager_name,
+                    standing.team_id,
+                    standing.team_name,
+                    rank,
+                    standing.points,
+                )
+            )
+    bronze = next(
+        (match for match in state.knockout_matches if match.stage == "Bronzekamp"),
+        None,
+    )
+    bronze_team_id = (
+        state.standings[2].team_id
+        if group.tournament.template == "double_elimination"
+        and state.champion_id is not None
+        and len(state.standings) >= 3
+        else bronze.winner_id if bronze is not None and bronze.complete else None
+    )
+    if bronze is None and group.tournament.template != "double_elimination":
+        semifinal_losers: list[tuple[int, int]] = []
+        for match in state.knockout_matches:
+            if match.stage != "Semifinaler" or match.winner_id is None:
+                continue
+            loser = (
+                match.team_b_id
+                if match.winner_id == match.team_a_id
+                else match.team_a_id
+            )
+            loser_seed = (
+                match.team_b_seed
+                if match.winner_id == match.team_a_id
+                else match.team_a_seed
+            )
+            if loser is not None:
+                semifinal_losers.append((loser_seed or 10**9, loser))
+        if len(semifinal_losers) == 2:
+            (a_seed, a_id), (b_seed, b_id) = semifinal_losers
+            semifinal_round = max(
+                match.round_numbers[-1]
+                for match in state.knockout_matches
+                if match.stage == "Semifinaler"
+            )
+            bronze_team_id = resolve_knockout_tie(
+                group.tournament,
+                snapshots,
+                group.game,
+                a_id,
+                b_id,
+                a_seed,
+                b_seed,
+                semifinal_round,
+            )
+        elif semifinal_losers:
+            bronze_team_id = semifinal_losers[0][1]
+    if bronze_team_id is not None:
         manager_id, manager_name = _manager_for_team(
-            snapshots, group, loser, settings
+            snapshots, group, bronze_team_id, settings
         )
         name = next(
-            (item.name for item in group.teams if item.team_id == loser),
-            str(loser),
+            (item.name for item in group.teams if item.team_id == bronze_team_id),
+            str(bronze_team_id),
         )
         placements.append(
-            HallOfFamePlacement(manager_id, manager_name, loser, name, 3)
+            HallOfFamePlacement(
+                manager_id, manager_name, bronze_team_id, name, 3
+            )
         )
+    placements = [
+        replace(
+            item,
+            identity_keys=_manager_keys_for_team(
+                snapshots,
+                group,
+                item.team_id,
+            ),
+        )
+        for item in placements
+    ]
     complete = (
         state.champion_id is not None
-        and final is not None
-        and final.complete
         and bool(placements)
+        and (
+            (
+                final is not None
+                and final.complete
+                and (bronze is None or bronze.complete)
+            )
+            or final is None
+        )
     )
     return HallOfFameEvent(
         _event_id(
@@ -279,19 +407,21 @@ def build_live_hall_of_fame_events(
 
     captured = aware_local(now)
     final_rounds = final_rounds or {}
+    settings = build_effective_manager_settings(settings, groups, snapshots)
     events: list[HallOfFameEvent] = []
     for group in groups:
         if group.kind == "tournament" and group.tournament is not None:
-            events.append(
-                _standing_event(
-                    group,
-                    snapshots,
-                    settings,
-                    round_number=group.tournament.group_end_round,
-                    kind="tournament_group",
-                    captured_at=captured,
+            if group.tournament.template == "group_knockout":
+                events.append(
+                    _standing_event(
+                        group,
+                        snapshots,
+                        settings,
+                        round_number=group.tournament.group_end_round,
+                        kind="tournament_group",
+                        captured_at=captured,
+                    )
                 )
-            )
             events.append(
                 _tournament_event(
                     group, snapshots, settings, captured_at=captured
@@ -349,6 +479,11 @@ def build_live_hall_of_fame_events(
                         snapshot.team.team_name,
                         0,
                         summary.change,
+                        _manager_keys_for_team(
+                            snapshots,
+                            group,
+                            team_id,
+                        ),
                     )
                 )
             deduplicated = _deduplicate_placements(
@@ -400,16 +535,60 @@ def _points(event: HallOfFameEvent, rank: int, score: HallOfFameScoreProfile) ->
     return score.global_round_win if rank == 1 else 0
 
 
+
+def remap_manager_events(
+    events: tuple[HallOfFameEvent, ...],
+    settings: HubSettings,
+) -> tuple[HallOfFameEvent, ...]:
+    """Map immutable placements through the current manager profiles."""
+
+    profiles = effective_manager_profiles(settings)
+    by_identity = {
+        key: profile
+        for profile in profiles
+        for key in (*profile.identity_keys, profile.manager_id)
+    }
+    remapped: list[HallOfFameEvent] = []
+    for event in events:
+        placements: list[HallOfFamePlacement] = []
+        for placement in event.placements:
+            profile = next(
+                (
+                    by_identity[key]
+                    for key in (*placement.identity_keys, placement.manager_id)
+                    if key in by_identity
+                ),
+                None,
+            )
+            placements.append(
+                placement
+                if profile is None
+                else replace(
+                    placement,
+                    manager_id=profile.manager_id,
+                    manager_name=profile.display_name,
+                )
+            )
+        remapped.append(
+            replace(event, placements=_deduplicate_placements(tuple(placements)))
+        )
+    return tuple(remapped)
+
+
 def build_hall_of_fame(
     events: tuple[HallOfFameEvent, ...],
     score_profile: HallOfFameScoreProfile | None = None,
     *,
     include_incomplete: bool = False,
+    settings: HubSettings | None = None,
 ) -> HallOfFame:
     """Recompute the global leaderboard from frozen raw placements."""
 
     score = score_profile or HallOfFameScoreProfile()
+    if settings is not None:
+        events = remap_manager_events(events, settings)
     selected = tuple(event for event in events if event.complete or include_incomplete)
+    selected = current_event_revisions(selected)
     names: dict[str, str] = {}
     points: dict[str, int] = {}
     titles: dict[str, int] = {}
@@ -417,7 +596,7 @@ def build_hall_of_fame(
     competitions: dict[str, int] = {}
     wins: dict[str, int] = {}
     best_round: dict[str, int] = {}
-    round_wins: dict[tuple[str, str], set[int]] = {}
+    round_wins: dict[tuple[str, str, str], set[int]] = {}
     for event in selected:
         for placement in _deduplicate_placements(event.placements):
             manager = placement.manager_id
@@ -435,13 +614,15 @@ def build_hall_of_fame(
                     best_round.get(manager, placement.value or 0),
                     placement.value or 0,
                 )
-                round_wins.setdefault((manager, event.game_slug), set()).add(
+                round_wins.setdefault(
+                    (manager, event.game_locale.casefold(), event.game_slug), set()
+                ).add(
                     event.round_number
                 )
 
     def streak(manager: str) -> int:
         longest = 0
-        for (candidate, _), rounds in round_wins.items():
+        for (candidate, _, _), rounds in round_wins.items():
             if candidate != manager:
                 continue
             current = 0
@@ -508,6 +689,10 @@ def _event_to_dict(event: HallOfFameEvent) -> dict[str, object]:
         "complete": event.complete,
         "captured_at": event.captured_at.isoformat(),
         "source": event.source,
+        "revision": event.revision,
+        "supersedes_revision": event.supersedes_revision,
+        "competition_revision": event.competition_revision,
+        "match_id": event.match_id,
         "placements": [
             {
                 "manager_id": item.manager_id,
@@ -516,6 +701,7 @@ def _event_to_dict(event: HallOfFameEvent) -> dict[str, object]:
                 "team_name": item.team_name,
                 "rank": item.rank,
                 "value": item.value,
+                "identity_keys": list(item.identity_keys),
             }
             for item in event.placements
         ],
@@ -523,8 +709,12 @@ def _event_to_dict(event: HallOfFameEvent) -> dict[str, object]:
 
 
 def _event_from_dict(payload: object) -> HallOfFameEvent:
+    event_schema_version = payload.get("schema_version") if isinstance(payload, dict) else None
+    if event_schema_version == HALL_OF_FAME_EVENT_SCHEMA_VERSION:
+        payload = dict(payload)
+        payload["schema_version"] = 1
     if not isinstance(payload, dict) or payload.get("schema_version") != 1:
-        raise PayloadError("ukendt schema for Hall of Fame-resultat")
+        raise PayloadError("Ukendt skema for Hall of Fame-resultat")
     game = payload.get("game")
     competition = payload.get("competition")
     placements = payload.get("placements")
@@ -532,19 +722,27 @@ def _event_from_dict(payload: object) -> HallOfFameEvent:
         raise PayloadError("Hall of Fame-resultatet mangler felter")
     kind = payload.get("kind")
     if kind not in {"group", "tournament_group", "tournament", "round_win"}:
-        raise PayloadError("ukendt Hall of Fame-resultattype")
+        raise PayloadError("Ukendt Hall of Fame-resultattype")
     parsed: list[HallOfFamePlacement] = []
     for raw in placements:
         if not isinstance(raw, dict):
-            raise PayloadError("ugyldig Hall of Fame-placering")
+            raise PayloadError("Ugyldig Hall of Fame-placering")
+        manager_id = str(raw["manager_id"])
+        identity_keys = raw.get("identity_keys", [manager_id])
+        if not isinstance(identity_keys, list) or not all(
+            isinstance(value, str) and value.strip()
+            for value in identity_keys
+        ):
+            raise PayloadError("Managerplaceringens identitetsn\u00f8gler er ugyldige")
         parsed.append(
             HallOfFamePlacement(
-                str(raw["manager_id"]),
+                manager_id,
                 str(raw["manager_name"]),
                 int(raw["team_id"]),
                 str(raw["team_name"]),
                 int(raw["rank"]),
                 int(raw["value"]) if raw.get("value") is not None else None,
+                tuple(dict.fromkeys(value.strip() for value in identity_keys)),
             )
         )
     captured = datetime.fromisoformat(str(payload["captured_at"]))
@@ -562,6 +760,18 @@ def _event_from_dict(payload: object) -> HallOfFameEvent:
         bool(payload.get("complete")),
         captured,
         str(payload.get("source") or "frozen"),
+        revision=int(payload.get("revision", 1)),
+        supersedes_revision=(
+            int(payload["supersedes_revision"])
+            if payload.get("supersedes_revision") is not None
+            else None
+        ),
+        competition_revision=int(payload.get("competition_revision", 1)),
+        match_id=(
+            str(payload["match_id"])
+            if payload.get("match_id") is not None
+            else None
+        ),
     )
 
 
@@ -576,6 +786,8 @@ class HallOfFameStore:
             return None
         frozen = replace(event, source="frozen")
         path = self.directory / f"{frozen.event_id}.json"
+        if frozen.revision > 1:
+            path = self.directory / f"{frozen.event_id}-r{frozen.revision}.json"
         content = json.dumps(_event_to_dict(frozen), ensure_ascii=False, indent=2) + "\n"
         if path.exists():
             existing = _event_from_dict(json.loads(path.read_text(encoding="utf-8")))
@@ -592,11 +804,42 @@ class HallOfFameStore:
     def freeze_complete(
         self, events: tuple[HallOfFameEvent, ...]
     ) -> tuple[Path, ...]:
-        return tuple(
-            path
-            for event in events
-            if (path := self.freeze(event)) is not None
+        published: list[Path] = []
+        for event in events:
+            try:
+                path = self.freeze(event)
+            except PayloadError:
+                path = self.freeze_revision(event)
+            if path is not None:
+                published.append(path)
+        return tuple(published)
+
+    def freeze_revision(self, event: HallOfFameEvent) -> Path | None:
+        """Append a correction without overwriting a prior complete result."""
+
+        existing, _ = self.scan()
+        revisions = tuple(
+            item for item in existing if item.event_id == event.event_id
         )
+        if not revisions:
+            return self.freeze(event)
+        current = max(revisions, key=lambda item: item.revision)
+        comparable = replace(
+            event,
+            source=current.source,
+            revision=current.revision,
+            supersedes_revision=current.supersedes_revision,
+            captured_at=current.captured_at,
+        )
+        if current == comparable:
+            suffix = "" if current.revision == 1 else f"-r{current.revision}"
+            return self.directory / f"{current.event_id}{suffix}.json"
+        corrected = replace(
+            event,
+            revision=current.revision + 1,
+            supersedes_revision=current.revision,
+        )
+        return self.freeze(corrected)
 
     def scan(self) -> tuple[tuple[HallOfFameEvent, ...], tuple[str, ...]]:
         if not self.directory.exists():
@@ -613,3 +856,18 @@ class HallOfFameStore:
         events.sort(key=lambda item: (item.captured_at, item.event_id))
         return tuple(events), tuple(warnings)
 
+
+
+def current_event_revisions(
+    events: tuple[HallOfFameEvent, ...],
+) -> tuple[HallOfFameEvent, ...]:
+    """Select the latest non-superseded revision for each logical event."""
+
+    latest: dict[str, HallOfFameEvent] = {}
+    for event in events:
+        previous = latest.get(event.event_id)
+        if previous is None or event.revision > previous.revision:
+            latest[event.event_id] = event
+    return tuple(
+        sorted(latest.values(), key=lambda item: (item.captured_at, item.event_id))
+    )

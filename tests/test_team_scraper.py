@@ -235,7 +235,7 @@ class AccountAndDiscoveryTests(unittest.TestCase):
             scraper.select_accounts(accounts, [str(FICTIONAL_SECOND_USER_ID)]),
             (accounts[1],),
         )
-        with self.assertRaisesRegex(scraper.PayloadError, "unknown account"):
+        with self.assertRaisesRegex(scraper.PayloadError, "Ukendte kontovalg"):
             scraper.select_accounts(accounts, ["missing"])
 
     def test_discovers_flight_and_me_links_without_duplicates(self) -> None:
@@ -548,7 +548,7 @@ class GameInfoTests(unittest.TestCase):
         conflicting["_embedded"]["rulesets"]["8"]["properties"] = {
             "Format": "golf"
         }
-        with self.assertRaisesRegex(scraper.PayloadError, "conflict"):
+        with self.assertRaisesRegex(scraper.PayloadError, "i konflikt"):
             scraper.parse_game_context(game, "cycling", conflicting)
 
         missing_salary = cartridge_payload()

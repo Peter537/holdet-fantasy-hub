@@ -98,7 +98,7 @@ class TeamPageData:
 
 def _require_int(value: object, label: str) -> int:
     if not isinstance(value, int) or isinstance(value, bool):
-        raise PayloadError(f"{label} must be an integer")
+        raise PayloadError(f"{label} skal være et heltal")
     return value
 
 
@@ -110,22 +110,22 @@ def parse_account_profile_user_id(profile_url: str) -> int:
     try:
         parsed = urlsplit(profile_url.strip())
     except ValueError as exc:
-        raise UrlValidationError(f"invalid account profile URL: {exc}") from exc
+        raise UrlValidationError(f"Ugyldig URL til kontoprofil: {exc}") from exc
     if (
         parsed.scheme.casefold() != "https"
         or parsed.hostname is None
         or parsed.hostname.casefold() not in SUPPORTED_HOSTS
     ):
-        raise UrlValidationError("account profile must use https://www.holdet.dk")
+        raise UrlValidationError("Kontoprofilen skal bruge https://www.holdet.dk")
     segments = [unquote(part) for part in parsed.path.split("/") if part]
     if len(segments) != 4 or segments[1] != "users" or segments[3] != "teams":
         raise UrlValidationError(
-            "account profile must end with /<locale>/users/<id>/teams"
+            "Kontoprofilen skal slutte med /<locale>/users/<id>/teams"
         )
     try:
         return int(segments[2])
     except ValueError as exc:
-        raise UrlValidationError("account profile contains an invalid user ID") from exc
+        raise UrlValidationError("Kontoprofilen indeholder et ugyldigt bruger-ID") from exc
 
 
 def load_accounts(path: Path) -> tuple[AccountConfig, ...]:
@@ -134,28 +134,28 @@ def load_accounts(path: Path) -> tuple[AccountConfig, ...]:
     except FileNotFoundError:
         return ()
     except OSError as exc:
-        raise PayloadError(f"could not read accounts file {path}: {exc}") from exc
+        raise PayloadError(f"Kontofilen {path} kunne ikke læses: {exc}") from exc
     except json.JSONDecodeError as exc:
-        raise PayloadError(f"invalid JSON in accounts file {path}") from exc
+        raise PayloadError(f"Kontofilen {path} indeholder ugyldig JSON") from exc
     items = raw.get("accounts") if isinstance(raw, dict) else raw
     if not isinstance(items, list):
-        raise PayloadError("accounts file must contain an 'accounts' list")
+        raise PayloadError("Kontofilen skal indeholde en accounts-liste")
     accounts: list[AccountConfig] = []
     seen_keys: set[str] = set()
     seen_ids: set[int] = set()
     for index, item in enumerate(items):
         if not isinstance(item, dict):
-            raise PayloadError(f"account {index} must be an object")
+            raise PayloadError(f"Konto {index} skal være et objekt")
         key = str(item.get("key", "")).strip()
         label = str(item.get("label", "")).strip()
         profile_url = str(item.get("profile_url", "")).strip()
         if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", key):
-            raise PayloadError(f"account {index} has an invalid key")
+            raise PayloadError(f"Konto {index} har en ugyldig nøgle")
         if not label:
-            raise PayloadError(f"account {index} has an empty label")
+            raise PayloadError(f"Konto {index} har et tomt navn")
         user_id = parse_account_profile_user_id(profile_url)
         if key in seen_keys or user_id in seen_ids:
-            raise PayloadError(f"duplicate account key or user ID: {key}")
+            raise PayloadError(f"Duplikeret kontonøgle eller bruger-ID: {key}")
         seen_keys.add(key)
         seen_ids.add(user_id)
         accounts.append(AccountConfig(key, label, profile_url, user_id))
@@ -177,7 +177,7 @@ def select_accounts(
             selected.append(account)
             unmatched -= aliases
     if unmatched:
-        raise PayloadError("unknown account selector(s): " + ", ".join(sorted(unmatched)))
+        raise PayloadError("Ukendte kontovalg: " + ", ".join(sorted(unmatched)))
     return tuple(selected)
 
 
@@ -487,20 +487,20 @@ def _entity_by_id(collection: object, entity_id: int) -> dict[str, object] | Non
 
 def parse_game_context(game: GameUrl, variant: str, payload: object) -> GameContext:
     if not isinstance(payload, dict):
-        raise PayloadError("cartridge payload must be an object")
+        raise PayloadError("Cartridge-payloaden skal være et objekt")
     game_id = _require_int(payload.get("gameId"), "cartridge gameId")
     league_id = _optional_int(payload.get("defaultFantasyLeagueId"))
     embedded = payload.get("_embedded")
     if not isinstance(embedded, dict):
-        raise PayloadError("cartridge payload lacks embedded metadata")
+        raise PayloadError("Cartridge-payloaden mangler indlejrede metadata")
     game_data = _entity_by_id(embedded.get("games"), game_id)
     if game_data is None:
-        raise PayloadError(f"cartridge payload lacks game {game_id}")
+        raise PayloadError(f"Cartridge-payloaden mangler spil {game_id}")
     ruleset_id = _require_int(game_data.get("rulesetId"), "game rulesetId")
     schedule_id = _optional_int(game_data.get("scheduleId"))
     ruleset = _entity_by_id(embedded.get("rulesets"), ruleset_id)
     if ruleset is None:
-        raise PayloadError(f"cartridge payload lacks ruleset {ruleset_id}")
+        raise PayloadError(f"Cartridge-payloaden mangler ruleset {ruleset_id}")
     properties = ruleset.get("properties")
     ruleset_format = properties.get("Format") if isinstance(properties, dict) else None
     policy = policy_from_ruleset(
@@ -524,34 +524,34 @@ def parse_schedule_rounds(payload: object) -> tuple[ScheduleRound, ...]:
     """Return validated rounds from a public schedule payload."""
 
     if not isinstance(payload, dict):
-        raise PayloadError("schedule payload must be an object")
+        raise PayloadError("Payloaden for kampprogrammet skal være et objekt")
     rounds = payload.get("rounds")
     if not isinstance(rounds, list) or not rounds:
-        raise PayloadError("schedule payload lacks a non-empty rounds list")
+        raise PayloadError("Payloaden for kampprogrammet mangler en udfyldt rundeliste")
     if any(not isinstance(item, dict) for item in rounds):
-        raise PayloadError("schedule payload contains an invalid round")
+        raise PayloadError("Payloaden for kampprogrammet indeholder en ugyldig runde")
     result: list[ScheduleRound] = []
     for index, item in enumerate(rounds, 1):
         assert isinstance(item, dict)
         round_number = item.get("round", index)
         if not isinstance(round_number, int) or isinstance(round_number, bool):
-            raise PayloadError(f"schedule round {index} has an invalid number")
+            raise PayloadError(f"Runde {index} i kampprogrammet har et ugyldigt nummer")
         timestamps: dict[str, datetime] = {}
         for field in ("start", "close", "end"):
             value = item.get(field)
             if not isinstance(value, str) or not value.strip():
-                raise PayloadError(f"schedule round {round_number} lacks {field}")
+                raise PayloadError(f"Runde {round_number} i kampprogrammet mangler {field}")
             try:
                 parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
             except ValueError as exc:
                 raise PayloadError(
-                    f"schedule round {round_number} has an invalid {field}"
+                    f"Runde {round_number} i kampprogrammet har en ugyldig værdi for {field}"
                 ) from exc
             if parsed.tzinfo is None:
                 parsed = parsed.replace(tzinfo=timezone.utc)
             timestamps[field] = parsed
         if not (timestamps["start"] <= timestamps["close"] <= timestamps["end"]):
-            raise PayloadError(f"schedule round {round_number} has invalid boundaries")
+            raise PayloadError(f"Runde {round_number} i kampprogrammet har ugyldige tidsgrænser")
         result.append(
             ScheduleRound(
                 round_number=round_number,
@@ -591,7 +591,7 @@ def round_status_for(
 
 def _rank_map(payload: object) -> dict[int, int]:
     if not isinstance(payload, dict) or not isinstance(payload.get("items"), list):
-        raise PayloadError("leaderboard payload lacks an items list")
+        raise PayloadError("Stillingspayloaden mangler en items-liste")
     result: dict[int, int] = {}
     for item in payload["items"]:
         if not isinstance(item, dict):
@@ -611,18 +611,18 @@ def parse_history(
     overall_ranks: dict[int, int] | None = None,
 ) -> tuple[RoundSummary, ...]:
     if not isinstance(payload, dict) or not isinstance(payload.get("items"), list):
-        raise PayloadError("team history payload lacks an items list")
+        raise PayloadError("Holdhistorikkens payload mangler en items-liste")
     round_ranks = round_ranks or {}
     overall_ranks = overall_ranks or {}
     result: list[RoundSummary] = []
     for index, item in enumerate(payload["items"]):
         if not isinstance(item, dict):
-            raise PayloadError(f"history item {index} must be an object")
+            raise PayloadError(f"Historikpost {index} skal være et objekt")
         round_number = _require_int(item.get("round"), f"history item {index} round")
         bucket_name = "assets" if salary_cap else "points"
         bucket = item.get(bucket_name)
         if not isinstance(bucket, dict):
-            raise PayloadError(f"history round {round_number} lacks {bucket_name}")
+            raise PayloadError(f"Historikrunde {round_number} mangler {bucket_name}")
         total = _require_int(bucket.get("value"), f"history round {round_number} value")
         bank = _optional_int(bucket.get("balance")) if salary_cap else None
         player_value = total - bank if bank is not None else None
@@ -703,7 +703,7 @@ class TeamDataService:
             return context
         if context.schedule_id is None:
             if strict:
-                raise PayloadError("game metadata lacks scheduleId")
+                raise PayloadError("Spilmetadata mangler scheduleId")
             self._schedule_unavailable.add(key)
             return context
         schedule_url = f"https://{NEXUS_HOST}/api/schedules/{context.schedule_id}"
@@ -782,8 +782,8 @@ class TeamDataService:
                 break
             if attempt == 1:
                 raise PayloadError(
-                    f"team {reference.team_id} roster value {actual} does not match "
-                    f"history player value {expected}"
+                    f"Hold {reference.team_id} har trupværdien {actual}, som ikke matcher "
+                    f"spillerhistorikkens værdi {expected}"
                 )
         assert page is not None
         observed_at = self._clock()

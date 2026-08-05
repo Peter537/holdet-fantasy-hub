@@ -71,31 +71,31 @@ class PlayerStatisticsQuery:
 
     def __post_init__(self) -> None:
         if "name" not in self.columns:
-            raise ValueError("the name column is required")
+            raise ValueError("Navnekolonnen er påkrævet")
         if len(set(self.columns)) != len(self.columns) or any(
             value not in PLAYER_COLUMNS for value in self.columns
         ):
-            raise ValueError("unsupported or duplicate player column")
+            raise ValueError("Ikke-understøttet eller duplikeret spillerkolonne")
         if self.sort_field not in PLAYER_SORT_FIELDS:
-            raise ValueError(f"unsupported player sort field: {self.sort_field}")
+            raise ValueError(f"Ikke-understøttet sorteringsfelt for spillere: {self.sort_field}")
         if self.sort_order not in {"asc", "desc"}:
-            raise ValueError(f"unsupported player sort order: {self.sort_order}")
+            raise ValueError(f"Ikke-understøttet sorteringsrækkefølge for spillere: {self.sort_order}")
         for mode in (self.missing_total_growth, self.missing_round_growth):
             if mode not in MISSING_VALUE_MODES:
-                raise ValueError(f"unsupported missing-value mode: {mode}")
+                raise ValueError(f"Ikke-understøttet tilstand for manglende værdier: {mode}")
         rules = dict(self.status_rules)
         if len(rules) != len(self.status_rules):
-            raise ValueError("duplicate player status rule")
+            raise ValueError("Duplikeret spillerstatusregel")
         for status, rule in self.status_rules:
             if status not in PLAYER_STATUSES or rule not in STATUS_RULES:
-                raise ValueError(f"unsupported player status rule: {status}={rule}")
+                raise ValueError(f"Ikke-understøttet spillerstatusregel: {status}={rule}")
         for lower, upper, label in (
             (self.min_value, self.max_value, "value"),
             (self.min_total_growth, self.max_total_growth, "total growth"),
             (self.min_round_growth, self.max_round_growth, "round growth"),
         ):
             if lower is not None and upper is not None and lower > upper:
-                raise ValueError(f"minimum {label} cannot exceed maximum")
+                raise ValueError(f"Minimum for {label} må ikke overstige maksimum")
 
     def status_rule(self, status: str) -> str:
         return dict(self.status_rules).get(status, "ignore")
@@ -265,7 +265,7 @@ def build_player_export(
 ) -> PlayerExportDocument:
     entries = filter_player_statistics(statistics, query)
     if not entries:
-        raise PayloadError("no players match the selected filters")
+        raise PayloadError("Ingen spillere matcher de valgte filtre")
     timestamp = generated_at or datetime.now().astimezone()
     if timestamp.tzinfo is None:
         timestamp = timestamp.astimezone()
@@ -429,7 +429,7 @@ def serialize_player_export(document: PlayerExportDocument, format: str) -> byte
             player_export_to_dict(document), ensure_ascii=False, indent=2
         ) + "\n"
     else:
-        raise ValueError(f"unsupported player export format: {format}")
+        raise ValueError(f"Ikke-understøttet eksportformat for spillere: {format}")
     return content.encode("utf-8")
 
 
@@ -452,7 +452,7 @@ class PlayerExportStore:
     ) -> tuple[PlayerExportArtifact, ...]:
         selected = tuple(dict.fromkeys(value.casefold() for value in formats))
         if not selected or any(value not in PLAYER_EXPORT_FORMATS for value in selected):
-            raise ValueError("choose one or more supported player export formats")
+            raise ValueError("Vælg et eller flere understøttede eksportformater for spillere")
         target_dir = self.export_dir / sanitize_path_component(
             document.statistics.game.slug, fallback="game"
         )

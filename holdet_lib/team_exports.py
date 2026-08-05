@@ -41,11 +41,11 @@ class TeamExportDocument:
 
     def __post_init__(self) -> None:
         if self.scope not in TEAM_EXPORT_SCOPES:
-            raise ValueError(f"unsupported team export scope: {self.scope}")
+            raise ValueError(f"Ikke-understøttet omfang for holdeksport: {self.scope}")
         if self.round_number < 0:
-            raise ValueError("team export round cannot be negative")
+            raise ValueError("Runden for holdeksport må ikke være negativ")
         if self.scope == "round" and self.summary is None:
-            raise ValueError("round-scoped team export requires a round summary")
+            raise ValueError("Rundeafgrænset holdeksport kræver et rundesammendrag")
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,18 +69,18 @@ def build_team_export(
     """Build a complete or selected-round export without touching the filesystem."""
 
     if scope not in TEAM_EXPORT_SCOPES:
-        raise ValueError(f"unsupported team export scope: {scope}")
+        raise ValueError(f"Ikke-understøttet omfang for holdeksport: {scope}")
     selected_round = (
         team.overview.current_round if round_number is None else int(round_number)
     )
     if selected_round < 0:
-        raise ValueError("team export round cannot be negative")
+        raise ValueError("Runden for holdeksport må ikke være negativ")
     summary = next(
         (item for item in team.history if item.round_number == selected_round),
         None,
     )
     if scope == "round" and summary is None:
-        raise PayloadError(f"team history has no round {selected_round}")
+        raise PayloadError(f"Holdhistorikken har ingen runde {selected_round}")
     selected_roster = tuple(team.roster) if scope == "full" else roster
     if scope == "round" and roster is None and team.overview.current_round == selected_round:
         selected_roster = tuple(team.roster)
@@ -235,9 +235,9 @@ def _summary_fields(summary: RoundSummary, unit: str) -> list[tuple[str, str]]:
         ("Speciel bonus", _change(summary.special_bonus, unit)),
         ("Udskiftninger", "–" if summary.substitutions_used is None else str(summary.substitutions_used)),
         ("Runderangering", _rank(summary.round_rank)),
-        ("Overall-rangering", _rank(summary.overall_rank)),
+        ("Samlet placering", _rank(summary.overall_rank)),
         ("Rangeringsændring, runde", _change(summary.round_rank_change, "money")),
-        ("Rangeringsændring, overall", _change(summary.overall_rank_change, "money")),
+        ("Ændring i samlet placering", _change(summary.overall_rank_change, "money")),
     ]
     if unit == "money":
         fields[3:3] = [
@@ -375,7 +375,7 @@ def serialize_team_export(document: TeamExportDocument, format: str) -> bytes:
     elif selected == "json":
         content = json.dumps(team_export_to_dict(document), ensure_ascii=False, indent=2) + "\n"
     else:
-        raise ValueError(f"unsupported team export format: {format}")
+        raise ValueError(f"Ikke-understøttet eksportformat for hold: {format}")
     return content.encode("utf-8")
 
 
@@ -398,7 +398,7 @@ class TeamExportStore:
     ) -> tuple[TeamExportArtifact, ...]:
         selected = tuple(dict.fromkeys(value.casefold() for value in formats))
         if not selected or any(value not in TEAM_EXPORT_FORMATS for value in selected):
-            raise ValueError("choose one or more supported team export formats")
+            raise ValueError("Vælg et eller flere understøttede eksportformater for hold")
         team = document.team
         account = (
             team.reference.account_key

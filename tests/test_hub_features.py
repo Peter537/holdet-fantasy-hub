@@ -53,6 +53,15 @@ def test_public_hub_interfaces_are_exported_and_type_hints_resolve() -> None:
         "TransferValidation",
         "UNKNOWN_RULES",
         "WatchlistEntry",
+        "SwissPairingConflict",
+        "TournamentTemplateConfig",
+        "build_effective_manager_settings",
+        "build_swiss_pairing_conflicts",
+        "remap_manager_events",
+        "resolve_knockout_tie",
+        "tournament_standing_sort_key",
+        "tournament_template_config",
+        "validate_tournament_pairing_revision",
         "build_data_quality_report",
         "build_hall_of_fame",
         "build_history_series",
@@ -582,6 +591,10 @@ def test_context_routes_are_cache_only_and_old_routes_are_not_found() -> None:
                 assert not app.exception, section
             navigate(app, "hall-of-fame")
             assert not app.exception
+            for route in ("managers", "calendar"):
+                navigate(app, route)
+                assert not app.exception, route
+
             for section in ("quality", "backup"):
                 navigate(app, "data", section=section)
                 assert not app.exception, section

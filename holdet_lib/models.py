@@ -38,7 +38,7 @@ class GameUrl:
         if round_number is None:
             return url
         if isinstance(round_number, bool) or round_number < 0:
-            raise ValueError("round number must be a non-negative integer")
+            raise ValueError("Rundenummeret skal være et ikke-negativt heltal")
         return f"{url}?round={round_number}"
 
     def team_url(self, variant: str, team_id: int) -> str:
@@ -82,7 +82,7 @@ class ScrapedGame:
         if self.format is None and self.unit is None:
             policy = legacy_policy(self.variant)
         elif self.format is None or self.unit is None:
-            raise ValueError("player statistics format and unit must be set together")
+            raise ValueError("Spillerstatistikkens format og enhed skal angives sammen")
         else:
             policy = GamePolicy(self.variant, self.format, self.unit)
         object.__setattr__(self, "format", policy.format)

@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import datetime
+from datetime import date, datetime
+from uuid import uuid4
 import hashlib
 from html import escape
 from pathlib import Path
@@ -32,6 +33,7 @@ from holdet_lib import (
     bracket_seed_order,
     build_data_quality_report,
     build_hall_of_fame,
+    build_double_elimination_bracket,
     build_history_series,
     build_live_hall_of_fame_events,
     build_player_history,
@@ -48,8 +50,23 @@ from holdet_lib import (
 )
 from holdet_lib.hub_settings import manager_identity_keys
 from holdet_lib.tournament import STAGE_NAMES, KnockoutMatch, TournamentState
-
-
+from holdet_lib import (
+    CalendarEvent,
+    ManagerCareer,
+    ManagerProfile,
+    SeasonStore,
+    build_calendar_events,
+    build_effective_manager_settings,
+    build_manager_careers,
+    build_manager_head_to_head,
+    build_manager_ratings,
+    build_manager_round_results,
+    build_round_story,
+    remap_manager_events,
+    build_season_standings,
+)
+from holdet_lib.hub_settings import effective_manager_profiles
+from holdet_lib import resolve_manager_identity
 def _time(value: datetime | None) -> str:
     if value is None:
         return "-"
@@ -175,6 +192,26 @@ def manager_round_center(
         )
 
     target_round = latest.round_number if latest is not None else None
+    if target_round is not None and game_groups:
+        _, manager_settings = _manager_settings(paths)
+        story = build_round_story(
+            game_groups,
+            teams,
+            manager_settings,
+            manager_game.game.slug,
+            target_round,
+        )
+        st.subheader("Rundens historie")
+        if story.preliminary:
+            st.warning(story.headline)
+        else:
+            st.markdown(f"**{story.headline}**")
+        for paragraph in story.paragraphs:
+            st.write(paragraph)
+        if story.awards:
+            with st.container(horizontal=True):
+                for award in story.awards:
+                    st.metric(award.title, award.detail, border=True)
     rank_rows: list[dict[str, object]] = []
     if target_round is not None:
         for team_id in team_labels:
@@ -638,12 +675,12 @@ def history_panel(
             "Hold": item.team_name,
             "Værdi/point": item.total,
             "Rundevækst": item.round_growth,
-            "Overall-rang": item.overall_rank,
+            "Samlet placering": item.overall_rank,
             "Grupperang": item.group_rank,
         }
         for item in history
     )
-    labels = ["Værdi/point", "Rundevækst", "Overall-rang"]
+    labels = ["Værdi/point", "Rundevækst", "Samlet placering"]
     if group is not None:
         labels.append("Grupperang")
     tabs = st.tabs(
@@ -781,7 +818,7 @@ def team_changes_panel(
             border=True,
         )
         st.metric(
-            "Overall-rang",
+            "Samlet placering",
             "-" if diff.new_rank is None else format_integer(diff.new_rank),
             delta=diff.rank_movement,
             border=True,
@@ -934,12 +971,12 @@ def _identity_options(teams: SnapshotIndex) -> dict[str, str]:
     return result
 
 
-def hall_of_fame_view(
+def legacy_manager_view(
     groups: tuple[GroupDefinition, ...],
     teams: SnapshotIndex,
     paths: AppPaths,
 ) -> None:
-    st.title("Hall of Fame", anchor="hall-of-fame")
+    st.title("Managers", anchor="managers")
     settings_store = HubSettingsStore(paths.hub_settings_file)
     try:
         settings = settings_store.load()
@@ -962,7 +999,7 @@ def hall_of_fame_view(
     with st.container(horizontal=True):
         st.metric("Frosne resultater", len(frozen), border=True)
         st.metric(
-            "Live-resultater klar",
+            "Aktuelle resultater klar",
             sum(item.complete for item in live),
             border=True,
         )
@@ -993,14 +1030,14 @@ def hall_of_fame_view(
         )
     else:
         st.info(
-            "Ingen komplette resultater er frosset endnu. Live-preview vises nedenfor."
+            "Ingen komplette resultater er frosset endnu. En foreløbig visning findes nedenfor."
         )
     preview = build_hall_of_fame(
         tuple((*frozen, *(item for item in live if item.event_id not in {event.event_id for event in frozen}))),
         settings.hall_of_fame_score,
         include_incomplete=True,
     )
-    with st.expander("Live-preview", on_change="rerun") as exp:
+    with st.expander("Foreløbig visning", on_change="rerun") as exp:
         if exp.open:
             if preview.rows:
                 st.dataframe(
@@ -1132,7 +1169,7 @@ def backup_view(paths: AppPaths) -> None:
         for error in validation.errors:
             st.error(error)
         return
-    st.success("Hele arkivet er valideret: stier, schemaer, størrelser og checksums.")
+    st.success("Hele arkivet er valideret: stier, skemaer, størrelser og kontrolsummer.")
     st.dataframe(
         [
             {"Fil": item.path, "Bytes": item.size, "SHA-256": item.sha256}
@@ -1174,6 +1211,36 @@ def render_tournament_bracket(
     """Render a responsive, sanitized CSS-grid bracket without JavaScript."""
 
     assert group.tournament is not None
+    if group.tournament.template == "double_elimination":
+        bracket = build_double_elimination_bracket(len(group.teams))
+        seed_names = {
+            seed: next(
+                (
+                    member.name
+                    for member in group.teams
+                    if member.team_id == team_id
+                ),
+                f"Seed {seed}",
+            )
+            for seed, team_id in enumerate(group.tournament.seed_order, 1)
+        }
+        st.dataframe(
+            [
+                {
+                    "Kamp": item.match_id,
+                    "Bracket": item.bracket,
+                    "Bracket-runde": item.bracket_round,
+                    "Plads A": seed_names.get(item.team_a_seed, item.source_a or "Bye"),
+                    "Plads B": seed_names.get(item.team_b_seed, item.source_b or "Bye"),
+                    "Reset-finale": item.reset_final,
+                }
+                for item in bracket
+            ],
+            hide_index=True,
+            width="stretch",
+        )
+        st.caption("GF2 spilles kun, hvis taberbracket-vinderen vinder GF1.")
+        return
     names = {row.team_id: row.team_name for row in state.standings}
     for member in group.teams:
         names.setdefault(member.team_id, member.name)
@@ -1303,3 +1370,1008 @@ def render_tournament_bracket(
     """
     st.html(html)
 
+
+
+
+def _manager_settings(paths: AppPaths) -> tuple[HubSettingsStore, HubSettings]:
+    store = HubSettingsStore(paths.hub_settings_file)
+    try:
+        return store, store.load()
+    except Exception as exc:
+        st.warning(f"Managerindstillinger kunne ikke l\u00e6ses: {exc}")
+        return store, HubSettings()
+
+
+def _manager_tabs():
+    labels = (
+        "Rangliste",
+        "Medaljer og rekorder",
+        "Sammenlign",
+        "Sæsoner",
+        "Identiteter",
+    )
+    slugs = (
+        "ranking",
+        "records",
+        "compare",
+        "seasons",
+        "identities",
+    )
+    key = "manager-tabs"
+    requested = str(st.query_params.get("section", ""))
+    desired = (
+        labels[slugs.index(requested)]
+        if requested in slugs
+        else labels[0]
+    )
+    if (
+        requested in slugs
+        or key not in st.session_state
+        or st.session_state[key] not in labels
+    ):
+        st.session_state[key] = desired
+
+    def sync_tab() -> None:
+        selected = st.session_state[key]
+        st.query_params["section"] = slugs[labels.index(selected)]
+
+    return st.tabs(
+        labels,
+        default=st.session_state[key],
+        key=key,
+        on_change=sync_tab,
+    )
+
+
+def managers_view(
+    groups: tuple[GroupDefinition, ...],
+    teams: SnapshotIndex,
+    paths: AppPaths,
+) -> None:
+    """Render the consolidated manager center."""
+
+    st.title("Managers", anchor="managers")
+    settings_store, settings = _manager_settings(paths)
+    settings = build_effective_manager_settings(settings, groups, teams)
+    metadata, metadata_warnings = GameMetadataStore(paths.game_metadata_dir).scan()
+    final_rounds = {
+        item.identity: item.final_round
+        for item in metadata
+        if item.final_round is not None
+    }
+    live = build_live_hall_of_fame_events(
+        groups,
+        teams,
+        settings,
+        final_rounds=final_rounds,
+    )
+    frozen, ledger_warnings = HallOfFameStore(paths.hall_of_fame_dir).scan()
+    frozen = remap_manager_events(frozen, settings)
+    board = build_hall_of_fame(
+        frozen,
+        settings.hall_of_fame_score,
+        settings=settings,
+    )
+    round_results = build_manager_round_results(groups, teams, settings)
+    ratings = build_manager_ratings(groups, teams, settings)
+    careers = build_manager_careers(frozen, round_results)
+    profiles = effective_manager_profiles(settings)
+
+    with st.container(horizontal=True):
+        st.metric("Managerprofiler", len(profiles), border=True)
+        st.metric(
+            "Ratingperioder",
+            len({
+                (item.game_locale, item.game_slug, item.round_number)
+                for item in round_results
+            }),
+            border=True,
+        )
+        st.metric("Frosne resultater", len(frozen), border=True)
+        st.metric("Aktuelle resultater", sum(item.complete for item in live), border=True)
+    if st.button(
+        "Genopbyg historik fra cache",
+        icon=":material/history:",
+        help="Publicerer kun komplette cachede resultater; navigationen skriver aldrig.",
+    ):
+        try:
+            published = HallOfFameStore(paths.hall_of_fame_dir).freeze_complete(live)
+        except Exception as exc:
+            st.error(f"Historikken kunne ikke genopbygges: {exc}")
+        else:
+            st.success(f"{len(published)} komplette resultater er kontrolleret.")
+            st.rerun()
+
+
+    (
+        rank_tab,
+        medal_tab,
+        compare_tab,
+        season_tab,
+        identity_tab,
+    ) = _manager_tabs()
+    if rank_tab.open:
+        with rank_tab:
+            rating_by_id = {item.manager_id: item for item in ratings}
+            rows = []
+            for row in board.rows:
+                rating = rating_by_id.get(row.manager_id)
+                rows.append(
+                    {
+                        "Rang": row.rank,
+                        "Manager": row.manager_name,
+                        "Point": row.points,
+                        "Elo": None if rating is None else rating.rating,
+                        "Status": (
+                            "Ingen rating"
+                            if rating is None
+                            else "Forel\u00f8big" if rating.provisional else "Etableret"
+                        ),
+                        "Perioder": 0 if rating is None else rating.periods,
+                        "Titler": row.titles,
+                        "Podier": row.podiums,
+                    }
+                )
+            known = {row.manager_id for row in board.rows}
+            rows.extend(
+                {
+                    "Rang": None,
+                    "Manager": rating.manager_name,
+                    "Point": 0,
+                    "Elo": rating.rating,
+                    "Status": "Forel\u00f8big" if rating.provisional else "Etableret",
+                    "Perioder": rating.periods,
+                    "Titler": 0,
+                    "Podier": 0,
+                }
+                for rating in ratings
+                if rating.manager_id not in known
+            )
+            if rows:
+                st.dataframe(rows, hide_index=True, width="stretch")
+            else:
+                st.info("Ingen komplette managerresultater endnu.")
+            with st.expander("Foreløbig visning", on_change="rerun") as preview:
+                if preview.open:
+                    st.dataframe(
+                        [
+                            {
+                                "Konkurrence": item.competition_name,
+                                "Runde": item.round_number,
+                                "Status": "Komplet" if item.complete else "Forel\u00f8big",
+                            }
+                            for item in live
+                        ],
+                        hide_index=True,
+                        width="stretch",
+                    )
+            st.subheader("Pointprofil")
+            score = settings.hall_of_fame_score
+            with st.form("manager-score-profile"):
+                group_points = tuple(
+                    int(
+                        st.number_input(
+                            f"Gruppeplacering {position}",
+                            min_value=0,
+                            value=value,
+                            step=1,
+                        )
+                    )
+                    for position, value in enumerate(score.group_points, 1)
+                )
+                winner = int(st.number_input("Turneringsvinder", min_value=0, value=score.tournament_winner))
+                finalist = int(st.number_input("Finalist", min_value=0, value=score.tournament_finalist))
+                semifinalist = int(st.number_input("Semifinalist", min_value=0, value=score.tournament_semifinalist))
+                round_win = int(st.number_input("Rundesejr", min_value=0, value=score.global_round_win))
+                save_score = st.form_submit_button("Gem pointprofil")
+            if save_score:
+                settings_store.save(
+                    replace(
+                        settings,
+                        hall_of_fame_score=HallOfFameScoreProfile(
+                            group_points,
+                            winner,
+                            finalist,
+                            semifinalist,
+                            round_win,
+                        ),
+                    )
+                )
+                st.rerun()
+
+    if medal_tab.open:
+        with medal_tab:
+            if careers:
+                st.dataframe(
+                    [
+                        {
+                            "Manager": item.manager_name,
+                            "Guld": item.gold,
+                            "S\u00f8lv": item.silver,
+                            "Bronze": item.bronze,
+                            "Titler": item.titles,
+                            "Podier": item.podiums,
+                            "Tr\u00e6skeer": item.wooden_spoons,
+                            "Rundesejre": item.round_wins,
+                            "Sejrsstreak": item.longest_win_streak,
+                            "Runder som nr. 1": item.first_place_rounds,
+                            "F\u00f8ringsstreak": item.longest_first_place_streak,
+                        }
+                        for item in careers
+                    ],
+                    hide_index=True,
+                    width="stretch",
+                )
+            else:
+                st.info("Medaljer og rekorder vises efter f\u00f8rste komplette event.")
+
+    if compare_tab.open:
+        with compare_tab:
+            names = {
+                item.manager_id: item.manager_name
+                for item in ratings
+            }
+            names.update({item.manager_id: item.manager_name for item in careers})
+            manager_ids = tuple(sorted(names, key=lambda key: (names[key].casefold(), key)))
+            if len(manager_ids) < 2:
+                st.info("Sammenligning kr\u00e6ver mindst to managers.")
+            else:
+                requested_manager = str(st.query_params.get("manager", ""))
+                requested_opponent = str(st.query_params.get("opponent", ""))
+                first_index = manager_ids.index(requested_manager) if requested_manager in manager_ids else 0
+                first = st.selectbox(
+                    "Manager",
+                    manager_ids,
+                    index=first_index,
+                    format_func=lambda key: names[key],
+                    key="manager-compare-first",
+                )
+                opponents = tuple(item for item in manager_ids if item != first)
+                second_index = opponents.index(requested_opponent) if requested_opponent in opponents else 0
+                second = st.selectbox(
+                    "Modstander",
+                    opponents,
+                    index=second_index,
+                    format_func=lambda key: names[key],
+                    key="manager-compare-second",
+                )
+                game_identities = tuple(
+                    sorted(
+                        {
+                            (group.game.locale.casefold(), group.game.slug)
+                            for group in groups
+                        }
+                    )
+                )
+                slug_counts = {
+                    slug: sum(item[1] == slug for item in game_identities)
+                    for _, slug in game_identities
+                }
+                game_filter = st.selectbox(
+                    "Managerspil",
+                    (None, *game_identities),
+                    format_func=lambda identity: (
+                        "Alle managerspil"
+                        if identity is None
+                        else (
+                            identity[1]
+                            if slug_counts[identity[1]] == 1
+                            else f"{identity[1]} ({identity[0]})"
+                        )
+                    ),
+                    key="manager-compare-game",
+                )
+                selected_groups = (
+                    groups
+                    if game_filter is None
+                    else tuple(
+                        group
+                        for group in groups
+                        if (
+                            group.game.locale.casefold(),
+                            group.game.slug,
+                        )
+                        == game_filter
+                    )
+                )
+                competition_names = {
+                    group.group_id: group.name for group in selected_groups
+                }
+                competition_options = (
+                    "Alle konkurrencer",
+                    *sorted(competition_names),
+                )
+                competition_filter = st.selectbox(
+                    "Konkurrence",
+                    competition_options,
+                    format_func=lambda key: competition_names.get(key, key),
+                    key="manager-compare-competition",
+                )
+                try:
+                    compare_seasons = SeasonStore(paths.seasons_file).load()
+                except Exception as exc:
+                    compare_seasons = ()
+                    st.warning(f"Sæsonfilteret kunne ikke læses: {exc}")
+                season_by_id = {
+                    item.season_id: item for item in compare_seasons
+                }
+                season_options = (
+                    "Alle sæsoner",
+                    *sorted(
+                        season_by_id,
+                        key=lambda key: season_by_id[key].name.casefold(),
+                    ),
+                )
+                requested_season = str(st.query_params.get("season", ""))
+                season_index = (
+                    season_options.index(requested_season)
+                    if requested_season in season_options
+                    else 0
+                )
+                season_filter = st.selectbox(
+                    "Sæson",
+                    season_options,
+                    index=season_index,
+                    format_func=lambda key: (
+                        season_by_id[key].name if key in season_by_id else key
+                    ),
+                    key="manager-compare-season",
+                )
+                if competition_filter != "Alle konkurrencer":
+                    selected_groups = tuple(
+                        group
+                        for group in selected_groups
+                        if group.group_id == competition_filter
+                    )
+                if season_filter != "Alle sæsoner":
+                    season_competitions = set(
+                        season_by_id[season_filter].competition_ids
+                    )
+                    selected_groups = tuple(
+                        group
+                        for group in selected_groups
+                        if group.group_id in season_competitions
+                    )
+
+                h2h = build_manager_head_to_head(first, second, selected_groups, teams, settings)
+                official = h2h.summary("official")
+                shared = h2h.summary("shared_round")
+                with st.container(horizontal=True):
+                    st.metric(
+                        "Officielle V-U-T",
+                        f"{official[0]}-{official[1]}-{official[2]}",
+                        border=True,
+                    )
+                    st.metric(
+                        "F\u00e6lles runder V-U-T",
+                        f"{shared[0]}-{shared[1]}-{shared[2]}",
+                        border=True,
+                    )
+                    official_growth = h2h.total_growth("official")
+                    st.metric(
+                        "Officiel samlet v\u00e6kst",
+                        f"{official_growth[0]}-{official_growth[1]}",
+                        border=True,
+                    )
+                biggest = h2h.biggest_win("official")
+                closest = h2h.closest_meeting("official")
+                if biggest is not None:
+                    st.caption(
+                        "St\u00f8rste sejr: "
+                        f"{biggest.manager_score}-{biggest.opponent_score} "
+                        f"i {biggest.competition_id}."
+                    )
+                if closest is not None:
+                    st.caption(
+                        "N\u00e6rmeste officielle m\u00f8de: "
+                        f"{closest.manager_score}-{closest.opponent_score} "
+                        f"i {closest.competition_id}."
+                    )
+                meetings = (*h2h.official, *h2h.shared_rounds)
+                st.dataframe(
+                    [
+                        {
+                            "Spor": "Officiel kamp" if item.track == "official" else "F\u00e6lles grupperunde",
+                            "Spil": (
+                                f"{item.game_slug} ({item.game_locale})"
+                            ),
+                            "Konkurrence": item.competition_id,
+                            "Runder": ", ".join(map(str, item.round_numbers)),
+                            names[first]: item.manager_score,
+                            names[second]: item.opponent_score,
+                            "Tidspunkt": item.occurred_at,
+                        }
+                        for item in meetings
+                    ],
+                    hide_index=True,
+                    width="stretch",
+                )
+
+    if season_tab.open:
+        with season_tab:
+            season_store = SeasonStore(paths.seasons_file)
+            try:
+                seasons = season_store.load()
+            except Exception as exc:
+                seasons = ()
+                st.warning(f"S\u00e6soner kunne ikke l\u00e6ses: {exc}")
+            active = tuple(item for item in seasons if not item.is_archived)
+            show_archived = st.checkbox("Vis arkiverede sæsoner", value=False)
+            if show_archived:
+                active = seasons
+            if active:
+                requested_season = str(st.query_params.get("season", ""))
+                active_ids = tuple(item.season_id for item in active)
+                season_index = (
+                    active_ids.index(requested_season)
+                    if requested_season in active_ids
+                    else 0
+                )
+                season = st.selectbox(
+                    "S\u00e6son",
+                    active,
+                    format_func=lambda item: item.name,
+                    index=season_index,
+                )
+                standings = build_season_standings(
+                    season,
+                    frozen,
+                    settings.hall_of_fame_score,
+                )
+                st.dataframe(
+                    [
+                        {
+                            "Rang": item.rank,
+                            "Manager": item.manager_name,
+                            "Point": item.points,
+                            "Titler": item.titles,
+                            "Podier": item.podiums,
+                            "Rundesejre": item.round_wins,
+                        }
+                        for item in standings
+                    ],
+                    hide_index=True,
+                    width="stretch",
+                )
+                if not season.is_archived:
+                    with st.expander(
+                        "Rediger s\u00e6son",
+                        on_change="rerun",
+                    ) as edit_season:
+                        if edit_season.open:
+                            competitions = {
+                                group.group_id: group.name
+                                for group in groups
+                            }
+                            with st.form(
+                                f"edit-season-{season.season_id}"
+                            ):
+                                edited_name = st.text_input(
+                                    "S\u00e6sonnavn",
+                                    value=season.name,
+                                )
+                                edited_competitions = st.multiselect(
+                                    "Grupper og turneringer",
+                                    tuple(competitions),
+                                    default=tuple(
+                                        item
+                                        for item in season.competition_ids
+                                        if item in competitions
+                                    ),
+                                    format_func=lambda key: competitions[key],
+                                )
+                                save_season = st.form_submit_button(
+                                    "Gem s\u00e6son"
+                                )
+                            if save_season:
+                                try:
+                                    season_store.update(
+                                        seasons,
+                                        season.season_id,
+                                        name=edited_name,
+                                        competition_ids=tuple(
+                                            edited_competitions
+                                        ),
+                                    )
+                                except Exception as exc:
+                                    st.error(str(exc))
+                                else:
+                                    st.rerun()
+                if (
+                    not season.is_archived
+                    and st.button(
+                        "Arkivér sæson",
+                        key=f"archive-season-{season.season_id}",
+                    )
+                ):
+                    season_store.archive(seasons, season.season_id)
+                    st.rerun()
+            with st.expander("Opret s\u00e6son", on_change="rerun") as create_expander:
+                if create_expander.open:
+                    competitions = {group.group_id: group.name for group in groups}
+                    with st.form("create-season"):
+                        name = st.text_input("Navn")
+                        selected = st.multiselect(
+                            "Grupper og turneringer",
+                            tuple(competitions),
+                            format_func=lambda key: competitions[key],
+                        )
+                        create = st.form_submit_button("Opret s\u00e6son")
+                    if create:
+                        try:
+                            season_store.create(seasons, name, tuple(selected))
+                        except Exception as exc:
+                            st.error(str(exc))
+                        else:
+                            st.rerun()
+
+    if identity_tab.open:
+        with identity_tab:
+            identity_options = _identity_options(teams)
+            automatic_profiles = build_effective_manager_settings(
+                HubSettings(),
+                groups,
+                teams,
+            ).manager_profiles
+            automatic_component = {
+                key: frozenset(profile.identity_keys)
+                for profile in automatic_profiles
+                for key in profile.identity_keys
+            }
+            if profiles:
+                st.dataframe(
+                    [
+                        {
+                            "Manager": item.display_name,
+                            "Manager-ID": item.manager_id,
+                            "Identiteter": ", ".join(item.identity_keys),
+                            "Manuelle links": ", ".join(
+                                item.manual_identity_keys
+                            ),
+                            "Profiler": ", ".join(item.profile_urls),
+                        }
+                        for item in profiles
+                    ],
+                    hide_index=True,
+                    width="stretch",
+                )
+            with st.form("manager-profile-merge"):
+                target = st.selectbox(
+                    "F\u00f8j til profil",
+                    (None, *profiles),
+                    format_func=lambda item: (
+                        "Opret ny profil"
+                        if item is None
+                        else item.display_name
+                    ),
+                )
+                selected_keys = st.multiselect(
+                    "Identiteter for samme person",
+                    tuple(identity_options),
+                    format_func=lambda key: identity_options[key],
+                )
+                display_name = st.text_input(
+                    "Visningsnavn",
+                    value="" if target is None else target.display_name,
+                )
+                merge = st.form_submit_button("Saml identiteter")
+            if merge:
+                if not selected_keys or not display_name.strip():
+                    st.error(
+                        "V\u00e6lg identiteter og skriv et navn."
+                    )
+                else:
+                    selected_anchors = set(selected_keys)
+                    selected_components = tuple(
+                        automatic_component.get(
+                            key,
+                            frozenset((key,)),
+                        )
+                        for key in selected_anchors
+                    )
+                    selected_set = (
+                        set().union(*selected_components)
+                        if selected_components
+                        else set()
+                    )
+                    retained: list[ManagerProfile] = []
+                    target_keys = set(
+                        () if target is None else target.identity_keys
+                    )
+                    target_manual = set(
+                        () if target is None else target.manual_identity_keys
+                    )
+                    target_urls = set(
+                        () if target is None else target.profile_urls
+                    )
+                    for profile in profiles:
+                        if target is not None and profile.manager_id == target.manager_id:
+                            continue
+                        overlap = selected_set.intersection(
+                            profile.identity_keys
+                        )
+                        if overlap:
+                            target_keys.update(overlap)
+                            target_manual.update(
+                                set(profile.manual_identity_keys)
+                                & selected_set
+                            )
+                            target_urls.update(profile.profile_urls)
+                        remaining = tuple(
+                            key
+                            for key in profile.identity_keys
+                            if key not in selected_set
+                        )
+                        if remaining:
+                            retained.append(
+                                replace(
+                                    profile,
+                                    identity_keys=remaining,
+                                    manual_identity_keys=tuple(
+                                        key
+                                        for key in profile.manual_identity_keys
+                                        if key in remaining
+                                    ),
+                                )
+                            )
+                    target_keys.update(selected_set)
+                    target_manual.update(selected_anchors)
+                    target_urls.update(
+                        snapshot.team.reference.profile_url
+                        for snapshot in teams.snapshots
+                        if snapshot.team.reference.profile_url
+                        and selected_set.intersection(
+                            manager_identity_keys(
+                                owner_user_id=snapshot.team.owner_user_id,
+                                account_user_id=(
+                                    snapshot.team.reference.account_user_id
+                                ),
+                                account_key=(
+                                    snapshot.team.reference.account_key
+                                ),
+                                owner_name=snapshot.team.owner_name,
+                            )
+                        )
+                    )
+                    manager_id = (
+                        target.manager_id
+                        if target is not None
+                        else f"manager:{uuid4().hex}"
+                    )
+                    retained.append(
+                        ManagerProfile(
+                            manager_id,
+                            display_name.strip(),
+                            tuple(sorted(target_keys)),
+                            tuple(sorted(target_urls)),
+                            tuple(sorted(target_manual)),
+                        )
+                    )
+                    try:
+                        settings_store.set_manager_profiles(
+                            settings,
+                            tuple(retained),
+                        )
+                    except Exception as exc:
+                        st.error(str(exc))
+                    else:
+                        st.rerun()
+
+            if profiles:
+                st.subheader("Omd\u00f8b profil")
+                with st.form("manager-profile-rename"):
+                    rename_profile = st.selectbox(
+                        "Profil",
+                        profiles,
+                        format_func=lambda item: item.display_name,
+                        key="manager-profile-rename-target",
+                    )
+                    renamed = st.text_input(
+                        "Nyt visningsnavn",
+                        value=rename_profile.display_name,
+                    )
+                    rename = st.form_submit_button("Gem navn")
+                if rename:
+                    if not renamed.strip():
+                        st.error("Visningsnavnet m\u00e5 ikke v\u00e6re tomt.")
+                    else:
+                        settings_store.set_manager_profiles(
+                            settings,
+                            tuple(
+                                replace(
+                                    profile,
+                                    display_name=renamed.strip(),
+                                )
+                                if profile.manager_id
+                                == rename_profile.manager_id
+                                else profile
+                                for profile in profiles
+                            ),
+                        )
+                        st.rerun()
+
+                st.subheader("Oph\u00e6v manuelle links")
+                unlink_profile = st.selectbox(
+                    "Profil med manuelt link",
+                    profiles,
+                    format_func=lambda item: item.display_name,
+                    key="manager-profile-unlink-target",
+                )
+                unlink_options = tuple(
+                    key
+                    for key in unlink_profile.manual_identity_keys
+                    if key in unlink_profile.identity_keys
+                )
+                with st.form("manager-profile-unlink"):
+                    unlink_keys = st.multiselect(
+                        "Identiteter der skal skilles ud",
+                        unlink_options,
+                        format_func=lambda key: identity_options.get(
+                            key,
+                            key,
+                        ),
+                    )
+                    unlink = st.form_submit_button(
+                        "Oph\u00e6v valgte links"
+                    )
+                if unlink:
+                    components = {
+                        automatic_component.get(key, frozenset((key,)))
+                        for key in unlink_keys
+                    }
+                    removed = set().union(*components) if components else set()
+                    removed.intersection_update(unlink_profile.identity_keys)
+                    remaining = tuple(
+                        key
+                        for key in unlink_profile.identity_keys
+                        if key not in removed
+                    )
+                    if not removed:
+                        st.error("V\u00e6lg mindst \u00e9n manuel identitet.")
+                    elif not remaining:
+                        st.error(
+                            "Mindst \u00e9n identitetskomponent skal blive "
+                            "p\u00e5 den eksisterende profil."
+                        )
+                    else:
+                        retained = [
+                            profile
+                            for profile in profiles
+                            if profile.manager_id != unlink_profile.manager_id
+                        ]
+                        retained.append(
+                            replace(
+                                unlink_profile,
+                                identity_keys=remaining,
+                                manual_identity_keys=tuple(
+                                    key
+                                    for key in unlink_profile.manual_identity_keys
+                                    if key in remaining
+                                ),
+                            )
+                        )
+                        for component in sorted(
+                            components,
+                            key=lambda values: sorted(values),
+                        ):
+                            component_keys = tuple(
+                                sorted(set(component).intersection(removed))
+                            )
+                            if not component_keys:
+                                continue
+                            label = identity_options.get(
+                                component_keys[0],
+                                component_keys[0],
+                            ).split(" \u00b7 ")[0]
+                            retained.append(
+                                ManagerProfile(
+                                    f"manager:{uuid4().hex}",
+                                    label,
+                                    component_keys,
+                                )
+                            )
+                        try:
+                            settings_store.set_manager_profiles(
+                                settings,
+                                tuple(retained),
+                            )
+                        except Exception as exc:
+                            st.error(str(exc))
+                        else:
+                            st.rerun()
+
+    for warning in (*metadata_warnings, *ledger_warnings):
+        st.warning(warning)
+
+
+def calendar_view(
+    groups: tuple[GroupDefinition, ...],
+    paths: AppPaths,
+    teams: SnapshotIndex,
+) -> None:
+    """Render the global cache-only schedule."""
+
+    st.title("Kalender", anchor="kalender")
+    metadata, warnings = GameMetadataStore(paths.game_metadata_dir).scan()
+    events = build_calendar_events(groups, metadata)
+    _, settings = _manager_settings(paths)
+    settings = build_effective_manager_settings(settings, groups, teams)
+    manager_names: dict[str, str] = {}
+    managers_by_event: dict[str, frozenset[str]] = {}
+    for event in events:
+        event_managers: set[str] = set()
+        for team_id in event.participant_ids:
+            snapshot = teams.newest(
+                (event.game_locale, event.game_slug),
+                team_id,
+            )
+            if snapshot is None:
+                continue
+            team = snapshot.team
+            manager_id, manager_name = resolve_manager_identity(
+                settings,
+                owner_user_id=team.owner_user_id,
+                account_user_id=team.reference.account_user_id,
+                account_key=team.reference.account_key,
+                owner_name=team.owner_name,
+                fallback_key=(
+                    f"{event.game_locale}:{event.game_slug}:team:{team_id}"
+                ),
+            )
+            manager_names[manager_id] = manager_name
+            event_managers.add(manager_id)
+        managers_by_event[event.event_id] = frozenset(event_managers)
+
+    game_identities = tuple(
+        sorted(
+            {
+                (item.game_locale.casefold(), item.game_slug)
+                for item in events
+            }
+        )
+    )
+    slug_counts = {
+        slug: sum(identity[1] == slug for identity in game_identities)
+        for _, slug in game_identities
+    }
+    game_filter = st.selectbox(
+        "Managerspil",
+        (None, *game_identities),
+        format_func=lambda identity: (
+            "Alle managerspil"
+            if identity is None
+            else (
+                identity[1]
+                if slug_counts[identity[1]] == 1
+                else f"{identity[1]} ({identity[0]})"
+            )
+        ),
+    )
+    group_names = {group.group_id: group.name for group in groups}
+    group_filter = st.selectbox(
+        "Gruppe eller turnering",
+        (None, *sorted({item.group_id for item in events})),
+        format_func=lambda key: (
+            "Alle grupper"
+            if key is None
+            else group_names.get(key, key)
+        ),
+    )
+    manager_filter = st.selectbox(
+        "Manager",
+        (
+            None,
+            *sorted(
+                manager_names,
+                key=lambda key: (
+                    manager_names[key].casefold(),
+                    key,
+                ),
+            ),
+        ),
+        format_func=lambda key: (
+            "Alle managers"
+            if key is None
+            else manager_names.get(key, key)
+        ),
+    )
+    date_filter = st.date_input("Dato", value=None)
+    include_past = st.toggle("Vis tidligere begivenheder", value=False)
+    now = datetime.now().astimezone()
+
+    def matches_date(item: CalendarEvent) -> bool:
+        if isinstance(date_filter, date):
+            start = item.start or item.deadline or item.end
+            end = item.end or item.deadline or item.start
+            return (
+                start is not None
+                and end is not None
+                and start.date() <= date_filter <= end.date()
+            )
+        if include_past or item.missing_time:
+            return True
+        latest = item.end or item.deadline or item.start
+        return latest is not None and latest >= now
+
+    selected = tuple(
+        item
+        for item in events
+        if (
+            game_filter is None
+            or (
+                item.game_locale.casefold(),
+                item.game_slug,
+            )
+            == game_filter
+        )
+        and (group_filter is None or item.group_id == group_filter)
+        and (
+            manager_filter is None
+            or manager_filter in managers_by_event[item.event_id]
+        )
+        and matches_date(item)
+    )
+    timed = tuple(item for item in selected if not item.missing_time)
+    missing = tuple(item for item in selected if item.missing_time)
+    if timed:
+        st.dataframe(
+            [
+                {
+                    "Start": item.start,
+                    "Deadline": item.deadline,
+                    "Slut": item.end,
+                    "Managerspil": (
+                        item.game_slug
+                        if slug_counts[item.game_slug] == 1
+                        else f"{item.game_slug} ({item.game_locale})"
+                    ),
+                    "Kamp": item.title,
+                    "Runde": item.round_number,
+                }
+                for item in timed
+            ],
+            hide_index=True,
+            width="stretch",
+        )
+        for item in timed:
+            with st.container(horizontal=True):
+                st.link_button(
+                    item.title,
+                    item.internal_url,
+                    icon=":material/open_in_new:",
+                    key=f"calendar-event-{item.event_id}",
+                )
+                if item.official_url:
+                    st.link_button(
+                        "Officiel gruppe",
+                        item.official_url,
+                        icon=":material/language:",
+                        key=f"calendar-official-{item.event_id}",
+                    )
+    else:
+        st.info("Ingen cachede kalenderbegivenheder matcher filtrene.")
+    if missing:
+        st.subheader("Tidspunkt mangler")
+        for item in missing:
+            with st.container(horizontal=True):
+                st.write(f"{item.title} - runde {item.round_number}")
+                st.link_button(
+                    "Åbn spilinfo",
+                    (
+                        "?view=game"
+                        f"&locale={item.game_locale.casefold()}"
+                        f"&game={item.game_slug}"
+                        "&section=administration"
+                    ),
+                    icon=":material/event:",
+                    key=f"calendar-missing-{item.event_id}",
+                )
+                if item.official_url:
+                    st.link_button(
+                        "Officiel gruppe",
+                        item.official_url,
+                        icon=":material/language:",
+                        key=f"calendar-missing-official-{item.event_id}",
+                    )
+    for warning in warnings:
+        st.warning(warning)

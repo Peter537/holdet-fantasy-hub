@@ -1,102 +1,132 @@
 # Arkitektur
 
-Holdet Fantasy Hub består af et importerbart bibliotek og to klienter. `holdet_lib` ejer domænemodeller, netværk, parsing, beregninger og serialisering. Streamlit-dashboardet og CLI'en beslutter, hvornår data skal hentes, vises eller gemmes.
+Holdet Fantasy Hub har et importerbart domænebibliotek, et lokalt Streamlit-dashboard og en kildebaseret CLI. Manager-, sæson-, kalender- og turneringsændringerne er kun koblet til biblioteket og Streamlit; CLI'en har ikke fået nye kommandoer.
 
-## Systemoverblik
+## Systemgrænser
 
 ```mermaid
 flowchart TB
     subgraph Clients["Klienter"]
-        Web["website/\nStreamlit-dashboard"]
-        Cli["cli/\nKildebaseret CLI"]
+        Web["website/app.py<br/>Streamlit-dashboard"]
+        Cli["cli/main.py<br/>Eksisterende spiller-, hold- og datakommandoer"]
     end
     subgraph Library["holdet_lib"]
-        Client["HoldetClient"]
-        Parsing["URL-, Flight- og JSON-parsere"]
+        Fetch["HoldetClient og parsere"]
         Domain["Frosne dataclasses"]
-        Builders["Analytics, transfers og Hall of Fame"]
+        Manager["Manager-, sæson- og kalenderbuilders"]
+        Tournament["Generisk turneringsmotor"]
         Stores["Versionsstyrede stores og backup"]
     end
-    Web --> Client
-    Cli --> Client
-    Client --> Parsing
-    Parsing --> Domain
-    Domain --> Builders
+    Web --> Fetch
+    Cli --> Fetch
+    Fetch --> Domain
+    Domain --> Manager
+    Domain --> Tournament
     Web --> Stores
     Cli --> Stores
     Stores --> AppData["Windows AppData"]
-    Client --> PublicData["Offentlige Holdet.dk-endpoints"]
+    Fetch --> Holdet["Offentlige Holdet.dk-endpoints"]
 ```
 
-Afhængigheden går ind mod biblioteket. `holdet_lib` importerer ikke Streamlit-routes, så parsere, round-aware diffing, historik, transfers, Hall of Fame, Datastatus og backup kan testes uden UI eller netværk. Datastatus-links bygges i website-laget fra locale og slug.
+Afhængigheden går ind mod biblioteket. `holdet_lib` importerer ikke Streamlit. Navigation, Elo, H2H, historier, sæsonstillinger og kalender kan derfor beregnes uden netværk og uden vedvarende writes.
 
 ## Lag og ansvar
 
-### `holdet_lib`
+### Biblioteket
 
-Biblioteket indeholder:
+`holdet_lib` ejer:
 
-- `HoldetClient`, URL-normalisering og parsere til server-renderet Flight-data og JSON-endpoints.
-- Frosne modeller for spil, spillere, hold, runder, metadata, diffing, historik, transfers, Datastatus, Hall of Fame og backup.
-- Rene builders som `compare_snapshots`, `compare_round_snapshots`, `compare_team_snapshots`, `build_history_series`, `build_player_history`, `simulate_transfers`, `build_hall_of_fame` og `build_data_quality_report`.
-- Eksplicitte stores til konfiguration, Hub-indstillinger, snapshots, metadata, manifester, turneringsrevisioner og frosne Hall of Fame-events.
-- Valideret ZIP-backup med `create_backup`, `validate_backup` og `restore_backup`.
+- URL-normalisering, HTTP-klient, Flight-/JSON-parsere og Holdet-modeller;
+- snapshot-, metadata-, diff-, historik- og transferberegninger;
+- managerprofiler, eventrevisioner, Elo, karrierestatistik, awards, historier og H2H;
+- sæsondefinitioner og pointprofilbaserede sæsonstillinger;
+- liga-, Swiss-, gruppe+knockout- og double-elimination-definitioner;
+- pairing-, konfigurations-, snapshot-, metadata-, manifest- og backupstores.
 
-Et almindeligt klient- eller builderkald skriver ikke filer. Kun stores og eksplicitte backup-/eksportfunktioner gør det.
+Rene builders skriver ikke filer. Stores skriver kun efter eksplicitte handlinger.
 
-### `website`
+### Streamlit
 
-`website/app.py` er entrypoint og router. Paneler er kontekstuelle og lazy-loadede; query-parametre og navngivet session state fastholder spil, gruppe, hold og runde. UI'et læser cache ved navigation og foretager kun netværk eller vedvarende writes efter et eksplicit klik. Transferlaboratoriets scenarier lever kun i session state.
+`website/app.py` ejer routing, eksplicitte fetch-/save-handlinger og visning. `website/hub_pages.py` ejer Managers, Kalender, Rundens historie og relaterede paneler. Query-parametre og navngivet session state fastholder kontekst. Almindelig navigation læser cache.
 
-### `cli`
+### CLI
 
-CLI'en er en tynd argument- og batchklient omkring de samme hente-, snapshot- og eksportinterfaces. Dokumentationen bruger kildekørslen `py -3.14 .\cli\main.py`; se [Klienter](clients.md).
+CLI'en genbruger fortsat biblioteket til spiller-, hold-, eksport- og datakommandoer. Den har ingen manager-, sæson-, kalender- eller turneringsformatkommandoer.
 
-## Dataejerskab
+## Manager-eventflow
 
 ```mermaid
 flowchart LR
-    Fetch["Eksplicit hentning"] --> Model["ScrapedGame / ScrapedTeam"]
-    Model --> Snapshot["Kanonisk snapshot"]
-    Snapshot --> Analytics["Diff, historik, Datastatus og simulation"]
-    Analytics --> View["Kontekstuel visning"]
-    Model --> Metadata["GameMetadata"]
-    Config["Konti, grupper og HubSettings"] --> View
-    Frozen["Frosne Hall of Fame-events"] --> HOF["Genberegnet leaderboard"]
-    ExportDoc["Afledt eksportdokument"] --> Export["TXT / JSON / Markdown"]
+    Snapshots["Komplette team- og rundesnapshots"] --> Periods["Managerperioder<br/>bedste hold pr. spil/runde"]
+    Groups["Grupper og turneringsrevisioner"] --> Pairs["Deduplikerede modstanderpar"]
+    Profiles["ManagerProfile<br/>autoritative identitetsnøgler"] --> Periods
+    Periods --> Events["ManagerEvent schema 2<br/>append-only revisioner"]
+    Pairs --> Elo["Batch-Elo 1500 / K=32"]
+    Events --> Career["Medaljer, titler, podier og træskeer"]
+    Periods --> Awards["Runde-awards og historie"]
+    Events --> H2H["Officielle møder"]
+    Pairs --> H2H
+    Events --> Seasons["Sæsonstillinger"]
 ```
 
-- Snapshots er komplette, uforanderlige lokale kopier til offlinevisning.
-- `GameMetadata` gemmer schedule, deadline, format og hentetid efter eksplicitte fetches.
-- `HubSettings` gemmer watchlist, manageraliaser og den redigerbare pointprofil atomisk.
-- Hall of Fame-ledgeren gemmer frosne råresultater; pointprofilen genberegner visningen uden at ændre dem.
-- Manifester beskriver resultater af eksplicitte opdateringer.
-- Eksporter er brugerrettede afledninger og indgår ikke i en Hub-backup.
+`owner_user_id` har første prioritet, derefter `account_user_id` eller en autoritativ kontonøgle. Den deterministiske identitetsgraf forbinder samtidigt observerede autoritative nøgler; navn er kun fallback eller del af en eksplicit manuel profil. Samme manager reduceres til det bedste hold i en ratingperiode, og selvopgør fjernes. Flergruppeturneringer opretter kun modstanderpar inden for den faktiske pulje.
+
+Eventledgeren er revisionsstyret. En rettelse publiceres som en højere revision med `supersedes_revision`; læsning vælger den seneste revision og remapper placements gennem den aktuelle identitetsgraf uden writes. `ManagerEvent` og kompatibilitetsnavnet `HallOfFameEvent` repræsenterer samme schema-2 in-memory-værdi. Schema-1 Hall of Fame-events indlæses som legacy-revision 1.
+
+## Turneringslivscyklus
+
+```mermaid
+stateDiagram-v2
+    [*] --> Draft: Vælg template og deltagere
+    Draft --> Validated: Valider runder, seeds og tie-breakers
+    Validated --> Published: Gem revision og første fixtures
+    Published --> AwaitingData: Runde er ikke komplet
+    AwaitingData --> Published: Eksplicit refresh
+    Published --> NextPairing: Foregående Swiss-runde komplet
+    NextPairing --> Published: Publicér uforanderlig parring
+    Published --> Conflict: Datakorrektion ændrer planforudsætning
+    Conflict --> Revised: Bekræft fuld genberegning
+    Revised --> Published: Ny revision
+    Published --> Finished: Finale eller slutstilling komplet
+```
+
+Seeds fryses ved oprettelse. Schema 8 bruger fortsat `TournamentConfig` som runtimeformat og `TournamentDefinition` som kompatibelt alias; templateklasserne er validerede projektioner. Publicerede parringer ændres ikke af senere Elo- eller datakorrektioner. Den rene konfliktbuilder sammenligner dem med parringer udledt af korrigerede resultater. Format, deltagere, seeding, tie-breakers eller rundestruktur kræver en ny revision; navn og officiel URL er kosmetiske ændringer.
+
+## Dataejerskab
+
+- `SnapshotIndex` er læseindekset for uforanderlige snapshots.
+- `HubSettings` schema 2 ejer watchlist, `ManagerProfile` og den globale pointprofil.
+- `groups.json` schema 8 ejer managerspil, grupper, officielle links og `TournamentDefinition`.
+- `seasons.json` schema 1 ejer manuelle sæsondefinitioner.
+- pairing-store schema 1 ejer publicerede parringer pr. turneringsrevision.
+- eventledger schema 2 ejer rå managerresultater og revisioner.
+- `GameMetadata` ejer schedule og deadlines, som kalenderen læser uden fetch.
+
+Se [Datalagring](data-storage.md) for konkrete stier og kompatibilitetsregler.
 
 ## Offentlige hovedinterfaces
 
 | Område | Interfaces |
 | --- | --- |
 | Hentning | `HoldetClient`, `GameUrl`, `ScrapedGame`, `ScrapedTeam`, `RoundStatus` |
-| Konfiguration | `AccountStore`, `GroupStore`, `HubSettings`, `HubSettingsStore`, `ManagerAlias`, `WatchlistEntry` |
-| Metadata | `GameMetadata`, `GameMetadataStore`, `game_metadata_from_context` |
-| Snapshots | `SnapshotStore`, `PlayerStatisticsStore`, `ManifestStore` |
-| Diff og historik | `SnapshotDiff`, `TeamSnapshotDiff`, `HistoryPoint`, `PlayerHistoryPoint`, `compare_round_snapshots`, `compare_team_rounds`, `build_history_series` |
-| Transfer | `TransferRuleProfile`, `TransferScenario`, `TransferValidation`, `FOOTBALL_RULES`, `CYCLING_RULES`, `MOTOR_RULES`, `GOLF_RULES`, `simulate_transfers` |
-| Hall of Fame | `HallOfFameEvent`, `HallOfFameScoreProfile`, `HallOfFameStore`, `build_hall_of_fame`, `build_live_hall_of_fame_events` |
-| Datastatus | `DataQualityRound`, `DataQualityReport`, `build_data_quality_report` |
-| Backup | `BackupManifest`, `BackupValidation`, `RestoreResult`, `create_backup`, `validate_backup`, `restore_backup` |
-| Eksport | `PlayerExportStore`, `TeamExportStore`, `build_player_export`, `build_team_export` |
-| Stier | `AppPaths`, `PathOverrides`, `resolve_paths()` |
+| Identitet | `ManagerProfile`, `HubSettings`, `HubSettingsStore`, `build_effective_manager_settings`, `manager_identity_keys`, `resolve_manager_identity` |
+| Manageranalyse | `ManagerEvent`, `ManagerRating`, `ManagerCareer`, `ManagerHeadToHead`, `RoundAward`, `RoundStory`, `build_hall_of_fame` |
+| Sæson | `SeasonDefinition`, `SeasonStanding`, `SeasonStore`, `build_season_standings` |
+| Kalender | `CalendarEvent`, `build_calendar_events` |
+| Turnering | `TournamentDefinition`, `TournamentConfig`, `TournamentTemplateConfig`, templatekonfigurationer, `tournament_template_config`, `create_tournament_definition`, `build_tournament_state` |
+| Pairings | `TournamentPairing`, `TournamentPairingRevision`, `TournamentPairingStore`, `validate_tournament_pairing_revision`, `build_swiss_pairing_conflicts` |
+| Historik | `compare_snapshots`, `compare_round_snapshots`, `build_history_series` |
+| Transfer | `TransferScenario`, `simulate_transfers` |
+| Datastatus | `DataQualityReport`, `build_data_quality_report` |
+| Backup | `create_backup`, `validate_backup`, `restore_backup` |
 
-De dokumenterede top-level-navne eksporteres via `holdet_lib.__all__`, og type hints på de offentlige modeller skal kunne evalueres med `typing.get_type_hints()`.
+Legacy-navnene `HallOfFameEvent`, `create_tournament_config` og `build_tournament_state` er bevaret. De dokumenterede top-level-navne eksporteres via `holdet_lib.__all__`.
 
 ## Designregler
 
 1. Import og `resolve_paths()` må ikke oprette mapper eller kontakte Holdet.
-2. Navigation, grafer, sammenligning og simulation er cache-only.
-3. Parsere og beregninger holdes rene og får data injiceret.
-4. Netværksfejl må ikke overskrive en gyldig cache.
-5. Uforenelige nødvendige payloadfelter giver fejl frem for delvise snapshots.
-6. Nye stores er additive; manglende filer behandles som tomme, og ældre data omskrives ikke ved opstart.
-7. Produktversion `0.1.0` og lokale schema-versioner udvikles uafhængigt.
+2. Navigation, Managers, Kalender, H2H, grafer og simulation er cache-only.
+3. Netværksfejl må ikke overskrive gyldig cache.
+4. Nye stores er additive; manglende filer er tomme, og startup omskriver ikke ældre data.
+5. Stable ID'er er sidste deterministiske fallback i builders.
+6. Produktversion `0.1.0` og lokale schema-versioner udvikles uafhængigt.

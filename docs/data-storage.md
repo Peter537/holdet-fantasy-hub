@@ -8,7 +8,8 @@ Mutable, personlige og voksende data ligger i Windows AppData og ikke i reposito
 %APPDATA%\Holdet Fantasy Hub\config\
 ├── accounts.json
 ├── groups.json
-└── hub-settings.json
+├── hub-settings.json
+└── seasons.json
 
 %LOCALAPPDATA%\Holdet Fantasy Hub\
 ├── data\
@@ -16,7 +17,8 @@ Mutable, personlige og voksende data ligger i Windows AppData og ikke i reposito
 │   ├── manifests\
 │   ├── group-revisions\
 │   ├── game-metadata\
-│   └── hall-of-fame\
+│   ├── hall-of-fame\
+│   └── tournament-pairings\
 └── exports\
     ├── players\
     ├── teams\
@@ -30,17 +32,19 @@ Der findes ikke implicitte `cache`- eller `logs`-mapper i `AppPaths`.
 | Placering | Indhold |
 | --- | --- |
 | `config/accounts.json` | Offentlige profiler til eksplicit kontoopdagelse |
-| `config/groups.json` | Managerspil, grupper, medlemsreferencer og aktive turneringsplaner |
-| `config/hub-settings.json` | Watchlists, manageraliaser og Hall of Fame-pointprofil |
+| `config/groups.json` | Managerspil, grupper, officielle links og turneringsdefinitioner |
+| `config/hub-settings.json` | Watchlists, managerprofiler og global Hall of Fame-pointprofil |
+| `config/seasons.json` | Manuelle sæsondefinitioner og arkivstatus |
 | `data/snapshots` | Komplette kanoniske spiller- og teamsnapshots |
 | `data/manifests` | Resultater fra eksplicitte gruppe- og managerspilopdateringer |
 | `data/group-revisions` | Uforanderlige arkiverede turneringsrevisioner |
 | `data/game-metadata` | Schedule, deadlines, format og hentetid pr. spil |
-| `data/hall-of-fame` | Frosne, uforanderlige råresultater |
+| `data/hall-of-fame` | Append-only manager-events og legacy Hall of Fame-events |
+| `data/tournament-pairings` | Publicerede fixtures/parringer pr. turneringsrevision |
 | `exports/players` / `exports/teams` | Afledte TXT-, JSON- og Markdown-dokumenter |
 | `exports/backups` | Manuelt oprettede Hub-backups og rollback-ZIP'er |
 
-Manglende nye filer eller mapper behandles som tomme stores. Ældre installationer omskrives ikke ved opstart.
+Manglende nye filer eller mapper behandles som tomme stores. Ældre installationer omskrives ikke ved opstart. En korrupt arkiveret turneringsrevision springes over med en afgrænset advarsel i Hubben, så den aktive gruppe stadig kan vises; den strikte store-læsning for backup og validering afviser fortsat filen.
 
 ## Konto- og Hub-indstillinger
 
@@ -58,7 +62,7 @@ En manglende `accounts.json` er en tom konfiguration. Konti vedligeholdes under 
 }
 ```
 
-`hub-settings.json` bruger schema 1 og opdateres atomisk. Watchlistposter identificerer spil og `entry_id` med legacy-fallback. Manageraliaser samler identitetsnøgler, og pointprofilen er adskilt fra de frosne Hall of Fame-events.
+`hub-settings.json` schema 2 opdateres atomisk. Watchlistposter identificerer spil og `entry_id` med legacy-fallback. `ManagerProfile` samler identitetsnøgler, manuel linkproveniens og profil-URL'er, mens pointprofilen er adskilt fra manager-eventledgeren. Schema 1-aliaser migreres kun i hukommelsen, indtil en eksplicit save.
 
 ## Filnavne og uforanderlighed
 
@@ -71,21 +75,23 @@ team-round<round>_<MMDD>_<HHmmss>[_N].<format>
 
 `_1`, `_2` osv. bruges ved samme-sekund-kollisioner. Flerformatseksporter deler stem og suffix og publiceres først, når hele sættet kan skrives.
 
-## Schemaer og kompatibilitet
+## Skemaer og kompatibilitet
 
-Produktversion `0.1.0` er uafhængig af lokale dataformater. Blandt de aktuelle formater er gruppekonfiguration schema 7, teamsnapshot schema 2, spillersnapshot schema 3 samt schema 1 for:
+Produktversion `0.1.0` er uafhængig af lokale dataformater. Aktuelle formater er:
 
-- `hub-settings.json`;
-- filer under `data/game-metadata`;
-- Hall of Fame-events under `data/hall-of-fame`;
-- refresh-manifester og turneringsrevisioner;
-- `backup-manifest.json`.
+- gruppekonfiguration schema 8;
+- `hub-settings.json` schema 2;
+- manager-eventledger schema 2;
+- teamsnapshot schema 2 og spillersnapshot schema 3;
+- `seasons.json` schema 1;
+- turneringsparringer schema 1;
+- filer under `data/game-metadata`, refresh-manifester, turneringsrevisioner og `backup-manifest.json` schema 1.
 
 Ældre kompatible snapshots indlæses uden omskrivning. Manglende rundestatus bliver `unknown` og giver foreløbige beregninger, indtil en manuel genhentning bekræfter `complete`. Defekte eller inkompatible snapshots ignoreres med en synlig advarsel.
 
 ## Backup og gendannelse
 
-**Data og lager → Backup og gendannelse** opretter én ZIP med konfiguration, snapshots, manifester, turneringsrevisioner, spilmetadata og Hall of Fame-ledger. Afledte spiller-/teameksporter og gamle backups medtages ikke.
+**Data og lager → Backup og gendannelse** opretter én ZIP med konfiguration, sæsoner, snapshots, manifester, turneringsrevisioner, publicerede parringer, spilmetadata og manager-eventledger. Afledte spiller-/teameksporter og gamle backups medtages ikke.
 
 `backup-manifest.json` indeholder schema-version, tidspunkt, filstørrelser og SHA-256 for hver fil. Før restore vises en preview, og hele arkivet valideres. Restore afvises ved:
 
@@ -102,7 +108,7 @@ Der er ingen automatisk eller cloud-baseret backup. ZIP-backup er altid en manue
 
 **Data og lager → Datastatus** viser handlingsorienterede managerspilskort som **Klar**, **Foreløbig**, **Mangler data** eller **Fejl**. Kortet viser seneste relevante runde, hold- og spillerdækning, rundestatus, cachealder, seneste refresh og manglende hold med navn. Tidligere runder ligger i detaljer, og arkiverede spil kan medtages.
 
-Links fører til Rundecenter eller den konkrete kontekst for manuel opdatering. Datastatus har ikke egne opdateringsknapper og starter ingen hentning.
+Links fører til Rundecenter eller den konkrete kontekst for manuel opdatering. Datastatus har ikke egne opdateringsknapper og starter ingen hentning. En separat, læsende store-kontrol viser helbred for arkiverede turneringsrevisioner, sæsoner, managerledger og publicerede parringer. Hver store kontrolleres isoleret, så en korrupt fil ikke skjuler status for de andre.
 
 ## Overrides
 

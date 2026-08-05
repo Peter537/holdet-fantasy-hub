@@ -21,10 +21,15 @@ Destinationerne står i denne rækkefølge:
 3. **Spillerstatistik** og **Holdstatistik** – selvstændige paneler med én nødvendig managerspilvælger.
 4. Aktive managerspil med deres grupper.
 5. **Arkiverede managerspil**.
-6. **Hall of Fame**.
-7. **Data og lager**.
+6. **Managers** – Rangliste, Medaljer og rekorder, Sammenlign, Sæsoner og Identiteter.
+7. **Kalender** – cachebaserede fantasyopgør og manglende tidspunkter.
+8. **Data og lager**.
 
 Der findes ingen global Værktøjer-sektion. De tidligere globale views `transfer`, `compare`, `history`, `changes`, `quality` og `backup` er fjernet og viser den kontrollerede side **Siden findes ikke**.
+
+Den tidligere `view=hall-of-fame` viderestiller til `view=managers`. Managers og Kalender er globale views og starter ingen hentning. Kalenderen kan filtreres på manager, managerspil, gruppe/turnering og dato.
+
+Managers viser Hall of Fame-point og Elo side om side. Identiteter kan samles og ophæves manuelt, H2H har officielle kampe og fælles grupperunder som separate spor, og sæsoner sammensættes af eksisterende konkurrencer.
 
 ### Managerspil og kontekst
 
@@ -48,20 +53,23 @@ Query-parametrene kan kombineres:
 
 | Parameter | Betydning |
 | --- | --- |
-| `view` | Hoveddestination, eksempelvis et managerspil, Hall of Fame eller Data og lager |
+| `view` | Hoveddestination, eksempelvis et managerspil, `managers`, `calendar` eller Data og lager |
 | `section` | Managerspillets hovedfane |
 | `panel` | Underfane i spiller-, hold-, gruppe- eller datavisningen |
 | `round` | Valgt runde |
 | `team` | Valgt hold |
 | `group` | Valgt gruppe |
 
+| `manager` / `opponent` | De to managerprofiler i Sammenlign |
+| `season` | Valgt sæsonmesterskab |
+| `date` | Kalenderens valgte dato |
 Valg i Streamlit-state navngives efter spil, gruppe, hold og runde, så de ikke lækker mellem managerspil. Faner læses først, når de vises.
 
 ### Offline-first
 
 Navigation, faneskift, rundeskift, grafer, sammenligning, ændringsvisning og transfersimulation læser kun kompatible snapshots. Netværk bruges kun af tydeligt navngivne handlinger som **Hent**, **Find hold**, **Opdater** eller **Prøv igen**. Simuleringer lever i `st.session_state` og skriver hverken snapshots eller konfiguration.
 
-Læs mere om [Spillerstatistik](player-statistics.md), [Holdstatistik](team-statistics.md), [Grupper og turneringer](groups-and-tournaments.md) og [Datalagring](data-storage.md).
+Læs mere om [Spillerstatistik](player-statistics.md), [Holdstatistik](team-statistics.md), [Managers og sæsoner](managers-and-seasons.md), [Grupper og turneringer](groups-and-tournaments.md) og [Datalagring](data-storage.md).
 
 ### Sikker genstart
 

@@ -43,15 +43,16 @@ Live-testen afhænger ikke af private profiler eller fantasyhold og antager ikke
 | Hold | Kontoopdagelse, roster, historik, rang, gruppeplacering og ændringer |
 | Transfer | Fire regelprofiler, gebyr, kontrakter, formation, klubgrænser, kaptajnregler og `final`/`preliminary`/`unverified` |
 | Historik | Huller, seneste snapshot pr. runde og omvendte rangakser på spil-, gruppe- og holdniveau |
-| Hall of Fame | Ties, managerdeduplikering, aliaser, redigerbare point og idempotent frysning |
-| Lagring og backup | AppData, atomiske writes, schemaer, SHA-256, path traversal, preview, staging og rollback |
-| Turnering | Fairness, draw seed, revisioner, bracket, H2H og historisk genberegning |
-| Dashboard | Kontekstuelle deeplinks, tomme tilstande, cache-only navigation og fravær af globale værktøjsroutes |
+| Managers og sæsoner | Identitetsgraf, stabilt ID ved merge/rename/unmerge, legacy-remapping uden writes, bedste hold, locale- og puljeisoleret Elo, awards, streaks, historier, H2H-aggregater, sæsonredigering og pointprofil |
+| Eventledger og kalender | Revisioner, legacy-events, manglende metadata, cache-only events og nul navigation-writes |
+| Lagring og backup | AppData, atomiske writes, skemaer, SHA-256, path traversal, preview, staging og rollback |
+| Turnering | Liga, Swiss, gruppespil + knockout, double elimination, fuld Swiss-afslutning, custom byepoint, Buchholz, seedning, tie-breakers, bronzekamp, kontekstvalidering og konflikter for frosne parringer |
+| Dashboard | Managers-navigation, identiteter, sammenligning, sæsonbygger, kalender, historier, turneringsguide, deeplinks og nul netværk/writes |
 | Dokumentation og API | Links, Mermaid-hegn, kommandoer, AppData-stier, `holdet_lib.__all__` og evaluerbare type hints |
 
 ## Streamlit AppTest
 
-AppTest åbner hovedroutes og query-parametre uden en virkelig server. Tests beviser blandt andet, at forsiden ikke indeholder Rundecenter, at sidebaren ikke har Værktøjer, og at Data og lager indeholder Datastatus og Backup og gendannelse. Navigation og transfersimulation må hverken kalde netværk eller skrive persistent data.
+AppTest åbner hovedroutes og query-parametre uden en virkelig server. Tests beviser blandt andet, at sidebaren har Managers og Kalender, at legacy Hall of Fame-routen viderestiller, og at Data og lager indeholder Datastatus og Backup og gendannelse. Manager-, kalender- og almindelig navigation samt transfersimulation må hverken kalde netværk eller skrive persistent data.
 
 ## Fixtures og privatliv
 

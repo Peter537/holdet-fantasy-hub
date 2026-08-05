@@ -78,7 +78,7 @@ class ManagerGameStorageTests(unittest.TestCase):
             team = sample_team(1, slug=manager_game.game.slug)
             member = holdet.GroupTeam(1, team.team_name, team.reference.source_url)
             store.create("Liga", manager_game.game, (member,), group_id="liga")
-            with self.assertRaisesRegex(holdet.PayloadError, "while it has groups"):
+            with self.assertRaisesRegex(holdet.PayloadError, "mens det har grupper"):
                 store.delete_manager_game(manager_game.game)
             store.delete("liga")
             store.delete_manager_game(manager_game.game)
@@ -136,11 +136,11 @@ class ManagerGameStorageTests(unittest.TestCase):
             )
             self.assertEqual(configuration.groups, (group,))
             payload = json.loads(path.read_text(encoding="utf-8"))
-            self.assertEqual(payload["schema_version"], 7)
+            self.assertEqual(payload["schema_version"], 8)
             self.assertEqual(payload["games"][0]["archived_at"], fixed.isoformat())
-            with self.assertRaisesRegex(holdet.PayloadError, "already archived"):
+            with self.assertRaisesRegex(holdet.PayloadError, "allerede arkiveret"):
                 store.archive_manager_game(first.game)
-            with self.assertRaisesRegex(holdet.PayloadError, "not archived"):
+            with self.assertRaisesRegex(holdet.PayloadError, "ikke arkiveret"):
                 store.restore_manager_game(second.game)
 
             restored = store.restore_manager_game(first.game)
@@ -165,10 +165,10 @@ class ManagerGameStorageTests(unittest.TestCase):
                 created.game.original,
                 "https://www.holdet.dk/en/fantasy/game-2027",
             )
-            with self.assertRaisesRegex(holdet.PayloadError, "already exists"):
+            with self.assertRaisesRegex(holdet.PayloadError, "findes allerede"):
                 store.create_manager_game(created.game, "Duplicate")
             payload = json.loads(path.read_text(encoding="utf-8"))
-            self.assertEqual(payload["schema_version"], 7)
+            self.assertEqual(payload["schema_version"], 8)
             self.assertEqual(payload["games"][0]["name"], "game-2027")
             self.assertEqual(payload["groups"], [])
 

@@ -50,14 +50,14 @@ def _validate_accounts(accounts: tuple[AccountConfig, ...]) -> None:
     seen_ids: set[int] = set()
     for index, account in enumerate(accounts):
         if not _KEY_PATTERN.fullmatch(account.key):
-            raise PayloadError(f"account {index} has an invalid key")
+            raise PayloadError(f"Konto {index} har en ugyldig nøgle")
         if not account.label.strip():
-            raise PayloadError(f"account {index} has an empty label")
+            raise PayloadError(f"Konto {index} har et tomt navn")
         parsed_user_id = parse_account_profile_user_id(account.profile_url)
         if parsed_user_id != account.user_id:
-            raise PayloadError(f"account {index} profile and user ID do not match")
+            raise PayloadError(f"Profilen og bruger-ID'et for konto {index} stemmer ikke overens")
         if account.key in seen_keys or account.user_id in seen_ids:
-            raise PayloadError(f"duplicate account key or user ID: {account.key}")
+            raise PayloadError(f"Duplikeret kontonøgle eller bruger-ID: {account.key}")
         seen_keys.add(account.key)
         seen_ids.add(account.user_id)
 
@@ -91,12 +91,12 @@ class AccountStore:
     def prepare_create(self, label: str, profile_url: str) -> tuple[tuple[AccountConfig, ...], AccountConfig]:
         clean_label = label.strip()
         if not clean_label:
-            raise PayloadError("account name cannot be empty")
+            raise PayloadError("Kontonavnet må ikke være tomt")
         clean_url = profile_url.strip()
         user_id = parse_account_profile_user_id(clean_url)
         accounts = self.load()
         if any(account.user_id == user_id for account in accounts):
-            raise PayloadError(f"account user ID already exists: {user_id}")
+            raise PayloadError(f"Kontoens bruger-ID findes allerede: {user_id}")
         key = account_key_from_label(
             clean_label, user_id, {account.key for account in accounts}
         )
@@ -113,7 +113,7 @@ class AccountStore:
     def prepare_rename(self, key: str, label: str) -> tuple[tuple[AccountConfig, ...], AccountConfig]:
         clean_label = label.strip()
         if not clean_label:
-            raise PayloadError("account name cannot be empty")
+            raise PayloadError("Kontonavnet må ikke være tomt")
         accounts = list(self.load())
         for index, account in enumerate(accounts):
             if account.key == key:
@@ -122,7 +122,7 @@ class AccountStore:
                 updated = tuple(accounts)
                 _validate_accounts(updated)
                 return updated, renamed
-        raise PayloadError(f"unknown account: {key}")
+        raise PayloadError(f"Ukendt konto: {key}")
 
     def rename(self, key: str, label: str) -> AccountConfig:
         accounts, renamed = self.prepare_rename(key, label)
@@ -133,7 +133,7 @@ class AccountStore:
         accounts = self.load()
         removed = next((account for account in accounts if account.key == key), None)
         if removed is None:
-            raise PayloadError(f"unknown account: {key}")
+            raise PayloadError(f"Ukendt konto: {key}")
         self.save(tuple(account for account in accounts if account.key != key))
         return removed
 
@@ -171,7 +171,7 @@ def rename_account_and_groups(
             account_store.save(original_accounts)
         except Exception as rollback_exc:
             raise PayloadError(
-                "could not save groups and could not roll back accounts: "
+                "Grupperne kunne ikke gemmes, og kontoændringen kunne ikke rulles tilbage: "
                 f"{rollback_exc}"
             ) from exc
         raise

@@ -205,7 +205,8 @@ class DashboardTests(unittest.TestCase):
                 "Menuspil",
                 "Undergruppe",
                 "Arkiverede managerspil",
-                "Hall of Fame",
+                "Managers",
+                "Kalender",
                 "Data og lager",
             ],
         )
@@ -372,11 +373,361 @@ class DashboardTests(unittest.TestCase):
             with self.subTest(path=path.name):
                 self.assertIsNone(pattern.search(path.read_text(encoding="utf-8")))
 
+    def test_danish_user_facing_copy_has_no_ascii_transliterations_or_mojibake(self) -> None:
+        transliterations = re.compile(
+            r"\b(?:aabn|aaben|aabne|aendre|aendring|aendringer|afhaengig|"
+            r"begraens|foer|foerste|gennemfoer|goer|hoej|hoejere|koer|koerer|"
+            r"laes|laeser|laest|loeb|loeser|maal|maalmand|noedvendig|ophoev|"
+            r"praecis|saeson|saesoner|schemaer|stoerre|stoerste|taet|taettere|"
+            r"taetteste|tilfoej|tilfoejet|udfoer|vaelg|vaelges|vaekst|undgaa|"
+            r"undgaaelse)\b",
+            re.IGNORECASE,
+        )
+        mojibake = re.compile(r"\ufffd|Ã|Â|â€|ðŸ")
+        paths = [
+            PROJECT_ROOT / "README.md",
+            *sorted((PROJECT_ROOT / "docs").glob("*.md")),
+            *sorted((PROJECT_ROOT / "website").glob("*.py")),
+            *sorted((PROJECT_ROOT / "holdet_lib").glob("*.py")),
+        ]
+        paths = [path for path in paths if path.name != "transfers.py"]
+        for path in paths:
+            text = path.read_text(encoding="utf-8-sig")
+            with self.subTest(path=path.relative_to(PROJECT_ROOT)):
+                self.assertIsNone(transliterations.search(text))
+                self.assertIsNone(mojibake.search(text))
+
+    def test_danish_navigation_and_tournament_copy_uses_native_letters(self) -> None:
+        app_copy = (PROJECT_ROOT / "website" / "app.py").read_text(
+            encoding="utf-8"
+        )
+        hub_copy = (PROJECT_ROOT / "website" / "hub_pages.py").read_text(
+            encoding="utf-8"
+        )
+        for expected in (
+            '"Åbn officiel gruppe"',
+            '"Scoregrupper med rematch-undgåelse og fair bye."',
+            '"Fjern gruppen fra den aktive sæson før sletning."',
+        ):
+            with self.subTest(expected=expected):
+                self.assertIn(expected, app_copy)
+        for expected in (
+            '"Åbn spilinfo"',
+            "stier, skemaer, størrelser og kontrolsummer",
+        ):
+            with self.subTest(expected=expected):
+                self.assertIn(expected, hub_copy)
+
     def test_dismissing_account_dialog_clears_pending_action(self) -> None:
         state = {"pending_account_dialog": ("rename", "konto")}
         with patch.object(dashboard.st, "session_state", state):
             data_page._clear_pending_account_dialog()
         self.assertNotIn("pending_account_dialog", state)
+
+    def test_local_store_health_isolates_corrupt_additive_stores(self) -> None:
+        with website_environment() as (config, _output):
+            root = config.parent
+            paths = holdet.resolve_paths(
+                overrides=holdet.PathOverrides(data_root=root),
+                environ={},
+            )
+            group_store = holdet.GroupStore(
+                paths.groups_file,
+                paths.group_revision_dir,
+            )
+            configuration = group_store.load_configuration()
+            paths.seasons_file.write_text("{", encoding="utf-8")
+            paths.hall_of_fame_dir.mkdir(parents=True)
+            (paths.hall_of_fame_dir / "bad.json").write_text(
+                "{",
+                encoding="utf-8",
+            )
+
+            rows = data_page._local_store_health(
+                group_store,
+                configuration,
+                paths,
+            )
+
+        by_store = {row["Lager"]: row for row in rows}
+        self.assertEqual(by_store["S\u00e6soner"]["Status"], "Fejl")
+        self.assertEqual(
+            by_store["Managerhistorik"]["Status"],
+            "Advarsel",
+        )
+        self.assertEqual(
+            by_store["Turneringsrevisioner"]["Status"],
+            "OK",
+        )
+        self.assertEqual(
+            by_store["Turneringsparringer"]["Status"],
+            "OK",
+        )
+
+    def test_manager_calendar_story_and_season_routes_use_cached_data(self) -> None:
+        class OfflineClient:
+            def __init__(self, *_args, **_kwargs):
+                raise AssertionError("navigation must not contact Holdet")
+
+        with website_environment() as (config, output):
+            first = sample_team(801, name="F\u00f8rste hold")
+            second = sample_team(802, name="Andet hold")
+            store = holdet.GroupStore(config / "groups.json")
+            store.create_manager_game(first.reference.game, "Testspil")
+            members = tuple(
+                holdet.GroupTeam(
+                    team.reference.team_id,
+                    team.team_name,
+                    team.reference.source_url,
+                    team.reference.account_key,
+                    team.reference.account_label,
+                    team.reference.account_user_id,
+                    team.reference.profile_url,
+                )
+                for team in (first, second)
+            )
+            group = store.create_tournament(
+                "Testliga",
+                first.reference.game,
+                members,
+                start_round=1,
+                final_round=3,
+                rounds_per_tie=1,
+                group_id="cached-manager-routes",
+                template="league",
+                definition_options={
+                    "seed_rule": "manual",
+                    "seed_order": (801, 802),
+                },
+            )
+            store.update(
+                replace(
+                    group,
+                    official_url=(
+                        "https://www.holdet.dk/da/fantasy/test/group/1"
+                    ),
+                    official_link_type="group",
+                )
+            )
+            snapshot_store = holdet.SnapshotStore(output)
+            snapshot_store.save_team_json(first)
+            snapshot_store.save_team_json(second)
+            paths = holdet.resolve_paths(
+                overrides=holdet.PathOverrides(data_root=config.parent),
+                environ={},
+            )
+            holdet.SeasonStore(paths.seasons_file).save(
+                (
+                    holdet.SeasonDefinition(
+                        "season-one",
+                        "Tests\u00e6son",
+                        ("cached-manager-routes",),
+                    ),
+                )
+            )
+
+            with patch("holdet_lib.HoldetClient", OfflineClient):
+                app = AppTest.from_file(APP_PATH).run(timeout=15)
+                navigate(app, "managers", section="ranking")
+                self.assertFalse(app.exception)
+                self.assertEqual([item.value for item in app.title], ["Managers"])
+                self.assertTrue(app.dataframe)
+
+                navigate(app, "managers", section="compare")
+                self.assertFalse(app.exception)
+                self.assertTrue(
+                    any(
+                        item.label == "F\u00e6lles runder V-U-T"
+                        for item in app.metric
+                    )
+                )
+
+                navigate(
+                    app,
+                    "managers",
+                    section="seasons",
+                    season="season-one",
+                )
+                self.assertFalse(app.exception)
+                self.assertTrue(
+                    any(item.label == "S\u00e6son" for item in app.selectbox)
+                )
+
+                navigate(app, "managers", section="identities")
+                self.assertFalse(app.exception)
+                self.assertTrue(
+                    any(
+                        item.label == "Identiteter for samme person"
+                        for item in app.multiselect
+                    )
+                )
+                identity_picker = widget(
+                    app,
+                    "multiselect",
+                    "Identiteter for samme person",
+                )
+                identity_picker.set_value(
+                    [
+                        f"owner:{first.owner_user_id}",
+                        f"owner:{second.owner_user_id}",
+                    ]
+                )
+                widget(
+                    app,
+                    "text_input",
+                    "Visningsnavn",
+                ).set_value("Samlet manager")
+                button(app, "Saml identiteter").click()
+                app.run(timeout=15)
+                saved_settings = holdet.HubSettingsStore(
+                    paths.hub_settings_file
+                ).load()
+                merged = next(
+                    item
+                    for item in saved_settings.manager_profiles
+                    if item.display_name == "Samlet manager"
+                )
+                self.assertTrue(
+                    merged.manager_id.startswith("manager:")
+                )
+                self.assertEqual(
+                    set(merged.manual_identity_keys),
+                    {
+                        f"owner:{first.owner_user_id}",
+                        f"owner:{second.owner_user_id}",
+                    },
+                )
+                self.assertIn(
+                    f"account-user:{first.reference.account_user_id}",
+                    merged.identity_keys,
+                )
+
+                navigate(app, "calendar")
+                self.assertFalse(app.exception)
+                labels = {item.label for item in app.get("link_button")}
+                self.assertIn("\u00c5bn spilinfo", labels)
+                self.assertIn("Officiel gruppe", labels)
+
+                navigate(
+                    app,
+                    "group",
+                    group="cached-manager-routes",
+                )
+                self.assertFalse(app.exception)
+                self.assertTrue(
+                    any(
+                        item.value == "Rundens historie"
+                        for item in app.subheader
+                    )
+                )
+
+    def test_swiss_pairing_conflict_is_visible_without_rewriting_pairings(self) -> None:
+        teams = tuple(
+            sample_team(
+                team_id,
+                name=f"Swiss {team_id}",
+                current_round=1,
+                total=1000 - team_id,
+                change=100 - team_id,
+            )
+            for team_id in range(811, 815)
+        )
+        with website_environment() as (config, output):
+            store = holdet.GroupStore(config / "groups.json")
+            members = tuple(
+                holdet.GroupTeam(
+                    team.reference.team_id,
+                    team.team_name,
+                    team.reference.source_url,
+                    team.reference.account_key,
+                    team.reference.account_label,
+                    team.reference.account_user_id,
+                    team.reference.profile_url,
+                )
+                for team in teams
+            )
+            group = store.create_tournament(
+                "Swiss konflikt",
+                teams[0].reference.game,
+                members,
+                start_round=1,
+                final_round=2,
+                rounds_per_tie=1,
+                group_id="swiss-conflict-ui",
+                template="swiss",
+                definition_options={
+                    "seed_rule": "manual",
+                    "seed_order": tuple(
+                        team.reference.team_id for team in teams
+                    ),
+                    "swiss_rounds": 2,
+                },
+            )
+            snapshot_store = holdet.SnapshotStore(output)
+            for team in teams:
+                snapshot_store.save_team_json(team)
+            index = snapshot_store.scan()
+            state = holdet.build_tournament_state(group, index, 1)
+            expected = holdet.generate_swiss_pairings(
+                holdet.build_swiss_participants(
+                    group.tournament,
+                    state.group_matches,
+                ),
+                2,
+            )
+            ids = tuple(team.reference.team_id for team in teams)
+            alternatives = (
+                ((ids[0], ids[1]), (ids[2], ids[3])),
+                ((ids[0], ids[2]), (ids[1], ids[3])),
+                ((ids[0], ids[3]), (ids[1], ids[2])),
+            )
+            expected_pairs = {
+                frozenset((item.team_a_id, item.team_b_id))
+                for item in expected
+            }
+            wrong = next(
+                candidate
+                for candidate in alternatives
+                if {frozenset(pair) for pair in candidate}
+                != expected_pairs
+            )
+            paths = holdet.resolve_paths(
+                overrides=holdet.PathOverrides(data_root=config.parent),
+                environ={},
+            )
+            pairing_store = holdet.TournamentPairingStore(
+                paths.tournament_pairing_dir
+            )
+            pairing_store.save(
+                holdet.TournamentPairingRevision(
+                    group.group_id,
+                    group.active_revision,
+                    tuple(
+                        holdet.TournamentPairing(2, first, second)
+                        for first, second in wrong
+                    ),
+                )
+            )
+            before = tuple(
+                path.read_bytes()
+                for path in paths.tournament_pairing_dir.rglob("*.json")
+            )
+
+            app = AppTest.from_file(APP_PATH).run(timeout=15)
+            navigate(app, "group", group=group.group_id)
+
+            after = tuple(
+                path.read_bytes()
+                for path in paths.tournament_pairing_dir.rglob("*.json")
+            )
+            self.assertFalse(app.exception)
+            self.assertTrue(
+                any(
+                    "afviger fra de korrigerede resultater" in item.value
+                    for item in app.warning
+                )
+            )
+            self.assertEqual(after, before)
 
     def test_standing_row_selection_navigates_directly_to_team(self) -> None:
         team = sample_team(42, name="Direkte hold", total=500, change=25)
@@ -973,7 +1324,7 @@ class DashboardTests(unittest.TestCase):
                 navigate(app, "group", group=group.group_id)
                 self.assertFalse(app.exception)
                 self.assertTrue(any(item.value == group.name for item in app.title))
-                self.assertEqual({item.value for item in app.segmented_control}, {"Overall"})
+                self.assertEqual({item.value for item in app.segmented_control}, {"Samlet"})
                 expected_columns = [
                     "Rang", "Manager", "Hold", "Værdi",
                     "Vækst", "Afstand", "Hold-ID",

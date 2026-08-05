@@ -64,9 +64,9 @@ def extract_flight_text(html: str) -> str:
                 records.append(value[1])
 
     if not marker_count:
-        raise PayloadError("page did not contain a Next.js Flight payload")
+        raise PayloadError("Siden indeholdt ikke en Next.js Flight-payload")
     if not records:
-        raise PayloadError("Next.js Flight payload contained no string records")
+        raise PayloadError("Next.js Flight-payloaden indeholdt ingen tekstposter")
     return "".join(records)
 
 
