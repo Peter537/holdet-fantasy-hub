@@ -21,8 +21,15 @@ from .paths import AppPaths
 from .persistence import aware_local
 
 
-BACKUP_SCHEMA_VERSION = 1
+BACKUP_SCHEMA_VERSION = 2
 _MANIFEST_NAME = "backup-manifest.json"
+MAX_BACKUP_MEMBERS = 20_000
+MAX_BACKUP_MEMBER_BYTES = 512 * 1024 * 1024
+MAX_BACKUP_TOTAL_BYTES = 4 * 1024 * 1024 * 1024
+MAX_BACKUP_MANIFEST_BYTES = 4 * 1024 * 1024
+MAX_BACKUP_COMPRESSION_RATIO = 200
+MAX_JSON_VALIDATION_BYTES = 64 * 1024 * 1024
+_COPY_CHUNK = 1024 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,6 +37,7 @@ class BackupManifestEntry:
     path: str
     size: int
     sha256: str
+    mtime_ns: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,6 +76,7 @@ def _canonical_files(paths: AppPaths) -> tuple[tuple[str, Path], ...]:
         ("data/game-metadata", paths.game_metadata_dir),
         ("data/fixtures", paths.fixture_dir),
         ("data/hall-of-fame", paths.hall_of_fame_dir),
+        ("data/imports", paths.import_dir),
     )
     result: list[tuple[str, Path]] = []
     for archive_root, root in roots:
@@ -87,45 +96,78 @@ def _manifest_dict(manifest: BackupManifest) -> dict[str, object]:
         "created_at": manifest.created_at.isoformat(),
         "total_bytes": manifest.total_bytes,
         "files": [
-            {"path": item.path, "size": item.size, "sha256": item.sha256}
+            {
+                "path": item.path,
+                "size": item.size,
+                "sha256": item.sha256,
+                **({"mtime_ns": item.mtime_ns} if item.mtime_ns is not None else {}),
+            }
             for item in manifest.files
         ],
     }
 
 
-def create_backup_bytes(
-    paths: AppPaths, *, now: datetime | None = None
-) -> tuple[bytes, BackupManifest]:
-    """Build a deterministic canonical backup in memory."""
-
+def _write_backup_zip(
+    paths: AppPaths, target: Path | BinaryIO, *, now: datetime
+) -> BackupManifest:
+    sources = _canonical_files(paths)
+    if len(sources) + 1 > MAX_BACKUP_MEMBERS:
+        raise PayloadError("Backupkilden indeholder for mange filer")
+    sizes = tuple(source.stat().st_size for _, source in sources)
+    if any(size > MAX_BACKUP_MEMBER_BYTES for size in sizes):
+        raise PayloadError("En fil i backupkilden er større end den tilladte grænse")
+    if sum(sizes) > MAX_BACKUP_TOTAL_BYTES:
+        raise PayloadError("Backupkildens samlede størrelse er for stor")
     entries: list[BackupManifestEntry] = []
-    payloads: list[tuple[str, bytes]] = []
-    for archive_path, source in _canonical_files(paths):
-        data = source.read_bytes()
-        payloads.append((archive_path, data))
-        entries.append(
-            BackupManifestEntry(
-                archive_path,
-                len(data),
-                hashlib.sha256(data).hexdigest(),
-            )
-        )
-    manifest = BackupManifest(
-        BACKUP_SCHEMA_VERSION,
-        aware_local(now),
-        tuple(entries),
-        sum(item.size for item in entries),
-    )
-    output = BytesIO()
     with zipfile.ZipFile(
-        output, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6
+        target, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6
     ) as archive:
-        for archive_path, data in payloads:
-            archive.writestr(archive_path, data)
+        for archive_path, source in sources:
+            before = source.stat()
+            hasher = hashlib.sha256()
+            size = 0
+            with source.open("rb") as input_file, archive.open(archive_path, "w") as output:
+                while chunk := input_file.read(_COPY_CHUNK):
+                    output.write(chunk)
+                    hasher.update(chunk)
+                    size += len(chunk)
+            after = source.stat()
+            if (before.st_size, before.st_mtime_ns) != (
+                after.st_size,
+                after.st_mtime_ns,
+            ):
+                raise OSError(f"Filen ændrede sig under backup: {source}")
+            if size != before.st_size:
+                raise OSError(f"Filen kunne ikke læses stabilt under backup: {source}")
+            entries.append(
+                BackupManifestEntry(
+                    archive_path,
+                    size,
+                    hasher.hexdigest(),
+                    before.st_mtime_ns,
+                )
+            )
+        manifest = BackupManifest(
+            BACKUP_SCHEMA_VERSION,
+            now,
+            tuple(entries),
+            sum(item.size for item in entries),
+        )
         archive.writestr(
             _MANIFEST_NAME,
             json.dumps(_manifest_dict(manifest), ensure_ascii=False, indent=2) + "\n",
         )
+    return manifest
+
+
+def create_backup_bytes(
+    paths: AppPaths, *, now: datetime | None = None
+) -> tuple[bytes, BackupManifest]:
+    """Compatibility facade; the archive itself is assembled on disk."""
+
+    generated = aware_local(now)
+    output = BytesIO()
+    manifest = _write_backup_zip(paths, output, now=generated)
     return output.getvalue(), manifest
 
 
@@ -138,16 +180,38 @@ def create_backup(
     """Create one ZIP outside the canonical config/data trees."""
 
     generated = aware_local(now)
+    explicit_destination = destination is not None
     if destination is None:
-        destination = paths.backup_dir / (
+        base = paths.backup_dir / (
             f"holdet-hub-{generated.strftime('%Y%m%d-%H%M%S')}.zip"
         )
+        destination = base
+        number = 2
+        while Path(destination).exists():
+            destination = base.with_name(f"{base.stem}-{number}{base.suffix}")
+            number += 1
     target = Path(destination)
+    resolved_target = target.resolve()
+    for canonical_root in (paths.config_dir.resolve(), paths.data_dir.resolve()):
+        if resolved_target.is_relative_to(canonical_root):
+            raise ValueError(
+                "Backupmålet må ikke ligge i det kanoniske data- eller konfigurationstræ"
+            )
+    if explicit_destination and target.exists():
+        raise FileExistsError(f"Backupfilen findes allerede: {target}")
     target.parent.mkdir(parents=True, exist_ok=True)
-    data, _ = create_backup_bytes(paths, now=generated)
+    estimated = sum(source.stat().st_size for _, source in _canonical_files(paths))
+    if shutil.disk_usage(target.parent).free < estimated + 16 * 1024 * 1024:
+        raise OSError("Der er ikke nok ledig diskplads til backupfilen")
     temporary = target.parent / f".{target.name}.{uuid4().hex}.tmp"
     try:
-        temporary.write_bytes(data)
+        _write_backup_zip(paths, temporary, now=generated)
+        validation = validate_backup(temporary)
+        if not validation.is_valid:
+            raise PayloadError(
+                "Den nye backup bestod ikke valideringen: "
+                + "; ".join(validation.errors)
+            )
         os.replace(temporary, target)
     finally:
         temporary.unlink(missing_ok=True)
@@ -162,7 +226,10 @@ def _source_bytes(source: bytes | bytearray | Path | str | BinaryIO) -> bytes:
         if not isinstance(value, bytes):
             raise PayloadError("Backupkilden skal levere bytes")
         return value
-    return Path(source).read_bytes()
+    path = Path(source)
+    if path.stat().st_size > MAX_BACKUP_TOTAL_BYTES:
+        raise PayloadError("Backupkilden er større end den tilladte grænse")
+    return path.read_bytes()
 
 
 def _safe_member(name: str) -> str | None:
@@ -178,7 +245,7 @@ def _safe_member(name: str) -> str | None:
     return path.as_posix()
 
 
-def _known_schema(path: str, data: bytes) -> str | None:
+def known_schema_error(path: str, data: bytes) -> str | None:
     if not path.endswith(".json"):
         return None
     try:
@@ -230,8 +297,9 @@ def _parse_manifest(data: bytes) -> BackupManifest:
         payload = json.loads(data.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise PayloadError("Backupmanifestet indeholder ugyldig JSON") from exc
-    if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+    if not isinstance(payload, dict) or payload.get("schema_version") not in {1, 2}:
         raise PayloadError("Ukendt skema for backupmanifest")
+    schema_version = int(payload["schema_version"])
     files = payload.get("files")
     if not isinstance(files, list):
         raise PayloadError("Backupmanifestet mangler fillisten")
@@ -252,7 +320,12 @@ def _parse_manifest(data: bytes) -> BackupManifest:
             or len(digest) != 64
         ):
             raise PayloadError("Backupmanifestet har en ugyldig filpost")
-        parsed.append(BackupManifestEntry(path, size, digest))
+        mtime = raw.get("mtime_ns")
+        if mtime is not None and (
+            not isinstance(mtime, int) or isinstance(mtime, bool) or mtime < 0
+        ):
+            raise PayloadError("Backupmanifestet har en ugyldig ændringstid")
+        parsed.append(BackupManifestEntry(path, size, digest, mtime))
     try:
         created = datetime.fromisoformat(str(payload["created_at"]))
     except (KeyError, ValueError) as exc:
@@ -262,23 +335,36 @@ def _parse_manifest(data: bytes) -> BackupManifest:
     total = payload.get("total_bytes")
     if not isinstance(total, int) or isinstance(total, bool) or total < 0:
         raise PayloadError("Backupmanifestet har en ugyldig totalstørrelse")
-    return BackupManifest(1, created, tuple(parsed), total)
+    return BackupManifest(schema_version, created, tuple(parsed), total)
 
 
 def validate_backup(
     source: bytes | bytearray | Path | str | BinaryIO,
+    *,
+    _validate_schemas: bool = True,
 ) -> BackupValidation:
     """Validate all members, schemas, sizes and SHA-256 checksums."""
 
     errors: list[str] = []
     warnings: list[str] = []
     try:
-        raw = _source_bytes(source)
-        archive = zipfile.ZipFile(BytesIO(raw))
+        if isinstance(source, (bytes, bytearray)):
+            archive_source: object = BytesIO(bytes(source))
+        elif hasattr(source, "read"):
+            if hasattr(source, "seek"):
+                source.seek(0)
+            archive_source = source
+        else:
+            archive_source = Path(source)
+        archive = zipfile.ZipFile(archive_source)  # type: ignore[arg-type]
     except (OSError, zipfile.BadZipFile, PayloadError) as exc:
         return BackupValidation(None, (f"ZIP-filen kunne ikke åbnes: {exc}",))
     with archive:
         infos = archive.infolist()
+        if len(infos) > MAX_BACKUP_MEMBERS:
+            errors.append("ZIP-filen indeholder for mange medlemmer")
+        if sum(info.file_size for info in infos) > MAX_BACKUP_TOTAL_BYTES:
+            errors.append("ZIP-filens udpakkede størrelse er for stor")
         names: list[str] = []
         for info in infos:
             safe = _safe_member(info.filename)
@@ -290,13 +376,21 @@ def validate_backup(
                 errors.append(f"Links er ikke tilladt i backup: {info.filename}")
             if info.is_dir():
                 errors.append(f"Mappeposter er ikke tilladt: {info.filename}")
-            if info.file_size > 512 * 1024 * 1024:
+            if info.file_size > MAX_BACKUP_MEMBER_BYTES:
                 errors.append(f"Filen er for stor: {info.filename}")
+            if (
+                info.compress_size
+                and info.file_size / info.compress_size > MAX_BACKUP_COMPRESSION_RATIO
+            ):
+                errors.append(f"Mistænkelig kompressionsratio: {info.filename}")
             names.append(info.filename)
         if len(names) != len(set(names)):
             errors.append("ZIP-filen indeholder dubletter")
         if _MANIFEST_NAME not in names:
             return BackupValidation(None, tuple((*errors, "Backupmanifestet mangler")))
+        manifest_info = archive.getinfo(_MANIFEST_NAME)
+        if manifest_info.file_size > MAX_BACKUP_MANIFEST_BYTES:
+            return BackupValidation(None, tuple((*errors, "Backupmanifestet er for stort")))
         try:
             manifest = _parse_manifest(archive.read(_MANIFEST_NAME))
         except (KeyError, PayloadError) as exc:
@@ -308,16 +402,30 @@ def validate_backup(
         checked_total = 0
         for path, entry in expected.items():
             try:
-                data = archive.read(path)
+                hasher = hashlib.sha256()
+                size = 0
+                schema_data = bytearray()
+                with archive.open(path) as member:
+                    while chunk := member.read(_COPY_CHUNK):
+                        size += len(chunk)
+                        hasher.update(chunk)
+                        if path.endswith(".json") and len(schema_data) <= MAX_JSON_VALIDATION_BYTES:
+                            schema_data.extend(chunk)
             except KeyError:
                 continue
-            checked_total += len(data)
-            if len(data) != entry.size:
+            except (OSError, RuntimeError, zipfile.BadZipFile) as exc:
+                errors.append(f"Filen kunne ikke udpakkes: {path}: {exc}")
+                continue
+            checked_total += size
+            if size != entry.size:
                 errors.append(f"Filstørrelsen matcher ikke: {path}")
-            if hashlib.sha256(data).hexdigest() != entry.sha256:
+            if hasher.hexdigest() != entry.sha256:
                 errors.append(f"Checksum matcher ikke: {path}")
-            if schema_error := _known_schema(path, data):
-                errors.append(schema_error)
+            if _validate_schemas and path.endswith(".json"):
+                if size > MAX_JSON_VALIDATION_BYTES:
+                    errors.append(f"JSON-filen er for stor til skemavalidering: {path}")
+                elif schema_error := known_schema_error(path, bytes(schema_data)):
+                    errors.append(schema_error)
         if checked_total != manifest.total_bytes:
             errors.append("Totalstørrelsen i manifestet matcher ikke")
     return BackupValidation(manifest, tuple(dict.fromkeys(errors)), tuple(warnings))
@@ -343,20 +451,60 @@ def restore_backup(
 ) -> RestoreResult:
     """Replace config/data only after full validation, with automatic rollback."""
 
-    raw = _source_bytes(source)
-    validation = validate_backup(raw)
+    source_path: Path | None = None
+    source_signature: tuple[int, int] | None = None
+    if isinstance(source, (Path, str)):
+        source_path = Path(source)
+        source_stat = source_path.stat()
+        source_signature = (source_stat.st_size, source_stat.st_mtime_ns)
+        if source_stat.st_size > MAX_BACKUP_TOTAL_BYTES:
+            raise PayloadError("Backupkilden er større end den tilladte grænse")
+        archive_source: Path | BytesIO = source_path
+    else:
+        archive_source = BytesIO(_source_bytes(source))
+    validation = validate_backup(archive_source)
     if not validation.is_valid or validation.manifest is None:
         raise PayloadError("; ".join(validation.errors))
-    rollback = create_backup(
-        paths,
-        paths.backup_dir
-        / f"rollback-{aware_local(now).strftime('%Y%m%d-%H%M%S')}.zip",
-        now=now,
-    )
+    if source_path is not None:
+        checked = source_path.stat()
+        if (checked.st_size, checked.st_mtime_ns) != source_signature:
+            raise PayloadError("Backupkilden ændrede sig under valideringen")
     config_parent = paths.config_dir.parent
     data_parent = paths.data_dir.parent
     config_parent.mkdir(parents=True, exist_ok=True)
     data_parent.mkdir(parents=True, exist_ok=True)
+    required = validation.manifest.total_bytes + 32 * 1024 * 1024
+    for parent in {config_parent.resolve(), data_parent.resolve()}:
+        if shutil.disk_usage(parent).free < required:
+            raise PayloadError("Der er ikke nok ledig diskplads til sikker gendannelse")
+    rollback_base = paths.backup_dir / (
+        f"rollback-{aware_local(now).strftime('%Y%m%d-%H%M%S')}.zip"
+    )
+    rollback_target = rollback_base
+    number = 2
+    while rollback_target.exists():
+        rollback_target = rollback_base.with_name(
+            f"{rollback_base.stem}-{number}{rollback_base.suffix}"
+        )
+        number += 1
+    rollback_target.parent.mkdir(parents=True, exist_ok=True)
+    rollback_temporary = rollback_target.parent / (
+        f".{rollback_target.name}.{uuid4().hex}.tmp"
+    )
+    try:
+        _write_backup_zip(paths, rollback_temporary, now=aware_local(now))
+        rollback_validation = validate_backup(
+            rollback_temporary, _validate_schemas=False
+        )
+        if not rollback_validation.is_valid:
+            raise PayloadError(
+                "Rollback-backuppen bestod ikke checksumvalideringen: "
+                + "; ".join(rollback_validation.errors)
+            )
+        os.replace(rollback_temporary, rollback_target)
+    finally:
+        rollback_temporary.unlink(missing_ok=True)
+    rollback = rollback_target.resolve()
     config_temp = Path(tempfile.mkdtemp(prefix=".holdet-restore-", dir=config_parent))
     data_temp = Path(tempfile.mkdtemp(prefix=".holdet-restore-", dir=data_parent))
     staged_config = config_temp / "config"
@@ -365,9 +513,13 @@ def restore_backup(
     old_data = data_parent / f".{paths.data_dir.name}.old-{uuid4().hex}"
     moved_config = moved_data = installed_config = installed_data = False
     try:
-        with zipfile.ZipFile(BytesIO(raw)) as archive:
+        with zipfile.ZipFile(archive_source) as archive:
             _extract_tree(archive, "config", staged_config)
             _extract_tree(archive, "data", staged_data)
+        if source_path is not None:
+            checked = source_path.stat()
+            if (checked.st_size, checked.st_mtime_ns) != source_signature:
+                raise PayloadError("Backupkilden ændrede sig under staging")
         if paths.config_dir.exists():
             os.replace(paths.config_dir, old_config)
             moved_config = True

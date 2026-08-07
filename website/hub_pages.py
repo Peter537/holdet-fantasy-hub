@@ -314,7 +314,7 @@ def transfer_lab_panel(
         f"{team_snapshot.generated_at.isoformat()}"
     )
     st.badge(
-        profile.label if profile.known else "Regler kan ikke valideres",
+        profile.label if profile.known else f"Uverificerede standardregler · {profile.label}",
         color="green" if profile.known else "orange",
         icon=":material/rule:",
     )

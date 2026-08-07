@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 from typing import Sequence
 
+from .data_packages import DataPackage, DataTable, serialize_data_package
 from .errors import PayloadError
 from .filenames import collision_suffix, round_output_stem
 from .models import RosterEntry, RoundSummary, ScrapedTeam
@@ -17,7 +18,7 @@ from .persistence import aware_local, publish_immutable
 
 
 TEAM_EXPORT_SCHEMA_VERSION = 1
-TEAM_EXPORT_FORMATS = ("txt", "json", "md")
+TEAM_EXPORT_FORMATS = ("txt", "json", "md", "csv", "xlsx", "parquet")
 TEAM_EXPORT_SCOPES = ("full", "round")
 
 STATUS_LABELS_DA = {
@@ -118,6 +119,26 @@ def _round_dict(summary: RoundSummary) -> dict[str, int | None]:
     }
 
 
+ROUND_TABLE_COLUMNS = (
+    "round",
+    "total",
+    "change",
+    "bank",
+    "player_value",
+    "bank_change",
+    "interest",
+    "player_change",
+    "transfer",
+    "captain_bonus",
+    "special_bonus",
+    "substitutions_used",
+    "round_rank",
+    "overall_rank",
+    "round_rank_change",
+    "overall_rank_change",
+)
+
+
 def _roster_dict(entry: RosterEntry) -> dict[str, object]:
     return {
         "source_index": entry.source_index,
@@ -173,6 +194,127 @@ def team_export_to_dict(document: TeamExportDocument) -> dict[str, object]:
         ),
         "history": [_round_dict(summary) for summary in history],
     }
+
+
+def team_export_data_package(document: TeamExportDocument) -> DataPackage:
+    """Project a team document into stable tables with raw numeric values."""
+
+    team = document.team
+    overview = team.overview
+    history = (
+        team.history
+        if document.scope == "full"
+        else (() if document.summary is None else (document.summary,))
+    )
+    roster_rows = tuple(
+        {
+            **_roster_dict(entry),
+            "statuses": ";".join(entry.statuses),
+        }
+        for entry in (document.roster or ())
+    )
+    return DataPackage(
+        document_type="team_export",
+        scope={
+            "locale": team.reference.game.locale,
+            "game": team.reference.game.slug,
+            "team_id": team.reference.team_id,
+            "round": document.round_number,
+            "scope": document.scope,
+        },
+        generated_at=document.generated_at,
+        provenance={
+            "source_url": team.reference.source_url,
+            "source_generated_at": (
+                document.source_generated_at.isoformat()
+                if document.source_generated_at is not None
+                else None
+            ),
+            "roster_generated_at": (
+                document.roster_generated_at.isoformat()
+                if document.roster_generated_at is not None
+                else None
+            ),
+            "variant": team.variant,
+            "unit": overview.unit,
+        },
+        tables=(
+            DataTable(
+                "team",
+                (
+                    "team_id",
+                    "team_name",
+                    "owner_name",
+                    "account_key",
+                    "account_label",
+                ),
+                (
+                    {
+                        "team_id": team.reference.team_id,
+                        "team_name": team.team_name,
+                        "owner_name": team.owner_name,
+                        "account_key": team.reference.account_key,
+                        "account_label": team.reference.account_label,
+                    },
+                ),
+            ),
+            DataTable(
+                "overview",
+                (
+                    "current_round",
+                    "unit",
+                    "player_value",
+                    "bank",
+                    "total",
+                    "current_change",
+                    "rank",
+                    "rank_change",
+                    "top_percent",
+                    "substitutions_remaining",
+                    "substitutions_limit",
+                    "substitutions_used",
+                ),
+                (
+                    {
+                        "current_round": overview.current_round,
+                        "unit": overview.unit,
+                        "player_value": overview.player_value,
+                        "bank": overview.bank,
+                        "total": overview.total,
+                        "current_change": overview.current_change,
+                        "rank": overview.rank,
+                        "rank_change": overview.rank_change,
+                        "top_percent": overview.top_percent,
+                        "substitutions_remaining": overview.substitutions_remaining,
+                        "substitutions_limit": overview.substitutions_limit,
+                        "substitutions_used": overview.substitutions_used,
+                    },
+                ),
+            ),
+            DataTable(
+                "roster",
+                (
+                    "source_index",
+                    "player_id",
+                    "name",
+                    "team",
+                    "position",
+                    "value",
+                    "round_change",
+                    "since_purchase_change",
+                    "purchase_round",
+                    "role",
+                    "statuses",
+                ),
+                roster_rows,
+            ),
+            DataTable(
+                "history",
+                ROUND_TABLE_COLUMNS,
+                tuple(_round_dict(summary) for summary in history),
+            ),
+        ),
+    )
 
 
 def _timestamp(value: datetime | None) -> str:
@@ -368,6 +510,8 @@ def team_export_to_markdown(document: TeamExportDocument) -> str:
 
 def serialize_team_export(document: TeamExportDocument, format: str) -> bytes:
     selected = format.casefold()
+    if selected in {"csv", "xlsx", "parquet"}:
+        return serialize_data_package(team_export_data_package(document), selected).content
     if selected == "txt":
         content = team_export_to_txt(document)
     elif selected == "md":
@@ -386,6 +530,9 @@ class TeamExportStore:
         "txt": "text/plain; charset=utf-8",
         "json": "application/json",
         "md": "text/markdown; charset=utf-8",
+        "csv": "application/zip",
+        "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "parquet": "application/zip",
     }
 
     def __init__(self, export_dir: Path | str) -> None:
@@ -420,7 +567,15 @@ class TeamExportStore:
         collision_number = 0
         while True:
             suffix = collision_suffix(collision_number)
-            paths = {value: target_dir / f"{stem}{suffix}.{value}" for value in selected}
+            paths = {
+                value: target_dir
+                / (
+                    f"{stem}{suffix}.{value}"
+                    if value not in {"csv", "parquet"}
+                    else f"{stem}{suffix}.{value}.zip"
+                )
+                for value in selected
+            }
             if any(path.exists() for path in paths.values()):
                 collision_number += 1
                 continue

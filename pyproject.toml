@@ -8,14 +8,15 @@ version = "0.1.0"
 description = "Unofficial Holdet.dk fantasy data library, CLI, and local dashboard"
 readme = "README.md"
 requires-python = ">=3.14"
-dependencies = ["platformdirs>=4.11,<5"]
+dependencies = ["platformdirs>=4.11,<5", "xlsxwriter>=3.2,<4"]
 classifiers = [
     "Operating System :: Microsoft :: Windows",
     "Programming Language :: Python :: 3.14",
 ]
 
 [project.optional-dependencies]
-website = ["streamlit>=1.60,<2"]
+website = ["streamlit>=1.60,<2", "starlette>=0.50,<1"]
+parquet = ["pyarrow>=23,<24"]
 test = ["pytest>=9,<10"]
 
 [project.scripts]

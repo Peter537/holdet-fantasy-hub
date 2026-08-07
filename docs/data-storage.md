@@ -20,10 +20,14 @@ Mutable, personlige og voksende data ligger i Windows AppData og ikke i reposito
 │   ├── fixtures\
 │   ├── game-metadata\
 │   ├── hall-of-fame\
-│   └── tournament-pairings\
+│   ├── imports\
+│   ├── tournament-pairings\
+│   └── integrity-index.json
 └── exports\
     ├── players\
     ├── teams\
+    ├── reports\
+    ├── archives\
     └── backups\
 ```
 
@@ -44,8 +48,12 @@ Der findes ikke implicitte `cache`- eller `logs`-mapper i `AppPaths`.
 | `data/game-metadata` | Schedule, deadlines, format og hentetid pr. spil |
 | `data/fixtures` | Eksplicit cachede, offentligt verificerede fixtures og kildeprovenance |
 | `data/hall-of-fame` | Append-only manager-events og legacy Hall of Fame-events |
+| `data/imports` | Read-only legacy-JSON og ufortolkede TXT/Markdown/CSV-filer |
+| `data/integrity-index.json` | Afledt schema-1-indeks med metadata og SHA-256; aldrig sandhedskilden |
 | `data/tournament-pairings` | Publicerede fixtures/parringer pr. turneringsrevision |
-| `exports/players` / `exports/teams` | Afledte TXT-, JSON- og Markdown-dokumenter |
+| `exports/players` / `exports/teams` | Afledte TXT-, JSON-, Markdown-, CSV-, XLSX- og eventuelle Parquet-dokumenter |
+| `exports/reports` | Selvstændige managerspil- og sæsonrapporter i HTML |
+| `exports/archives` | Checksumvaliderede mellemversionsarkiver med oprindelige relative stier |
 | `exports/backups` | Manuelt oprettede Hub-backups og rollback-ZIP'er |
 
 Manglende nye filer eller mapper behandles som tomme stores. Ældre installationer omskrives ikke ved opstart. En korrupt arkiveret turneringsrevision springes over med en afgrænset advarsel i Hubben, så den aktive gruppe stadig kan vises; den strikte store-læsning for backup og validering afviser fortsat filen.
@@ -92,18 +100,20 @@ Produktversion `0.1.0` er uafhængig af lokale dataformater. Aktuelle formater e
 - `seasons.json` schema 1;
 - turneringsparringer schema 1;
 - `GameMetadata` schema 2 og fixturecache schema 1;
-- refresh-manifester, turneringsrevisioner og `backup-manifest.json` schema 1.
+- refresh-manifester og turneringsrevisioner, `integrity-index.json` schema 1 samt `backup-manifest.json` schema 2. Restore læser fortsat backup schema 1.
 
 Ældre kompatible snapshots indlæses uden omskrivning. Manglende rundestatus bliver `unknown` og giver foreløbige beregninger, indtil en manuel genhentning bekræfter `complete`. Defekte eller inkompatible snapshots ignoreres med en synlig advarsel.
 
 ## Backup og gendannelse
 
-**Data og lager → Backup og gendannelse** opretter én ZIP med konfiguration, alarmindbakke, sæsoner, snapshots, manifester, turneringsrevisioner, publicerede parringer, spilmetadata, fixturecache og manager-eventledger. Afledte spiller-/teameksporter og gamle backups medtages ikke.
+**Data og lager → Import og backup** opretter én ZIP med konfiguration, alarmindbakke, sæsoner, snapshots, manifester, turneringsrevisioner, publicerede parringer, spilmetadata, fixturecache, importerede historiske data og manager-eventledger. Afledte eksporter, integritetsindekset og gamle backups medtages ikke.
 
 `backup-manifest.json` indeholder schema-version, tidspunkt, filstørrelser og SHA-256 for hver fil. Før restore vises en preview, og hele arkivet valideres. Restore afvises ved:
 
 - absolutte stier, backslashes, `..` eller ukendte rødder;
 - links, mapper, dubletter eller ikke-manifesterede filer;
+- grænser for medlemstal, enkeltfil, total udpakket størrelse, manifest og kompressionsratio;
+- utilstrækkelig ledig diskplads eller en kildefil, der ændrer sig under backup;
 - størrelse- eller checksumfejl;
 - ugyldig JSON eller ukendt schema-version.
 
@@ -111,11 +121,11 @@ Efter brugerens bekræftelse oprettes først en rollback-ZIP. Nye `config`- og `
 
 Der er ingen automatisk eller cloud-baseret backup. ZIP-backup er altid en manuel handling.
 
-## Datastatus
+## Integritet, lager og retention
 
-**Data og lager → Datastatus** viser handlingsorienterede managerspilskort som **Klar**, **Foreløbig**, **Mangler data** eller **Fejl**. Kortet viser seneste relevante runde, hold- og spillerdækning, rundestatus, cachealder, seneste refresh og manglende hold med navn. Tidligere runder ligger i detaljer, og arkiverede spil kan medtages.
+**Data og lager → Overblik** viser datastatus og eksakt lagerforbrug pr. managerspil og kategori. **Integritet og oprydning** tilbyder hurtig metadata-/schemakontrol, fuld streamet SHA-256-kontrol og et preview af en indeksreparation. Reparation erstatter kun `integrity-index.json`; korrupte data ændres eller skjules aldrig.
 
-Links fører til Rundecenter eller den konkrete kontekst for manuel opdatering. Datastatus har ikke egne opdateringsknapper og starter ingen hentning. En separat, læsende store-kontrol viser helbred for arkiverede turneringsrevisioner, sæsoner, managerledger og publicerede parringer. Hver store kontrolleres isoleret, så en korrupt fil ikke skjuler status for de andre.
+Retention bevarer den nyeste gyldige spillerfil pr. `(locale, spil, runde)` og den nyeste gyldige holdfil pr. `(locale, spil, hold, runde)`. Korrupte og uklassificerbare filer vælges aldrig automatisk. Arkivering opretter og validerer først en ZIP; oprindelige filer fjernes derefter. Sletning er begrænset til valgte afledte eksporter, gamle backups og eksisterende arkiver. Alle handlinger er manuelle, viser preview og kræver bekræftelse.
 
 ## Overrides
 

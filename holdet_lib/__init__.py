@@ -139,6 +139,7 @@ from .player_exports import (
     player_column_labels,
     player_display_rows,
     player_export_to_dict,
+    player_export_data_package,
     player_export_to_markdown,
     player_export_to_txt,
     player_query_to_dict,
@@ -155,6 +156,7 @@ from .team_exports import (
     TeamExportStore,
     build_team_export,
     serialize_team_export,
+    team_export_data_package,
     team_export_to_dict,
     team_export_to_markdown,
     team_export_to_txt,
@@ -213,6 +215,81 @@ from .backup import (
     create_backup_bytes,
     restore_backup,
     validate_backup,
+)
+from .data_packages import (
+    DATA_PACKAGE_SCHEMA_VERSION,
+    TABULAR_EXPORT_FORMATS,
+    DataPackage,
+    DataTable,
+    SerializedPackage,
+    neutralize_spreadsheet_text,
+    package_to_csv,
+    package_to_dict,
+    package_to_parquet,
+    package_to_xlsx,
+    serialize_data_package,
+    table_to_csv,
+)
+from .sport_adapters import (
+    SportAdapter,
+    SportCapabilities,
+    get_sport_adapter,
+    registered_sport_adapters,
+)
+from .privacy import (
+    ANONYMIZATION_PROFILES,
+    anonymize_data_package,
+    build_support_bundle,
+)
+from .reports import (
+    REPORT_SCHEMA_VERSION,
+    ReportArtifact,
+    ReportStore,
+    build_manager_game_report_package,
+    build_season_report_package,
+    render_html_report,
+)
+from .imports import (
+    ImportOperation,
+    ImportPreview,
+    ImportResult,
+    apply_import,
+    preview_import,
+)
+from .integrity import (
+    INTEGRITY_INDEX_SCHEMA_VERSION,
+    IntegrityCheck,
+    IntegrityEntry,
+    IntegrityIssue,
+    IntegrityRepairPreview,
+    full_integrity_check,
+    preview_integrity_repair,
+    quick_integrity_check,
+    repair_integrity_index,
+)
+from .maintenance import (
+    ArchiveResult,
+    CleanupCandidate,
+    RetentionCandidate,
+    RetentionPlan,
+    StorageInventory,
+    StorageUsage,
+    archive_retention_candidates,
+    build_storage_inventory,
+    delete_derived_files,
+    list_cleanup_candidates,
+    plan_snapshot_retention,
+)
+from .local_api import (
+    LOCAL_API_DATASETS,
+    LOCAL_API_VERSION,
+    ApiQueryError,
+    DatasetDefinition,
+    LocalDataApi,
+    RegisteredArtifact,
+    dataset_catalog,
+    register_artifact,
+    resolve_registered_artifact,
 )
 from .game_metadata import (
     GAME_METADATA_SCHEMA_VERSION,
@@ -407,7 +484,7 @@ __all__ = [
     "restore_backup", "simulate_transfers", "transfer_rule_profile",
     "validate_backup", "watchlist_entry",
 
-    "serialize_team_export", "team_from_dict", "team_to_json",
+    "serialize_team_export", "team_export_data_package", "team_from_dict", "team_to_json",
 ]
 __all__ += [
     "CalendarEvent", "ManagerCareer", "ManagerEvent", "ManagerHeadToHead",
@@ -449,4 +526,27 @@ __all__ += [
     "parse_fixture_records", "player_query_from_dict", "rule_profile_for_game",
     "select_alert_baseline",
     "simulate_transfer_scenario",
+]
+__all__ += [
+    "ANONYMIZATION_PROFILES", "DATA_PACKAGE_SCHEMA_VERSION",
+    "INTEGRITY_INDEX_SCHEMA_VERSION", "LOCAL_API_DATASETS",
+    "LOCAL_API_VERSION", "REPORT_SCHEMA_VERSION", "TABULAR_EXPORT_FORMATS",
+    "ApiQueryError", "ArchiveResult", "CleanupCandidate", "DataPackage",
+    "DataTable", "DatasetDefinition", "ImportOperation", "ImportPreview",
+    "ImportResult", "IntegrityCheck", "IntegrityEntry", "IntegrityIssue",
+    "IntegrityRepairPreview", "LocalDataApi", "RegisteredArtifact",
+    "ReportArtifact", "ReportStore", "RetentionCandidate", "RetentionPlan",
+    "SerializedPackage", "SportAdapter", "SportCapabilities",
+    "StorageInventory", "StorageUsage", "anonymize_data_package",
+    "apply_import", "archive_retention_candidates",
+    "build_manager_game_report_package", "build_season_report_package",
+    "build_storage_inventory", "build_support_bundle", "dataset_catalog",
+    "delete_derived_files", "full_integrity_check", "get_sport_adapter",
+    "list_cleanup_candidates", "neutralize_spreadsheet_text",
+    "package_to_csv", "package_to_dict", "package_to_parquet",
+    "package_to_xlsx", "plan_snapshot_retention", "preview_import",
+    "preview_integrity_repair", "quick_integrity_check", "register_artifact",
+    "registered_sport_adapters", "render_html_report",
+    "repair_integrity_index", "resolve_registered_artifact",
+    "serialize_data_package", "table_to_csv", "player_export_data_package",
 ]

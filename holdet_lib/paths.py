@@ -34,6 +34,11 @@ class AppPaths:
     player_export_dir: Path
     backup_dir: Path
     team_export_dir: Path
+    report_dir: Path
+    import_dir: Path
+    archive_dir: Path
+    integrity_index_file: Path
+    artifact_registry_file: Path
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,6 +145,11 @@ def resolve_paths(
         player_export_dir=export_dir / "players",
         team_export_dir=export_dir / "teams",
         backup_dir=export_dir / "backups",
+        report_dir=export_dir / "reports",
+        import_dir=data_dir / "imports",
+        archive_dir=export_dir / "archives",
+        integrity_index_file=data_dir / "integrity-index.json",
+        artifact_registry_file=export_dir / "artifact-registry.json",
     )
 
 

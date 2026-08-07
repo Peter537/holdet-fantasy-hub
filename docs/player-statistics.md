@@ -65,7 +65,7 @@ Numeriske felter bevares som tal, så Streamlits sortering virker, men vises med
 
 ## Eksport
 
-**Opret eksport** fryser det aktuelle filtrerede resultat som TXT, JSON og/eller Markdown, gemmer filerne og opretter downloads med præcis de samme bytes. Et tomt filterresultat kan ikke eksporteres.
+**Opret eksport** fryser det aktuelle filtrerede resultat som TXT, JSON, Markdown, CSV, XLSX og/eller valgfri Parquet, gemmer filerne og opretter downloads med præcis de samme bytes. CSV bruger UTF-8 med BOM; XLSX og CSV neutraliserer regnearksformler. Et tomt filterresultat kan ikke eksporteres.
 
 ```text
 %LOCALAPPDATA%\Holdet Fantasy Hub\exports\players\<game-slug>\data-round<round>_<MMDD>_<HHmmss>[_N].<format>

@@ -16,7 +16,14 @@ from holdet_lib.seasons import SeasonStore
 from holdet_lib.tournament_pairings import TournamentPairingStore
 from holdet_lib.paths import AppPaths, open_in_explorer
 from holdet_lib.storage import SnapshotIndex
-from website.hub_pages import backup_view, data_quality_panel
+from website.data_sections import (
+    render_api,
+    render_exports,
+    render_import_backup,
+    render_integrity_cleanup,
+    render_overview,
+)
+from website.hub_pages import data_quality_panel
 
 def _local_store_health(
     group_store: GroupStore,
@@ -347,34 +354,45 @@ def _saved_accounts_tab(
 
 
 
-def _data_tabs():
-    labels = (
-        "Gemte konti",
-        "Datastatus",
-        "Lagerplaceringer",
-        "Backup og gendannelse",
-    )
-    slugs = ("accounts", "quality", "locations", "backup")
-    key = "data-storage-tabs"
+_DATA_AREAS = (
+    ("overview", "Overblik"),
+    ("exports", "Eksport og rapporter"),
+    ("import", "Import og backup"),
+    ("integrity", "Integritet og oprydning"),
+    ("api", "Lokalt API"),
+    ("accounts", "Konti og placeringer"),
+)
+_DATA_ALIASES = {
+    "accounts": "accounts",
+    "quality": "overview",
+    "locations": "accounts",
+    "backup": "import",
+}
+
+
+def _data_area() -> str:
+    slugs = tuple(slug for slug, _ in _DATA_AREAS)
+    labels = dict(_DATA_AREAS)
     requested = str(st.query_params.get("section", ""))
-    desired = labels[slugs.index(requested)] if requested in slugs else labels[0]
-    if (
-        requested in slugs
-        or key not in st.session_state
-        or st.session_state[key] not in labels
-    ):
+    desired = _DATA_ALIASES.get(
+        requested, requested if requested in slugs else "accounts"
+    )
+    key = "data-storage-area"
+    if requested or key not in st.session_state or st.session_state[key] not in slugs:
         st.session_state[key] = desired
 
-    def sync_tab() -> None:
-        selected = st.session_state[key]
-        st.query_params["section"] = slugs[labels.index(selected)]
+    def sync_area() -> None:
+        st.query_params["section"] = st.session_state[key]
 
-    return st.tabs(
-        labels,
-        default=st.session_state[key],
+    selected = st.selectbox(
+        "Område",
+        slugs,
+        format_func=lambda value: labels[value],
         key=key,
-        on_change=sync_tab,
+        on_change=sync_area,
+        help="Valget gemmes i adressen, så området kan åbnes direkte igen.",
     )
+    return str(selected)
 def data_storage_view(
     account_store: AccountStore,
     group_store: GroupStore,
@@ -384,7 +402,7 @@ def data_storage_view(
 ) -> None:
     st.title("Data og lager", anchor="data-og-lager")
     st.caption(
-        "Konti, datastatus, lagerplaceringer og en samlet backup af Hubben."
+        "Eksportér, kontrollér, importér og vedligehold lokale Hub-data uden automatiske writes ved navigation."
     )
     try:
         accounts: tuple[AccountConfig, ...] | None = account_store.load()
@@ -403,47 +421,29 @@ def data_storage_view(
         st.metric("Grupper", len(configuration.groups), border=True)
         st.metric("Teamsnapshots", len(index.snapshots), border=True)
 
-    (
-        accounts_tab,
-        quality_tab,
-        locations_tab,
-        backup_tab,
-    ) = _data_tabs()
-    if accounts_tab.open:
-        with accounts_tab:
-            _saved_accounts_tab(
-                account_store,
-                group_store,
-                accounts,
-                configuration.groups,
-                account_error,
-            )
-    if quality_tab.open:
-        with quality_tab:
-            st.subheader("Datastatus")
-            st.caption(
-                "Se om de lokale data kan bruges, hvad der mangler, og hvor "
-                "du kan opdatere manuelt."
-            )
-            data_quality_panel(
-                configuration.games,
-                configuration.groups,
-                index,
-                app_paths,
-            )
-            st.subheader("Lokale stores")
-            st.caption(
-                "Sæsoner, managerhistorik og turneringsdata kontrolleres "
-                "uafhængigt, så en fejl ikke skjuler de øvrige data."
-            )
-            st.dataframe(
-                _local_store_health(group_store, configuration, app_paths),
-                hide_index=True,
-                width="stretch",
-            )
-    if locations_tab.open:
-        with locations_tab:
-            _storage_locations_tab(app_paths)
-    if backup_tab.open:
-        with backup_tab:
-            backup_view(app_paths)
+    message = st.session_state.pop("data-action-message", None)
+    if isinstance(message, str):
+        st.success(message)
+    area = _data_area()
+    if area == "overview":
+        render_overview(group_store, configuration, index, app_paths)
+    elif area == "exports":
+        render_exports(configuration, index, app_paths)
+    elif area == "import":
+        render_import_backup(app_paths)
+    elif area == "integrity":
+        render_integrity_cleanup(app_paths)
+    elif area == "api":
+        render_api()
+    else:
+        st.subheader("Konti og placeringer")
+        _saved_accounts_tab(
+            account_store,
+            group_store,
+            accounts,
+            configuration.groups,
+            account_error,
+        )
+        st.divider()
+        st.subheader("Lagerplaceringer")
+        _storage_locations_tab(app_paths)

@@ -1099,17 +1099,9 @@ class DashboardTests(unittest.TestCase):
 
             self.assertFalse(app.exception)
             self.assertTrue(any(item.value == "Data og lager" for item in app.title))
-            self.assertEqual(
-                [item.label for item in app.tabs],
-                [
-                    "Gemte konti",
-                    "Datastatus",
-                    "Lagerplaceringer",
-                    "Backup og gendannelse",
-                ],
-            )
-            app.session_state["data-storage-tabs"] = "Lagerplaceringer"
-            app.run(timeout=15)
+            self.assertEqual([item.label for item in app.tabs], [])
+            area = next(item for item in app.selectbox if item.label == "Område")
+            self.assertEqual(area.value, "accounts")
             displayed = {item.value for item in app.code}
             self.assertIn(str(config.resolve()), displayed)
             self.assertIn(str(output.resolve()), displayed)
@@ -1120,6 +1112,30 @@ class DashboardTests(unittest.TestCase):
             self.assertFalse(
                 any("Projektets tidligere" in item.value for item in app.info)
             )
+
+    def test_data_storage_areas_and_legacy_deeplinks_are_read_only(self) -> None:
+        with website_environment() as (config, _output):
+            root = config.parent
+            app = AppTest.from_file(APP_PATH).run(timeout=15)
+            expected = {
+                "overview": "overview",
+                "exports": "exports",
+                "import": "import",
+                "integrity": "integrity",
+                "api": "api",
+                "accounts": "accounts",
+                "quality": "overview",
+                "locations": "accounts",
+                "backup": "import",
+            }
+            for requested, selected in expected.items():
+                with self.subTest(section=requested):
+                    navigate(app, "data", section=requested)
+                    self.assertFalse(app.exception)
+                    area = next(item for item in app.selectbox if item.label == "Område")
+                    self.assertEqual(area.value, selected)
+            self.assertFalse((root / "exports").exists())
+            self.assertFalse((root / "data" / "integrity-index.json").exists())
 
     def test_saved_accounts_metrics_table_and_add_flow(self) -> None:
         accounts = [
@@ -1931,7 +1947,7 @@ class DashboardTests(unittest.TestCase):
         self.assertIn('anchor="data-og-lager"', data_source)
 
         readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
-        command = "py -3.14 -m streamlit run .\\website\\app.py"
+        command = "py -3.14 -m streamlit run .\\website\\server.py"
         self.assertIn(command, readme)
         self.assertNotIn("--server.address", readme)
         self.assertNotIn("--server.port", readme)

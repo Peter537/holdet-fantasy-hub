@@ -18,6 +18,7 @@ class VersionAndDispatchTests(unittest.TestCase):
             "architecture.md",
             "clients.md",
             "data-retrieval.md",
+            "data-portability.md",
             "data-storage.md",
             "decision-analysis.md",
             "groups-and-tournaments.md",
@@ -25,6 +26,7 @@ class VersionAndDispatchTests(unittest.TestCase):
             "player-statistics.md",
             "team-statistics.md",
             "testing.md",
+            "local-api.md",
         }
         self.assertEqual({path.name for path in documents[1:]}, expected_docs)
         self.assertFalse((root / "examples").exists())

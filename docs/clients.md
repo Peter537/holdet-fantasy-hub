@@ -7,7 +7,7 @@ Holdet Fantasy Hub har et lokalt Streamlit-dashboard og en kildebaseret CLI. Beg
 Start fra repositoryets rod:
 
 ```powershell
-py -3.14 -m streamlit run .\website\app.py
+py -3.14 -m streamlit run .\website\server.py
 ```
 
 Åbn [http://localhost:8501](http://localhost:8501). `.streamlit/config.toml` binder serveren til `127.0.0.1`; standardporten er 8501.
@@ -23,9 +23,9 @@ Destinationerne står i denne rækkefølge:
 5. **Arkiverede managerspil**.
 6. **Managers** – Rangliste, Medaljer og rekorder, Sammenlign, Sæsoner og Identiteter.
 7. **Kalender** – cachebaserede fantasyopgør og manglende tidspunkter.
-8. **Data og lager**.
+8. **Data og lager** med områdevælgerne Overblik, Eksport og rapporter, Import og backup, Integritet og oprydning, Lokalt API samt Konti og placeringer.
 
-Der findes ingen global Værktøjer-sektion. De tidligere globale views `transfer`, `compare`, `history`, `changes`, `quality` og `backup` er fjernet og viser den kontrollerede side **Siden findes ikke**.
+Der findes ingen global Værktøjer-sektion. De tidligere globale views `transfer`, `compare`, `history` og `changes` er fjernet og viser den kontrollerede side **Siden findes ikke**. Data-deeplinks med `accounts`, `quality`, `locations` og `backup` mappes til de nye områder.
 
 Den tidligere `view=hall-of-fame` viderestiller til `view=managers`. Managers og Kalender er globale views og starter ingen hentning. Kalenderen kan filtreres på manager, managerspil, gruppe/turnering og dato.
 
@@ -58,7 +58,7 @@ Query-parametrene kan kombineres:
 | Parameter | Betydning |
 | --- | --- |
 | `view` | Hoveddestination, eksempelvis et managerspil, `managers`, `calendar` eller Data og lager |
-| `section` | Managerspillets hovedfane, herunder `alerts` for Statusalarmer |
+| `section` | Managerspillets hovedfane eller aktivt Data og lager-område |
 | `analysis` | Aktivt Analyse-panel: `decisions`, `group`, `ideal` eller `experimental` |
 | `panel` | Underfane i spiller-, hold-, gruppe- eller datavisningen |
 | `round` | Valgt runde |
@@ -88,7 +88,7 @@ netstat -ano | Select-String ":8501"
 ```
 
 ```powershell
-Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like "*streamlit*website\app.py*" } | Select-Object ProcessId, ParentProcessId, CommandLine
+Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like "*streamlit*website\server.py*" } | Select-Object ProcessId, ParentProcessId, CommandLine
 ```
 
 Stop kun de bekræftede app-processer og deres konkrete launcherproces, bekræft at porten er fri, og start én ny instans med den normale kommando. Stop aldrig alle `python.exe`- eller `py.exe`-processer. Brug eventuelt `/_stcore/health` og en ny browsernavigation til at undgå at genbruge en gammel WebSocket-session.
@@ -116,7 +116,7 @@ py -3.14 .\cli\main.py players https://www.holdet.dk/da/fantasy/super-manager-fa
 ```
 
 ```powershell
-py -3.14 .\cli\main.py players https://www.holdet.dk/da/fantasy/tour-de-france-2026 --round 7 --format txt --format json --format md
+py -3.14 .\cli\main.py players https://www.holdet.dk/da/fantasy/tour-de-france-2026 --round 7 --format csv --format xlsx
 ```
 
 Filtre og kolonnevalg påvirker kun eksporten; hver hentning gemmer det komplette kanoniske spillersnapshot.
@@ -128,7 +128,7 @@ py -3.14 .\cli\main.py teams https://www.holdet.dk/da/fantasy/tour-de-france-202
 ```
 
 ```powershell
-py -3.14 .\cli\main.py teams https://www.holdet.dk/da/fantasy/tour-de-france-2026/fantasyteams/900000000001 --round 7 --format md --format json
+py -3.14 .\cli\main.py teams https://www.holdet.dk/da/fantasy/tour-de-france-2026/fantasyteams/900000000001 --round 7 --format csv --format xlsx
 ```
 
 Uden `--round` indeholder eksporten seneste overblik, aktuel opstilling og komplet offentlig historik. Med `--round` kræves et rundesammendrag; opstillingen følger kun med, hvis et snapshot blev gemt præcis i runden.

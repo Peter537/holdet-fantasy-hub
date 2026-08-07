@@ -11,6 +11,7 @@ from .flight import extract_flight_text
 from .http import fetch_html
 from .models import GameUrl, PlayerEntry, ScrapedGame
 from .policies import KNOWN_ROUTE_VARIANTS, GamePolicy, legacy_policy
+from .sport_adapters import get_sport_adapter
 
 
 SUPPORTED_HOSTS = frozenset({"holdet.dk", "www.holdet.dk"})
@@ -276,24 +277,8 @@ def format_entry(
         if unit is None and game_format is None
         else GamePolicy(variant, game_format or "", unit or "")
     )
-    if policy.format == "cycling" and policy.unit == "money":
-        line = f"{entry.name} ({entry.team}): {format_integer(entry.value)}"
-    elif policy.format == "cycling" and policy.unit == "points":
-        line = (
-            f"{entry.name} ({entry.team}, {entry.position}): "
-            f"{format_integer(entry.value)} p."
-        )
-    elif policy.format in {"soccer", "formula1"}:
-        line = (
-            f"{entry.name} ({entry.team}, {entry.position}): "
-            f"{format_integer(entry.value)}"
-            + (" p." if policy.unit == "points" else "")
-        )
-    elif policy.format == "golf":
-        line = (
-            f"{entry.name} ({entry.team}, {entry.position}): "
-            f"{format_integer(entry.value)} p."
-        )
-    else:
-        raise UnsupportedGameError(f"Kan ikke formatere en ikke-understøttet variant: {variant}")
+    adapter = get_sport_adapter(policy)
+    line = adapter.format_entry(
+        entry.name, entry.team, entry.position, entry.value, unit=policy.unit
+    )
     return line + _status_suffix(entry)

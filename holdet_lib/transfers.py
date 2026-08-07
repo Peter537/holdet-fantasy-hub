@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from math import ceil
 from typing import Literal
 
+from .errors import UnsupportedGameError
 from .models import PlayerEntry, RosterEntry, RoundStatus
+from .sport_adapters import get_sport_adapter
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,49 +149,31 @@ UNKNOWN_RULES = TransferRuleProfile(
 def transfer_rule_profile(
     *, variant: str = "", game_format: str = "", game_slug: str = ""
 ) -> TransferRuleProfile:
-    value = " ".join((variant, game_format, game_slug)).casefold()
-    if any(marker in value for marker in ("soccer", "football", "super-manager")):
-        return FOOTBALL_RULES
-    if any(marker in value for marker in ("cycling", "tour")):
-        return CYCLING_RULES
-    if any(marker in value for marker in ("motor", "formula", "f1")):
-        return MOTOR_RULES
-    if "golf" in value:
-        return GOLF_RULES
-    return UNKNOWN_RULES
+    """Return adapter defaults as explicitly unverified compatibility rules."""
+
+    try:
+        adapter = get_sport_adapter(variant or game_format)
+    except UnsupportedGameError:
+        return UNKNOWN_RULES
+    profile = {
+        "soccer": FOOTBALL_RULES,
+        "cycling": CYCLING_RULES,
+        "formula1": MOTOR_RULES,
+        "golf": GOLF_RULES,
+    }[adapter.key]
+    return replace(profile, known=False)
 
 
-_POSITION_ALIASES = {
-    "målmand": "goalkeeper",
-    "maalmand": "goalkeeper",
-    "goalkeeper": "goalkeeper",
-    "keeper": "goalkeeper",
-    "forsvar": "defender",
-    "forsvarer": "defender",
-    "defender": "defender",
-    "back": "defender",
-    "midt": "midfielder",
-    "midtbane": "midfielder",
-    "midfielder": "midfielder",
-    "angreb": "forward",
-    "angriber": "forward",
-    "forward": "forward",
-    "attacker": "forward",
-    "kører": "driver",
-    "koerer": "driver",
-    "driver": "driver",
-    "konstruktør": "constructor",
-    "konstruktoer": "constructor",
-    "constructor": "constructor",
-    "pit crew": "pitcrew",
-    "pitcrew": "pitcrew",
-    "pit-crew": "pitcrew",
-}
-
-
-def _position(value: str) -> str:
-    normalized = " ".join(value.strip().casefold().split())
-    return _POSITION_ALIASES.get(normalized, normalized)
+def _position(profile: TransferRuleProfile, value: str) -> str:
+    adapter_key = {
+        "football": "soccer",
+        "cycling": "cycling",
+        "motor": "formula1",
+        "golf": "golf",
+    }.get(profile.key)
+    if adapter_key is None:
+        return " ".join(value.strip().casefold().split())
+    return get_sport_adapter(adapter_key).normalize_position(value)
 
 
 def _roster_player(entry: RosterEntry) -> ScenarioPlayer:
@@ -331,7 +315,7 @@ def simulate_transfers(
             errors.append(
                 f"Slutholdet skal have {profile.roster_size} pladser; det har {len(ending)}"
             )
-        counts = Counter(_position(entry.position) for entry in ending)
+        counts = Counter(_position(profile, entry.position) for entry in ending)
         for position, minimum, maximum in profile.position_limits:
             count = counts[position]
             if count < minimum or count > maximum:
@@ -339,7 +323,7 @@ def simulate_transfers(
                     f"{position}: {count} valgt, tilladt {minimum}-{maximum}"
                 )
         if profile.category_count is not None and profile.category_size is not None:
-            category_counts = Counter(_position(entry.position) for entry in ending)
+            category_counts = Counter(_position(profile, entry.position) for entry in ending)
             if len(category_counts) != profile.category_count or any(
                 count != profile.category_size for count in category_counts.values()
             ):

@@ -7,20 +7,24 @@ Holdet Fantasy Hub har et importerbart domænebibliotek, et lokalt Streamlit-das
 ```mermaid
 flowchart TB
     subgraph Clients["Klienter"]
-        Web["website/app.py<br/>Streamlit-dashboard"]
+        Web["website/server.py<br/>st.App + Streamlit-dashboard"]
+        Api["Loopback read-only API<br/>Starlette-ruter"]
         Cli["cli/main.py<br/>Eksisterende spiller-, hold- og datakommandoer"]
     end
     subgraph Library["holdet_lib"]
         Fetch["HoldetClient og parsere"]
-        Domain["Frosne dataclasses"]
+        Domain["Frosne dataclasses og DataPackage"]
+        Adapters["Interne sportsadaptere"]
         Manager["Manager-, sæson- og kalenderbuilders"]
         Analysis["Beslutningsanalyse, regler og modeller"]
         Tournament["Generisk turneringsmotor"]
         Stores["Versionsstyrede stores og backup"]
     end
     Web --> Fetch
+    Api --> Stores
     Cli --> Fetch
     Fetch --> Domain
+    Adapters --> Domain
     Domain --> Manager
     Domain --> Analysis
     Domain --> Tournament
@@ -50,7 +54,7 @@ Rene builders skriver ikke filer. Stores skriver kun efter eksplicitte handlinge
 
 ### Streamlit
 
-`website/app.py` ejer routing og eksplicitte refresh-hooks. `website/hub_pages.py` ejer Managers, Kalender, Rundens historie og relaterede paneler. `website/analysis_pages.py` ejer Analyse-panelerne, spillerdetaljer og alarmindbakken. Query-parametre og navngivet session state fastholder kontekst. Almindelig navigation læser cache.
+`website/server.py` er den kanoniske `st.App`-wrapper og registrerer loopback-only API-ruter. `website/app.py` ejer fortsat UI-routing, AppTest-entrypoint og eksplicitte refresh-hooks. `website/hub_pages.py` ejer Managers, Kalender, Rundens historie og relaterede paneler. `website/data_sections.py` ejer de nye data-, import-, integritets- og oprydningsflows. Query-parametre og navngivet session state fastholder kontekst. Almindelig navigation læser cache.
 
 ### CLI
 
@@ -105,6 +109,8 @@ Seeds fryses ved oprettelse. Schema 8 bruger fortsat `TournamentConfig` som runt
 - pairing-store schema 1 ejer publicerede parringer pr. turneringsrevision.
 - eventledger schema 2 ejer rå managerresultater og revisioner.
 - `GameMetadata` schema 2 ejer schedule, deadlines og en fail-closed sæsonregelprojektion, som kalender og analyser læser uden fetch.
+- `DataPackage` schema 1 er den fælles, rene tabulære projektion for CSV, XLSX, Parquet og rapporter.
+- `integrity-index.json` schema 1 er et afledt checksumindeks, der kan genopbygges uden at ændre kanoniske filer.
 - Fixturecache schema 1 ejer kun offentligt verificerede, parsertestede kampe; difficulty kræver særskilt feltdokumentation.
 
 Se [Datalagring](data-storage.md) for konkrete stier og kompatibilitetsregler.
@@ -127,6 +133,10 @@ Se [Datalagring](data-storage.md) for konkrete stier og kompatibilitetsregler.
 | Alarmer og fixtures | `AnalysisInboxStore`, `build_watchlist_alerts`, `FixtureRecord`, `FixtureStore`, `parse_fixture_records` |
 | Datastatus | `DataQualityReport`, `build_data_quality_report` |
 | Backup | `create_backup`, `validate_backup`, `restore_backup` |
+| Dataportabilitet | `DataPackage`, `DataTable`, `serialize_data_package`, `preview_import`, `anonymize_data_package` |
+| Integritet og lager | `quick_integrity_check`, `full_integrity_check`, `repair_integrity_index`, `build_storage_inventory`, `plan_snapshot_retention` |
+| Sportsadaptere | `SportAdapter`, `SportCapabilities`, `get_sport_adapter`, `registered_sport_adapters` |
+| Lokalt API | `LocalDataApi`, `dataset_catalog`, `register_artifact` |
 
 Legacy-navnene `HallOfFameEvent`, `create_tournament_config` og `build_tournament_state` er bevaret. De dokumenterede top-level-navne eksporteres via `holdet_lib.__all__`.
 

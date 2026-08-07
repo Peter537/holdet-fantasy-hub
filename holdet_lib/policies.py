@@ -5,15 +5,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .errors import PayloadError, UnsupportedGameError
+from .sport_adapters import get_sport_adapter, registered_sport_adapters
 
 
-KNOWN_GAME_FORMATS = frozenset({"soccer", "cycling", "formula1", "golf"})
+KNOWN_GAME_FORMATS = frozenset(
+    adapter.key for adapter in registered_sport_adapters()
+)
 ROUTE_VARIANT_FORMATS = {
-    "soccer": "soccer",
-    "cycling": "cycling",
-    "cycling_world_tour": "cycling",
-    "formula1": "formula1",
-    "golf": "golf",
+    variant: adapter.key
+    for adapter in registered_sport_adapters()
+    for variant in adapter.route_variants
 }
 KNOWN_ROUTE_VARIANTS = frozenset(ROUTE_VARIANT_FORMATS)
 VALUE_UNITS = frozenset({"money", "points"})
@@ -83,9 +84,10 @@ def policy_from_ruleset(
 def legacy_policy(route_variant: str) -> GamePolicy:
     """Compatibility policy for old in-memory callers without cartridge data."""
 
-    game_format = format_for_variant(route_variant)
+    adapter = get_sport_adapter(route_variant)
+    game_format = adapter.key
     return GamePolicy(
         route_variant=route_variant,
         format=game_format,
-        unit="points" if game_format == "golf" else "money",
+        unit=adapter.default_unit,
     )

@@ -11,14 +11,15 @@ Holdet Fantasy Hub er et uofficielt, lokalt Windows-værktøj til offentlige fan
 ## Funktioner
 
 - Rundecenter med deadline, datastatus, rangbevægelser, runde-awards og en deterministisk Rundens historie.
-- Spiller- og holdstatistik, watchlist, noter/tags, gemte filtre, spillerdetaljer, sammenligning, historik, ændringer, transferlaboratorium og eksport.
+- Spiller- og holdstatistik, watchlist, noter/tags, gemte filtre, spillerdetaljer, sammenligning, historik, ændringer, transferlaboratorium og eksport i TXT, JSON, Markdown, CSV, XLSX og valgfri Parquet.
 - Cachebaseret analyse- og beslutningscenter med form, stabilitet, kaptajn, bank, transferregnskab, gruppeswing, eksponering og regelverificeret idealhold.
 - Opt-in-modeller for fixturecache og Monte Carlo, tydeligt mærket som eksperimentelle og aldrig som facit.
 - Managerprofiler på tværs af spil og hold, Elo-rating, medaljer, rekorder, streaks og H2H.
 - Manuelt sammensatte sæsoner, som genbruger den globale redigerbare pointprofil.
 - Liga, schweizersystem, gruppespil + knockout og double elimination med frosne seeds og publicerede parringer.
 - Global cache-only kalender og validerede officielle Holdet-links.
-- Datastatus, spilafgrænsede statusalarmer samt valideret ZIP-backup og rollback-sikker gendannelse.
+- Selvstændige manager- og sæsonrapporter, anonymiserede supportpakker, preview-baseret import, integritetsindeks, lagerinventar og manuel retention.
+- Loopback-only read-only API til Excel, Power BI og egne scripts samt valideret ZIP-backup og rollback-sikker gendannelse.
 
 ## Kom hurtigt i gang
 
@@ -29,7 +30,7 @@ py -3.14 -m pip install -e ".[website,test]"
 ```
 
 ```powershell
-py -3.14 -m streamlit run .\website\app.py
+py -3.14 -m streamlit run .\website\server.py
 ```
 
 Åbn [http://localhost:8501](http://localhost:8501). Data hentes kun efter et eksplicit klik på en hente-, opdaterings- eller genopbygningshandling.
@@ -50,6 +51,8 @@ Managers har fanerne Rangliste, Medaljer og rekorder, Sammenlign, Sæsoner og Id
 | Grupper og turneringsformater | [Grupper og turneringer](docs/groups-and-tournaments.md) |
 | Hentning fra Holdet.dk | [Datahentning](docs/data-retrieval.md) |
 | AppData, skemaer og backup | [Datalagring](docs/data-storage.md) |
+| Eksport, rapporter, anonymisering, import og retention | [Dataportabilitet](docs/data-portability.md) |
+| Read-only API, datasæt og Excel/Power BI | [Lokalt API](docs/local-api.md) |
 | Spillerstatistik | [Spillerstatistik](docs/player-statistics.md) |
 | Holdstatistik | [Holdstatistik](docs/team-statistics.md) |
 | Analyse, formler, provenance og modelgates | [Analyse- og beslutningscenter](docs/decision-analysis.md) |
@@ -57,7 +60,7 @@ Managers har fanerne Rangliste, Medaljer og rekorder, Sammenlign, Sæsoner og Id
 
 ## Lokal data og privatliv
 
-Personlige konti, profiler, grupper, sæsoner, noter, filtre, alarmer, snapshots, metadata, manager-events, backups og eksporter ligger uden for repositoryet under `%APPDATA%\Holdet Fantasy Hub` og `%LOCALAPPDATA%\Holdet Fantasy Hub`. Mapper oprettes først ved en eksplicit skrivehandling.
+Personlige konti, profiler, grupper, sæsoner, noter, filtre, alarmer, snapshots, metadata, manager-events, importer, backups, rapporter og eksporter ligger uden for repositoryet under `%APPDATA%\Holdet Fantasy Hub` og `%LOCALAPPDATA%\Holdet Fantasy Hub`. Mapper oprettes først ved en eksplicit skrivehandling. Anonymiserede supportpakker er irreversible og markeret som ikke-gendannelige.
 
 Repositoryet må ikke indeholde virkelige profil-ID'er, fantasy-team-ID'er eller personlige holdnavne. Dokumentation og tests bruger fiktive identiteter.
 
@@ -82,13 +85,13 @@ netstat -ano | Select-String ":8501"
 ```
 
 ```powershell
-Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like "*streamlit*website\app.py*" } | Select-Object ProcessId, ParentProcessId, CommandLine
+Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like "*streamlit*website\server.py*" } | Select-Object ProcessId, ParentProcessId, CommandLine
 ```
 
 Et sundhedstjek kan køres med:
 
 ```powershell
-Invoke-WebRequest http://127.0.0.1:8501/_stcore/health | Select-Object -ExpandProperty Content
+Invoke-RestMethod http://127.0.0.1:8501/api/v1/health
 ```
 
 ## Status

@@ -1635,12 +1635,20 @@ def _reset_player_filters(scope: str) -> None:
 
 def _player_export_section(statistics, query, selected, scope: str) -> None:
     st.subheader("Eksport")
+    format_labels = {
+        "txt": "TXT",
+        "json": "JSON",
+        "md": "Markdown",
+        "csv": "CSV",
+        "xlsx": "XLSX",
+        "parquet": "Parquet",
+    }
     formats = st.pills(
         "Filformater",
         PLAYER_EXPORT_FORMATS,
         default=("txt",),
         selection_mode="multi",
-        format_func={"txt": "TXT", "json": "JSON", "md": "Markdown"}.__getitem__,
+        format_func=format_labels.__getitem__,
         key=f"{scope}-export-formats",
     )
     ready_key = f"{scope}-ready-export-{statistics.round_number}"
@@ -3321,17 +3329,21 @@ def _team_export_section(
     ready_key = f"team-export-ready-{team.reference.game.slug}-{team.reference.team_id}"
     disabled = not formats or (scope == "round" and located is None)
     if st.button("Opret eksport", type="primary", disabled=disabled, key=f"create-{ready_key}"):
-        source = snapshot if scope == "full" else located[0]
-        document = build_team_export(
-            source.team,
-            scope=scope,
-            round_number=round_number,
-            roster=None if roster_snapshot is None else tuple(roster_snapshot.team.roster),
-            source_generated_at=source.generated_at,
-            roster_generated_at=None if roster_snapshot is None else roster_snapshot.generated_at,
-        )
-        artifacts = TeamExportStore(TEAM_EXPORT_DIR).save(document, tuple(formats))
-        st.session_state[ready_key] = artifacts
+        try:
+            source = snapshot if scope == "full" else located[0]
+            document = build_team_export(
+                source.team,
+                scope=scope,
+                round_number=round_number,
+                roster=None if roster_snapshot is None else tuple(roster_snapshot.team.roster),
+                source_generated_at=source.generated_at,
+                roster_generated_at=None if roster_snapshot is None else roster_snapshot.generated_at,
+            )
+            artifacts = TeamExportStore(TEAM_EXPORT_DIR).save(document, tuple(formats))
+        except (PayloadError, OSError, ValueError) as exc:
+            st.error(f"Eksporten kunne ikke oprettes: {exc}")
+        else:
+            st.session_state[ready_key] = artifacts
     artifacts = st.session_state.get(ready_key, ())
     for artifact in artifacts:
         st.code(str(artifact.path), language=None)

@@ -48,14 +48,23 @@ Live-testen afhænger ikke af private profiler eller fantasyhold og antager ikke
 | Historik | Huller, seneste snapshot pr. runde og omvendte rangakser på spil-, gruppe- og holdniveau |
 | Managers og sæsoner | Identitetsgraf, stabilt ID ved merge/rename/unmerge, legacy-remapping uden writes, bedste hold, locale- og puljeisoleret Elo, awards, streaks, historier, H2H-aggregater, sæsonredigering og pointprofil |
 | Eventledger og kalender | Revisioner, legacy-events, manglende metadata, cache-only events og nul navigation-writes |
-| Lagring og backup | AppData, atomiske writes, HubSettings 1/2 → 3 og GameMetadata 1 → 2 uden startup-write, alarmindbakke, SHA-256, path traversal, preview, staging og rollback |
+| Dataportabilitet | DataPackage, Unicode, rå taltyper, CSV-injection, XLSX-ark, valgfri Parquet, rapportescaping og anonymiseringsprofiler |
+| Lagring og backup | AppData, atomiske writes, HubSettings 1/2 → 3 og GameMetadata 1 → 2 uden startup-write, integritetsindeks, importklassifikation, arkivgrænser, SHA-256, path traversal, preview, staging og rollback |
+| Lokalt API | Catalog, filtre, pagination, CSV/JSON-paritet, ETag/304, Host/loopback, sikre headere, nul writes og nul netværk |
 | Turnering | Liga, Swiss, gruppespil + knockout, double elimination, fuld Swiss-afslutning, custom byepoint, Buchholz, seedning, tie-breakers, bronzekamp, kontekstvalidering og konflikter for frosne parringer |
 | Dashboard | Managers-navigation, Analyse-paneler, spilfiltrerede alarmfaner og badges, spiller- og kompatibilitetsruter, noter/tags, standardhold, filterprofiler, opt-in, historier, turneringsguide, deeplinks og nul netværk/writes |
 | Dokumentation og API | Links, Mermaid-hegn, kommandoer, AppData-stier, `holdet_lib.__all__` og evaluerbare type hints |
 
 ## Streamlit AppTest
 
-AppTest åbner hovedroutes og query-parametre uden en virkelig server. Tests beviser blandt andet, at Statusalarmer ikke er en global sidebardestination, at hvert managerspil har en spilfiltreret alarmfane med unread-badges, at legacy Hall of Fame-routen viderestiller, og at Data og lager indeholder Datastatus og Backup og gendannelse. Analyse-, spiller-, alarm-, manager-, kalender- og almindelig navigation samt transfersimulation må hverken kalde netværk eller skrive persistent data.
+AppTest åbner hovedroutes og query-parametre uden en virkelig server. Tests beviser blandt andet, at Statusalarmer ikke er en global sidebardestination, at hvert managerspil har en spilfiltreret alarmfane med unread-badges, at legacy Hall of Fame-routen viderestiller, og at Data og lager bruger én URL-bundet områdevælger med kompatible gamle deeplinks, previews og bekræftelser. Analyse-, spiller-, alarm-, manager-, kalender- og almindelig navigation samt transfersimulation må hverken kalde netværk eller skrive persistent data.
+
+Supplér suiten med miljøkontrol og diffkontrol:
+
+```powershell
+py -3.14 -m pip check
+git diff --check
+```
 
 Manuel browser-QA køres ved 375, 768, 1280 og 1920 px, ved 200 % tekstzoom, med tastaturnavigation og reduceret bevægelse. Lange danske tekster og store tabeller kontrolleres, og konsollen må ikke indeholde empty-chart- eller Vega-advarsler.
 

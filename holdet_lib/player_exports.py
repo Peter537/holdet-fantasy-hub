@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 from typing import Iterable, Sequence
 
+from .data_packages import DataPackage, DataTable, serialize_data_package
 from .errors import PayloadError
 from .filenames import collision_suffix, round_output_stem
 from .models import PlayerEntry, ScrapedGame
@@ -15,6 +16,7 @@ from .output import sanitize_path_component
 from .players import format_integer
 from .persistence import publish_immutable
 from .policies import GamePolicy, legacy_policy
+from .sport_adapters import get_sport_adapter
 
 
 PLAYER_EXPORT_SCHEMA_VERSION = 2
@@ -39,7 +41,7 @@ PLAYER_SORT_FIELDS = (
 PLAYER_STATUSES = ("inactive", "disabled", "injured", "suspended")
 STATUS_RULES = ("ignore", "require", "exclude")
 MISSING_VALUE_MODES = ("include", "exclude", "only")
-PLAYER_EXPORT_FORMATS = ("txt", "json", "md")
+PLAYER_EXPORT_FORMATS = ("txt", "json", "md", "csv", "xlsx", "parquet")
 
 STATUS_LABELS_DA = {
     "inactive": "Inaktiv",
@@ -153,18 +155,7 @@ def player_column_labels(
         )
         resolved_unit = policy.unit
         resolved_format = policy.format
-    points = resolved_unit == "points"
-    golf = resolved_format == "golf"
-    categorical = golf or (resolved_format == "cycling" and points)
-    return {
-        "name": "Navn",
-        "team": "Land" if golf else "Hold",
-        "position": "Kategori" if categorical else "Position",
-        "value": "Point" if points else "Pris",
-        "total_growth": "Totalændring" if points else "Totalvækst",
-        "round_growth": "Rundeændring" if points else "Vækst",
-        "status": "Status",
-    }
+    return get_sport_adapter(resolved_format).column_labels(unit=resolved_unit)
 
 
 def _matches_optional_number(
@@ -414,6 +405,42 @@ def player_export_to_dict(document: PlayerExportDocument) -> dict[str, object]:
     }
 
 
+def player_export_data_package(document: PlayerExportDocument) -> DataPackage:
+    """Project one filtered player export into the shared tabular contract."""
+
+    statistics = document.statistics
+    return DataPackage(
+        document_type="player_export",
+        scope={
+            "locale": statistics.game.locale,
+            "game": statistics.game.slug,
+            "round": statistics.round_number,
+        },
+        generated_at=document.generated_at,
+        provenance={
+            "source_url": statistics.game.original,
+            "source_generated_at": (
+                document.source_generated_at.isoformat()
+                if document.source_generated_at is not None
+                else None
+            ),
+            "variant": statistics.variant,
+            "format": statistics.format,
+            "unit": statistics.unit,
+        },
+        tables=(
+            DataTable(
+                "players",
+                document.query.columns,
+                tuple(
+                    player_row(entry, document.query.columns, json_values=False)
+                    for entry in document.entries
+                ),
+            ),
+        ),
+    )
+
+
 def _metadata_lines(document: PlayerExportDocument) -> list[tuple[str, str]]:
     statistics = document.statistics
     source_time = (
@@ -476,11 +503,16 @@ def player_export_to_markdown(document: PlayerExportDocument) -> str:
 
 
 def serialize_player_export(document: PlayerExportDocument, format: str) -> bytes:
-    if format == "txt":
+    selected = format.casefold()
+    if selected in {"csv", "xlsx", "parquet"}:
+        return serialize_data_package(
+            player_export_data_package(document), selected
+        ).content
+    if selected == "txt":
         content = player_export_to_txt(document)
-    elif format == "md":
+    elif selected == "md":
         content = player_export_to_markdown(document)
-    elif format == "json":
+    elif selected == "json":
         content = json.dumps(
             player_export_to_dict(document), ensure_ascii=False, indent=2
         ) + "\n"
@@ -496,6 +528,9 @@ class PlayerExportStore:
         "txt": "text/plain; charset=utf-8",
         "json": "application/json",
         "md": "text/markdown; charset=utf-8",
+        "csv": "text/csv; charset=utf-8",
+        "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "parquet": "application/vnd.apache.parquet",
     }
 
     def __init__(self, export_dir: Path | str) -> None:

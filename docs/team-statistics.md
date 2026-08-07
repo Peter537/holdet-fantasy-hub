@@ -17,7 +17,7 @@ Efter valg af hold og runde vises:
 - **Transferlaboratorium** – en sessionsbaseret simulation fra det viste holdsnapshot.
 - **Historik** – værdi eller point, rundevækst, samlet rang og beregnet grupperang.
 - **Ændringer** – rang, værdi, point og relevante trupændringer mod foregående tilgængelige runde.
-- **Eksport** – komplet snapshot eller valgt runde i TXT, JSON og Markdown.
+- **Eksport** – komplet snapshot eller valgt runde i TXT, JSON, Markdown, CSV, XLSX og valgfri Parquet.
 
 Managerspillets separate **Analyse → Beslutninger** bruger samme cache til faktisk kaptajnbonus, verificerede alternative kaptajnscenarier, bankens rente/break-even, transferregnskab, **hvis jeg ikke havde handlet** samt bedste og værste transfer. Et standardhold gemmes pr. spil; analysevælgeren kan midlertidigt skifte hold uden at ændre standarden.
 
