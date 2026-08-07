@@ -329,6 +329,62 @@ def player_query_to_dict(query: PlayerStatisticsQuery) -> dict[str, object]:
     }
 
 
+def player_query_from_dict(raw: object) -> PlayerStatisticsQuery:
+    """Parse the version-stable query shape used by exports and saved filters."""
+
+    if not isinstance(raw, dict):
+        raise ValueError("Spillerfilteret skal være et objekt")
+
+    def object_field(name: str) -> dict[str, object]:
+        value = raw.get(name, {})
+        if not isinstance(value, dict):
+            raise ValueError(f"Filterfeltet {name} skal være et objekt")
+        return value
+
+    def string_list(name: str) -> tuple[str, ...]:
+        value = raw.get(name, [])
+        if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+            raise ValueError(f"Filterfeltet {name} skal være en tekstliste")
+        return tuple(value)
+
+    def optional_int(value: object, label: str) -> int | None:
+        if value is None:
+            return None
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise ValueError(f"Filterfeltet {label} skal være et heltal")
+        return value
+
+    value_range = object_field("value")
+    total = object_field("total_growth")
+    round_growth = object_field("round_growth")
+    statuses = object_field("statuses")
+    sort = object_field("sort")
+    columns = string_list("columns") or PLAYER_COLUMNS
+    rules = tuple(
+        (status, rule)
+        for status in PLAYER_STATUSES
+        if isinstance((rule := statuses.get(status, "ignore")), str)
+        and rule != "ignore"
+    )
+    return PlayerStatisticsQuery(
+        search=str(raw.get("search", "")),
+        teams=string_list("teams"),
+        positions=string_list("positions"),
+        min_value=optional_int(value_range.get("min"), "value.min"),
+        max_value=optional_int(value_range.get("max"), "value.max"),
+        min_total_growth=optional_int(total.get("min"), "total_growth.min"),
+        max_total_growth=optional_int(total.get("max"), "total_growth.max"),
+        min_round_growth=optional_int(round_growth.get("min"), "round_growth.min"),
+        max_round_growth=optional_int(round_growth.get("max"), "round_growth.max"),
+        missing_total_growth=str(total.get("missing", "include")),
+        missing_round_growth=str(round_growth.get("missing", "include")),
+        status_rules=rules,
+        columns=columns,
+        sort_field=str(sort.get("field", "value")),
+        sort_order=str(sort.get("order", "desc")),
+    )
+
+
 def player_export_to_dict(document: PlayerExportDocument) -> dict[str, object]:
     statistics = document.statistics
     return {

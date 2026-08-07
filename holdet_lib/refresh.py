@@ -2,14 +2,25 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 
 from .client import HoldetClient
 from .groups import GroupDefinition, GroupTeam, ManagerGame
 from .models import GameUrl, ScrapedTeam
-from .storage import ManifestStore, SnapshotIndex, SnapshotStore
+from .storage import (
+    ManifestStore,
+    PlayerStatisticsStore,
+    SnapshotIndex,
+    SnapshotStore,
+)
+from .hub_settings import HubSettings
+from .analysis_inbox import (
+    AnalysisInboxStore,
+    build_watchlist_alerts,
+    select_alert_baseline,
+)
 from .tournament import build_tournament_state, latest_tournament_round
 
 
@@ -24,6 +35,15 @@ class TeamRefresh:
 
 
 @dataclass(frozen=True, slots=True)
+class PlayerRefresh:
+    status: str
+    round_number: int | None
+    snapshot_path: Path | None
+    alert_count: int = 0
+    error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class GameRefreshResult:
     manager_game: ManagerGame
     round_number: int
@@ -32,6 +52,7 @@ class GameRefreshResult:
     attempted_team_ids: tuple[int, ...]
     skipped_team_ids: tuple[int, ...]
     manifest_path: Path
+    player: PlayerRefresh | None = None
 
     @property
     def failures(self) -> tuple[TeamRefresh, ...]:
@@ -191,6 +212,80 @@ def refresh_game(
         manager_game, round_number, generated_at, tuple(results),
         attempted, (), manifest_path,
     )
+
+
+def refresh_manager_game(
+    manager_game: ManagerGame,
+    groups: tuple[GroupDefinition, ...],
+    client: HoldetClient,
+    snapshot_store: SnapshotStore,
+    player_store: PlayerStatisticsStore,
+    manifest_store: ManifestStore,
+    *,
+    settings: HubSettings | None = None,
+    inbox_store: AnalysisInboxStore | None = None,
+    now: datetime | None = None,
+) -> GameRefreshResult:
+    """Refresh latest players once plus every fixed team, with partial results."""
+
+    generated_at = now or datetime.now().astimezone()
+    if generated_at.tzinfo is None:
+        generated_at = generated_at.astimezone()
+    before_players = player_store.scan(manager_game.game)
+    try:
+        statistics = client.fetch_players(manager_game.game)
+        previous = select_alert_baseline(
+            before_players,
+            manager_game.game,
+            statistics.round_number,
+        )
+        player_path = player_store.save(statistics, now=generated_at)
+        current = player_store.scan(manager_game.game).newest(
+            manager_game.game, statistics.round_number
+        )
+        alert_count = 0
+        if (
+            previous is not None
+            and current is not None
+            and settings is not None
+            and inbox_store is not None
+        ):
+            alerts = build_watchlist_alerts(
+                previous,
+                current,
+                settings.watchlist,
+                now=generated_at,
+            )
+            inbox_store.merge(alerts)
+            alert_count = len(alerts)
+        player_refresh = PlayerRefresh(
+            "success",
+            statistics.round_number,
+            player_path,
+            alert_count,
+        )
+    except Exception as exc:
+        cached_rounds = before_players.rounds_for(manager_game.game)
+        previous = (
+            before_players.newest(manager_game.game, max(cached_rounds))
+            if cached_rounds
+            else None
+        )
+        player_refresh = PlayerRefresh(
+            "cached_fallback" if previous is not None else "failed",
+            None if previous is None else previous.statistics.round_number,
+            None if previous is None else previous.path,
+            error=str(exc),
+        )
+    result = refresh_game(
+        manager_game,
+        groups,
+        client,
+        snapshot_store,
+        manifest_store,
+        now=generated_at,
+    )
+    return replace(result, player=player_refresh)
 
 
 def refresh_group(

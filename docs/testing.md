@@ -42,17 +42,22 @@ Live-testen afhænger ikke af private profiler eller fantasyhold og antager ikke
 | Spillere | Formater, enheder, filtre, watchlist-identitet, 2–5 sammenligninger og round-aware diffing |
 | Hold | Kontoopdagelse, roster, historik, rang, gruppeplacering og ændringer |
 | Transfer | Fire regelprofiler, gebyr, kontrakter, formation, klubgrænser, kaptajnregler og `final`/`preliminary`/`unverified` |
+| Beslutningsanalyse | Formhuller, stabilitet, nul/negativ vækst, kaptajnmismatch, 0/0,5/1 % rente og gebyr, afrunding, transferhuller, kontrafaktisk sum og bankhitrater |
+| Idealhold og model | Brute-force-paritet, tie-break, infeasible, timeout/bound, cirka 400 kandidater, deterministisk seed, fælles-spiller-annullering, intervaller, dækning og walk-forward-backtest |
+| Gruppe og alarmer | Ledersammenligning, eksponeringsnævnere, manglende hold, alarmtransitioner, deduplikering, læst/afvist og separat spillerfallback |
 | Historik | Huller, seneste snapshot pr. runde og omvendte rangakser på spil-, gruppe- og holdniveau |
 | Managers og sæsoner | Identitetsgraf, stabilt ID ved merge/rename/unmerge, legacy-remapping uden writes, bedste hold, locale- og puljeisoleret Elo, awards, streaks, historier, H2H-aggregater, sæsonredigering og pointprofil |
 | Eventledger og kalender | Revisioner, legacy-events, manglende metadata, cache-only events og nul navigation-writes |
-| Lagring og backup | AppData, atomiske writes, skemaer, SHA-256, path traversal, preview, staging og rollback |
+| Lagring og backup | AppData, atomiske writes, HubSettings 1/2 → 3 og GameMetadata 1 → 2 uden startup-write, alarmindbakke, SHA-256, path traversal, preview, staging og rollback |
 | Turnering | Liga, Swiss, gruppespil + knockout, double elimination, fuld Swiss-afslutning, custom byepoint, Buchholz, seedning, tie-breakers, bronzekamp, kontekstvalidering og konflikter for frosne parringer |
-| Dashboard | Managers-navigation, identiteter, sammenligning, sæsonbygger, kalender, historier, turneringsguide, deeplinks og nul netværk/writes |
+| Dashboard | Managers-navigation, Analyse-paneler, spilfiltrerede alarmfaner og badges, spiller- og kompatibilitetsruter, noter/tags, standardhold, filterprofiler, opt-in, historier, turneringsguide, deeplinks og nul netværk/writes |
 | Dokumentation og API | Links, Mermaid-hegn, kommandoer, AppData-stier, `holdet_lib.__all__` og evaluerbare type hints |
 
 ## Streamlit AppTest
 
-AppTest åbner hovedroutes og query-parametre uden en virkelig server. Tests beviser blandt andet, at sidebaren har Managers og Kalender, at legacy Hall of Fame-routen viderestiller, og at Data og lager indeholder Datastatus og Backup og gendannelse. Manager-, kalender- og almindelig navigation samt transfersimulation må hverken kalde netværk eller skrive persistent data.
+AppTest åbner hovedroutes og query-parametre uden en virkelig server. Tests beviser blandt andet, at Statusalarmer ikke er en global sidebardestination, at hvert managerspil har en spilfiltreret alarmfane med unread-badges, at legacy Hall of Fame-routen viderestiller, og at Data og lager indeholder Datastatus og Backup og gendannelse. Analyse-, spiller-, alarm-, manager-, kalender- og almindelig navigation samt transfersimulation må hverken kalde netværk eller skrive persistent data.
+
+Manuel browser-QA køres ved 375, 768, 1280 og 1920 px, ved 200 % tekstzoom, med tastaturnavigation og reduceret bevægelse. Lange danske tekster og store tabeller kontrolleres, og konsollen må ikke indeholde empty-chart- eller Vega-advarsler.
 
 ## Fixtures og privatliv
 

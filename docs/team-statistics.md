@@ -19,6 +19,8 @@ Efter valg af hold og runde vises:
 - **Ændringer** – rang, værdi, point og relevante trupændringer mod foregående tilgængelige runde.
 - **Eksport** – komplet snapshot eller valgt runde i TXT, JSON og Markdown.
 
+Managerspillets separate **Analyse → Beslutninger** bruger samme cache til faktisk kaptajnbonus, verificerede alternative kaptajnscenarier, bankens rente/break-even, transferregnskab, **hvis jeg ikke havde handlet** samt bedste og værste transfer. Et standardhold gemmes pr. spil; analysevælgeren kan midlertidigt skifte hold uden at ændre standarden.
+
 Ranggrafer vender aksen, så førsteplads står øverst. Manglende runder vises som huller. Grupperang beregnes kun, når gruppens sammenlignelige snapshots findes.
 
 ## Transferlaboratorium
@@ -35,6 +37,8 @@ Bank beregnes som startsaldo plus salg minus køb minus gebyr. Gebyret rundes op
 | Golf Manager | 15 spillere; 3 i hver af 5 kategorier | Intet budget eller gebyr; basis 0/guld 50; fri i runde 1 |
 
 Deaktiverede eller inaktive spillere kan ikke købes. Skader og karantæner giver advarsler. Ukendte fremtidige formater kan undersøges, men får ikke en falsk godkendelse.
+
+Disse legacy-formatprofiler er fortsat bagudkompatible i Transferlaboratoriet. Beslutningscenteret aktiverer derimod kun regelafhængige resultater fra en præcis, auditeret `GameRuleProfile` for det konkrete spil og den konkrete sæson. Et formatmatch alene tæller ikke som verificeret.
 
 ### Regelgyldighed og datasikkerhed
 
@@ -60,3 +64,5 @@ Holdets Ændringer vælger det seneste snapshot, der dækker den valgte runde, o
 ```
 
 Se [Klienter](clients.md) for CLI-eksempler.
+
+Formler og begrænsninger er beskrevet i [Analyse- og beslutningscenter](decision-analysis.md).

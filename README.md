@@ -11,12 +11,14 @@ Holdet Fantasy Hub er et uofficielt, lokalt Windows-værktøj til offentlige fan
 ## Funktioner
 
 - Rundecenter med deadline, datastatus, rangbevægelser, runde-awards og en deterministisk Rundens historie.
-- Spiller- og holdstatistik, watchlist, sammenligning, historik, ændringer, transferlaboratorium og eksport.
+- Spiller- og holdstatistik, watchlist, noter/tags, gemte filtre, spillerdetaljer, sammenligning, historik, ændringer, transferlaboratorium og eksport.
+- Cachebaseret analyse- og beslutningscenter med form, stabilitet, kaptajn, bank, transferregnskab, gruppeswing, eksponering og regelverificeret idealhold.
+- Opt-in-modeller for fixturecache og Monte Carlo, tydeligt mærket som eksperimentelle og aldrig som facit.
 - Managerprofiler på tværs af spil og hold, Elo-rating, medaljer, rekorder, streaks og H2H.
 - Manuelt sammensatte sæsoner, som genbruger den globale redigerbare pointprofil.
 - Liga, schweizersystem, gruppespil + knockout og double elimination med frosne seeds og publicerede parringer.
 - Global cache-only kalender og validerede officielle Holdet-links.
-- Datastatus samt valideret ZIP-backup og rollback-sikker gendannelse.
+- Datastatus, spilafgrænsede statusalarmer samt valideret ZIP-backup og rollback-sikker gendannelse.
 
 ## Kom hurtigt i gang
 
@@ -34,7 +36,7 @@ py -3.14 -m streamlit run .\website\app.py
 
 ## Navigation
 
-Sidebaren indeholder **Mine managerspil**, statistikvisninger, aktive og arkiverede managerspil, **Managers**, **Kalender** og **Data og lager**. Den gamle route `?view=hall-of-fame` viderestiller til Managers.
+Sidebaren indeholder **Mine managerspil**, statistikvisninger, aktive og arkiverede managerspil, **Managers**, **Kalender** og **Data og lager**. Ulæste statusalarmer vises ved det relevante managerspil og i managerspillets egen **Statusalarmer**-fane. Den gamle route `?view=hall-of-fame` viderestiller til Managers.
 
 Managers har fanerne Rangliste, Medaljer og rekorder, Sammenlign, Sæsoner og Identiteter. Kalenderen kan filtreres på managerspil og gruppe eller turnering. Gruppe-, hold- og managerkort viser officielle links, når de findes i cache eller konfiguration.
 
@@ -50,11 +52,12 @@ Managers har fanerne Rangliste, Medaljer og rekorder, Sammenlign, Sæsoner og Id
 | AppData, skemaer og backup | [Datalagring](docs/data-storage.md) |
 | Spillerstatistik | [Spillerstatistik](docs/player-statistics.md) |
 | Holdstatistik | [Holdstatistik](docs/team-statistics.md) |
+| Analyse, formler, provenance og modelgates | [Analyse- og beslutningscenter](docs/decision-analysis.md) |
 | Teststrategi og acceptkommandoer | [Tests](docs/testing.md) |
 
 ## Lokal data og privatliv
 
-Personlige konti, profiler, grupper, sæsoner, snapshots, metadata, manager-events, backups og eksporter ligger uden for repositoryet under `%APPDATA%\Holdet Fantasy Hub` og `%LOCALAPPDATA%\Holdet Fantasy Hub`. Mapper oprettes først ved en eksplicit skrivehandling.
+Personlige konti, profiler, grupper, sæsoner, noter, filtre, alarmer, snapshots, metadata, manager-events, backups og eksporter ligger uden for repositoryet under `%APPDATA%\Holdet Fantasy Hub` og `%LOCALAPPDATA%\Holdet Fantasy Hub`. Mapper oprettes først ved en eksplicit skrivehandling.
 
 Repositoryet må ikke indeholde virkelige profil-ID'er, fantasy-team-ID'er eller personlige holdnavne. Dokumentation og tests bruger fiktive identiteter.
 

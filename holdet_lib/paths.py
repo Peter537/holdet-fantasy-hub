@@ -20,6 +20,7 @@ class AppPaths:
     accounts_file: Path
     groups_file: Path
     hub_settings_file: Path
+    analysis_inbox_file: Path
     seasons_file: Path
     data_dir: Path
     snapshot_dir: Path
@@ -27,6 +28,7 @@ class AppPaths:
     group_revision_dir: Path
     tournament_pairing_dir: Path
     game_metadata_dir: Path
+    fixture_dir: Path
     hall_of_fame_dir: Path
     export_dir: Path
     player_export_dir: Path
@@ -125,6 +127,7 @@ def resolve_paths(
         groups_file=config_dir / "groups.json",
         data_dir=data_dir,
         hub_settings_file=config_dir / "hub-settings.json",
+        analysis_inbox_file=config_dir / "analysis-inbox.json",
         seasons_file=config_dir / "seasons.json",
         snapshot_dir=data_dir / "snapshots",
         manifest_dir=data_dir / "manifests",
@@ -132,6 +135,7 @@ def resolve_paths(
         tournament_pairing_dir=data_dir / "tournament-pairings",
         export_dir=export_dir,
         game_metadata_dir=data_dir / "game-metadata",
+        fixture_dir=data_dir / "fixtures",
         hall_of_fame_dir=data_dir / "hall-of-fame",
         player_export_dir=export_dir / "players",
         team_export_dir=export_dir / "teams",

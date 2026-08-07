@@ -14,6 +14,7 @@ flowchart TB
         Fetch["HoldetClient og parsere"]
         Domain["Frosne dataclasses"]
         Manager["Manager-, sæson- og kalenderbuilders"]
+        Analysis["Beslutningsanalyse, regler og modeller"]
         Tournament["Generisk turneringsmotor"]
         Stores["Versionsstyrede stores og backup"]
     end
@@ -21,6 +22,7 @@ flowchart TB
     Cli --> Fetch
     Fetch --> Domain
     Domain --> Manager
+    Domain --> Analysis
     Domain --> Tournament
     Web --> Stores
     Cli --> Stores
@@ -28,7 +30,7 @@ flowchart TB
     Fetch --> Holdet["Offentlige Holdet.dk-endpoints"]
 ```
 
-Afhængigheden går ind mod biblioteket. `holdet_lib` importerer ikke Streamlit. Navigation, Elo, H2H, historier, sæsonstillinger og kalender kan derfor beregnes uden netværk og uden vedvarende writes.
+Afhængigheden går ind mod biblioteket. `holdet_lib` importerer ikke Streamlit. Navigation, Elo, H2H, historier, sæsonstillinger, kalender og beslutningsanalyse kan derfor beregnes uden netværk og uden vedvarende writes.
 
 ## Lag og ansvar
 
@@ -38,6 +40,7 @@ Afhængigheden går ind mod biblioteket. `holdet_lib` importerer ikke Streamlit.
 
 - URL-normalisering, HTTP-klient, Flight-/JSON-parsere og Holdet-modeller;
 - snapshot-, metadata-, diff-, historik- og transferberegninger;
+- sæsonbundne `GameRuleProfile`-kontrakter, statusalarmer, spiller-/hold-/gruppeanalyse, idealhold og Monte Carlo;
 - managerprofiler, eventrevisioner, Elo, karrierestatistik, awards, historier og H2H;
 - sæsondefinitioner og pointprofilbaserede sæsonstillinger;
 - liga-, Swiss-, gruppe+knockout- og double-elimination-definitioner;
@@ -47,7 +50,7 @@ Rene builders skriver ikke filer. Stores skriver kun efter eksplicitte handlinge
 
 ### Streamlit
 
-`website/app.py` ejer routing, eksplicitte fetch-/save-handlinger og visning. `website/hub_pages.py` ejer Managers, Kalender, Rundens historie og relaterede paneler. Query-parametre og navngivet session state fastholder kontekst. Almindelig navigation læser cache.
+`website/app.py` ejer routing og eksplicitte refresh-hooks. `website/hub_pages.py` ejer Managers, Kalender, Rundens historie og relaterede paneler. `website/analysis_pages.py` ejer Analyse-panelerne, spillerdetaljer og alarmindbakken. Query-parametre og navngivet session state fastholder kontekst. Almindelig navigation læser cache.
 
 ### CLI
 
@@ -95,12 +98,14 @@ Seeds fryses ved oprettelse. Schema 8 bruger fortsat `TournamentConfig` som runt
 ## Dataejerskab
 
 - `SnapshotIndex` er læseindekset for uforanderlige snapshots.
-- `HubSettings` schema 2 ejer watchlist, `ManagerProfile` og den globale pointprofil.
+- `HubSettings` schema 3 ejer watchlist, `ManagerProfile`, spillerannotationer, gemte filterprofiler, standardhold, eksperimentelt opt-in og den globale pointprofil.
+- `analysis-inbox.json` schema 1 ejer deduplikerede statusalarmer og deres læst-/afvisttilstand.
 - `groups.json` schema 8 ejer managerspil, grupper, officielle links og `TournamentDefinition`.
 - `seasons.json` schema 1 ejer manuelle sæsondefinitioner.
 - pairing-store schema 1 ejer publicerede parringer pr. turneringsrevision.
 - eventledger schema 2 ejer rå managerresultater og revisioner.
-- `GameMetadata` ejer schedule og deadlines, som kalenderen læser uden fetch.
+- `GameMetadata` schema 2 ejer schedule, deadlines og en fail-closed sæsonregelprojektion, som kalender og analyser læser uden fetch.
+- Fixturecache schema 1 ejer kun offentligt verificerede, parsertestede kampe; difficulty kræver særskilt feltdokumentation.
 
 Se [Datalagring](data-storage.md) for konkrete stier og kompatibilitetsregler.
 
@@ -117,6 +122,9 @@ Se [Datalagring](data-storage.md) for konkrete stier og kompatibilitetsregler.
 | Pairings | `TournamentPairing`, `TournamentPairingRevision`, `TournamentPairingStore`, `validate_tournament_pairing_revision`, `build_swiss_pairing_conflicts` |
 | Historik | `compare_snapshots`, `compare_round_snapshots`, `build_history_series` |
 | Transfer | `TransferScenario`, `simulate_transfers` |
+| Beslutningsanalyse | `GameRuleProfile`, `AnalysisProvenance`, `build_player_decision_analysis`, `build_team_decision_ledger`, `build_group_comparison`, `build_group_exposure` |
+| Idealhold og model | `optimize_ideal_team`, `simulate_transfer_scenario` |
+| Alarmer og fixtures | `AnalysisInboxStore`, `build_watchlist_alerts`, `FixtureRecord`, `FixtureStore`, `parse_fixture_records` |
 | Datastatus | `DataQualityReport`, `build_data_quality_report` |
 | Backup | `create_backup`, `validate_backup`, `restore_backup` |
 
@@ -130,3 +138,5 @@ Legacy-navnene `HallOfFameEvent`, `create_tournament_config` og `build_tournamen
 4. Nye stores er additive; manglende filer er tomme, og startup omskriver ikke ældre data.
 5. Stable ID'er er sidste deterministiske fallback i builders.
 6. Produktversion `0.1.0` og lokale schema-versioner udvikles uafhængigt.
+
+Se [Analyse- og beslutningscenter](decision-analysis.md) for formelkontrakter, provenance, modelgates og evidensmatrix.

@@ -7,6 +7,7 @@ Mutable, personlige og voksende data ligger i Windows AppData og ikke i reposito
 ```text
 %APPDATA%\Holdet Fantasy Hub\config\
 ├── accounts.json
+├── analysis-inbox.json
 ├── groups.json
 ├── hub-settings.json
 └── seasons.json
@@ -16,6 +17,7 @@ Mutable, personlige og voksende data ligger i Windows AppData og ikke i reposito
 │   ├── snapshots\
 │   ├── manifests\
 │   ├── group-revisions\
+│   ├── fixtures\
 │   ├── game-metadata\
 │   ├── hall-of-fame\
 │   └── tournament-pairings\
@@ -32,13 +34,15 @@ Der findes ikke implicitte `cache`- eller `logs`-mapper i `AppPaths`.
 | Placering | Indhold |
 | --- | --- |
 | `config/accounts.json` | Offentlige profiler til eksplicit kontoopdagelse |
+| `config/analysis-inbox.json` | Deduplikerede watchlist-statusalarmer med læst- og afvisttidspunkt |
 | `config/groups.json` | Managerspil, grupper, officielle links og turneringsdefinitioner |
-| `config/hub-settings.json` | Watchlists, managerprofiler og global Hall of Fame-pointprofil |
+| `config/hub-settings.json` | Watchlists, managerprofiler, spillerannotationer, filterprofiler, standardhold, model-opt-in og global Hall of Fame-pointprofil |
 | `config/seasons.json` | Manuelle sæsondefinitioner og arkivstatus |
 | `data/snapshots` | Komplette kanoniske spiller- og teamsnapshots |
 | `data/manifests` | Resultater fra eksplicitte gruppe- og managerspilopdateringer |
 | `data/group-revisions` | Uforanderlige arkiverede turneringsrevisioner |
 | `data/game-metadata` | Schedule, deadlines, format og hentetid pr. spil |
+| `data/fixtures` | Eksplicit cachede, offentligt verificerede fixtures og kildeprovenance |
 | `data/hall-of-fame` | Append-only manager-events og legacy Hall of Fame-events |
 | `data/tournament-pairings` | Publicerede fixtures/parringer pr. turneringsrevision |
 | `exports/players` / `exports/teams` | Afledte TXT-, JSON- og Markdown-dokumenter |
@@ -62,7 +66,9 @@ En manglende `accounts.json` er en tom konfiguration. Konti vedligeholdes under 
 }
 ```
 
-`hub-settings.json` schema 2 opdateres atomisk. Watchlistposter identificerer spil og `entry_id` med legacy-fallback. `ManagerProfile` samler identitetsnøgler, manuel linkproveniens og profil-URL'er, mens pointprofilen er adskilt fra manager-eventledgeren. Schema 1-aliaser migreres kun i hukommelsen, indtil en eksplicit save.
+`hub-settings.json` schema 3 opdateres atomisk. Watchlistposter identificerer spil og `entry_id` med legacy-fallback. `ManagerProfile` samler identitetsnøgler, manuel linkproveniens og profil-URL'er, mens pointprofilen er adskilt fra manager-eventledgeren. Schema 1 og 2 migreres kun i hukommelsen, indtil en eksplicit save.
+
+Spillerannotationer har højst 2.000 tegn og 12 normaliserede tags á 24 tegn. Gemte filterprofilnavne er unikke pr. spil og indeholder en versioneret `PlayerStatisticsQuery`. `analysis-inbox.json` schema 1 er et separat atomisk store, så alarmtilstand ikke blandes med brugerindstillinger.
 
 ## Filnavne og uforanderlighed
 
@@ -80,18 +86,19 @@ team-round<round>_<MMDD>_<HHmmss>[_N].<format>
 Produktversion `0.1.0` er uafhængig af lokale dataformater. Aktuelle formater er:
 
 - gruppekonfiguration schema 8;
-- `hub-settings.json` schema 2;
+- `hub-settings.json` schema 3 og `analysis-inbox.json` schema 1;
 - manager-eventledger schema 2;
 - teamsnapshot schema 2 og spillersnapshot schema 3;
 - `seasons.json` schema 1;
 - turneringsparringer schema 1;
-- filer under `data/game-metadata`, refresh-manifester, turneringsrevisioner og `backup-manifest.json` schema 1.
+- `GameMetadata` schema 2 og fixturecache schema 1;
+- refresh-manifester, turneringsrevisioner og `backup-manifest.json` schema 1.
 
 Ældre kompatible snapshots indlæses uden omskrivning. Manglende rundestatus bliver `unknown` og giver foreløbige beregninger, indtil en manuel genhentning bekræfter `complete`. Defekte eller inkompatible snapshots ignoreres med en synlig advarsel.
 
 ## Backup og gendannelse
 
-**Data og lager → Backup og gendannelse** opretter én ZIP med konfiguration, sæsoner, snapshots, manifester, turneringsrevisioner, publicerede parringer, spilmetadata og manager-eventledger. Afledte spiller-/teameksporter og gamle backups medtages ikke.
+**Data og lager → Backup og gendannelse** opretter én ZIP med konfiguration, alarmindbakke, sæsoner, snapshots, manifester, turneringsrevisioner, publicerede parringer, spilmetadata, fixturecache og manager-eventledger. Afledte spiller-/teameksporter og gamle backups medtages ikke.
 
 `backup-manifest.json` indeholder schema-version, tidspunkt, filstørrelser og SHA-256 for hver fil. Før restore vises en preview, og hele arkivet valideres. Restore afvises ved:
 

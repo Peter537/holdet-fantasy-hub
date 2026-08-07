@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from dataclasses import replace
 import json
 from pathlib import Path
 import shutil
@@ -174,6 +175,94 @@ class ManagerGameStorageTests(unittest.TestCase):
 
 
 class GameRefreshTests(unittest.TestCase):
+    def test_manager_refresh_fetches_players_once_and_creates_watchlist_alerts(self) -> None:
+        team = sample_team(1, name="Analyseret")
+        game = holdet.ManagerGame(team.reference.game, "Spil")
+        member = holdet.GroupTeam(1, team.team_name, team.reference.source_url)
+        group = holdet.GroupDefinition("group", "Liga", game.game, (member,))
+        healthy = holdet.PlayerEntry(
+            1,
+            "Spiller",
+            "Klub",
+            "Rytter",
+            1_000_000,
+            entry_id=1,
+            round_growth=10,
+        )
+        injured = replace(healthy, is_injured=True)
+
+        def statistics(entry, round_number):
+            return holdet.ScrapedGame(
+                game.game,
+                team.variant,
+                round_number,
+                (entry,),
+                format=team.variant,
+                unit="money",
+                round_status="complete",
+            )
+
+        calls = {"players": 0, "teams": 0}
+
+        class Client:
+            def fetch_players(self, selected_game):
+                self.assert_game = selected_game
+                calls["players"] += 1
+                return statistics(injured, 2)
+
+            def fetch_team(self, reference):
+                calls["teams"] += 1
+                return team
+
+        with TemporaryDirectory() as root:
+            player_store = holdet.PlayerStatisticsStore(root / "snapshots")
+            player_store.save(statistics(healthy, 1))
+            settings = holdet.HubSettings(
+                watchlist=(holdet.watchlist_entry(game.game, healthy),)
+            )
+            inbox = holdet.AnalysisInboxStore(root / "analysis-inbox.json")
+            result = holdet.refresh_manager_game(
+                game,
+                (group,),
+                Client(),
+                holdet.SnapshotStore(root / "snapshots"),
+                player_store,
+                holdet.ManifestStore(root / "manifests"),
+                settings=settings,
+                inbox_store=inbox,
+            )
+            self.assertEqual(calls, {"players": 1, "teams": 1})
+            self.assertIsNotNone(result.player)
+            self.assertEqual(result.player.alert_count, 1)
+            self.assertEqual(inbox.load()[0].kind, "injured")
+
+    def test_manager_refresh_reports_player_failure_separately_from_team_success(self) -> None:
+        team = sample_team(1, name="Cache")
+        game = holdet.ManagerGame(team.reference.game, "Spil")
+        member = holdet.GroupTeam(1, team.team_name, team.reference.source_url)
+        group = holdet.GroupDefinition("group", "Liga", game.game, (member,))
+
+        class Client:
+            def fetch_players(self, _game):
+                raise holdet.FetchError("spillerlisten er offline")
+
+            def fetch_team(self, _reference):
+                return team
+
+        with TemporaryDirectory() as root:
+            result = holdet.refresh_manager_game(
+                game,
+                (group,),
+                Client(),
+                holdet.SnapshotStore(root / "snapshots"),
+                holdet.PlayerStatisticsStore(root / "snapshots"),
+                holdet.ManifestStore(root / "manifests"),
+            )
+            self.assertEqual(result.teams[0].status, "success")
+            self.assertIsNotNone(result.player)
+            self.assertEqual(result.player.status, "failed")
+            self.assertIn("offline", result.player.error)
+
     def test_deduplicates_active_teams_and_writes_game_manifest(self) -> None:
         first = sample_team(1, name="Fælles")
         second = sample_team(2, name="Andet")

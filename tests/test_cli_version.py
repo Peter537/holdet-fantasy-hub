@@ -19,6 +19,7 @@ class VersionAndDispatchTests(unittest.TestCase):
             "clients.md",
             "data-retrieval.md",
             "data-storage.md",
+            "decision-analysis.md",
             "groups-and-tournaments.md",
             "managers-and-seasons.md",
             "player-statistics.md",

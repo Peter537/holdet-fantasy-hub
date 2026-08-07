@@ -6,7 +6,7 @@ Dashboardets hierarki er `Managerspil → Gruppe → Hold`. Et managerspil kan h
 
 Et managerspil identificeres af locale og slug og har et redigerbart navn. Det kan oprettes uden netværk. **Hent spilinfo** gemmer senere officielt navn, schedule, deadlines og autoritativ finalerunde, men overskriver ikke automatisk brugerens navn.
 
-Rundecenter er managerspillets første fane. De øvrige er Grupper, Spillerstatistik, Holdstatistik, Historik, Administration og Indstillinger. Managerspillets Historik sammenligner holdtrends og kan filtreres til en gruppe. Arkivering flytter eller sletter ikke grupper, snapshots, manifester, metadata eller Hall of Fame-resultater.
+Rundecenter er managerspillets første fane. De øvrige er Grupper, Spillerstatistik, Holdstatistik, Historik, Analyse, Administration og Indstillinger. Managerspillets Historik sammenligner holdtrends og kan filtreres til en gruppe. Analyse er lazy-loadet via query-parameter og beregner kun det valgte panel. Arkivering flytter eller sletter ikke grupper, snapshots, manifester, metadata eller Hall of Fame-resultater.
 
 ## Almindelige grupper
 
@@ -18,6 +18,8 @@ Stillingen viser `Rang · Manager · Hold · Værdi · Vækst · Afstand`:
 - **Runde** rangerer efter rundens ændring; afstand er forskellen til rundelederen.
 
 Competition ranking bruges ved ties, og holdnavn er den deterministiske sekundære sortering.
+
+**Analyse → Gruppe** finder gruppeføreren fra den eksisterende stilling i valgt runde og viser fælles spillere, hver sides unikke spillere, afsluttet faktisk swing og en tydeligt mærket formbaseret proxy. Eksponering er antal ejere divideret med hold med dækkende rundesnapshot; UI viser altid dækkede hold, total gruppestørrelse og manglende hold. Der foretages ingen automatisk hentning af opstillinger.
 
 ## Turneringsformater
 
@@ -74,4 +76,6 @@ Grupper kan gemme en manuel `official_url` med typen `group` eller `minileague`.
 
 ## Opdatering
 
-**Opdater managerspil** deduplikerer hold på tværs af grupper. **Opdater turnering** henter alle deltagere, også eliminerede og afsluttede, så rettelser kan genberegnes. Begge handlinger følger rækkefølgen hent data, publicér højst næste Swiss-runde, genopbyg state og frys komplette events for det aktuelle managerspil. Resultatet gemmes som snapshots og et uforanderligt manifest; delvise fejl bruger seneste gyldige cache, når den findes.
+**Opdater managerspil** henter den seneste spillerliste én gang og deduplikerer hold på tværs af grupper. Spiller- og holdfejl rapporteres separat. **Opdater turnering** henter alle deltagere, også eliminerede og afsluttede, så rettelser kan genberegnes. Begge handlinger følger rækkefølgen hent data, publicér højst næste Swiss-runde, genopbyg state og frys komplette events for det aktuelle managerspil. Resultatet gemmes som snapshots og et uforanderligt manifest; delvise fejl bruger seneste gyldige cache, når den findes.
+
+Se [Analyse- og beslutningscenter](decision-analysis.md) for swing-, eksponerings- og provenancekontrakter.

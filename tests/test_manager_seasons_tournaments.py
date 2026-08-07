@@ -94,7 +94,7 @@ class ManagerIdentityAndRatingTests(unittest.TestCase):
             self.assertEqual(profiles[0].manager_id, "manager-one")
             store.set_manager_profiles(settings, profiles)
             saved = json.loads(path.read_text())
-            self.assertEqual(saved["schema_version"], 2)
+            self.assertEqual(saved["schema_version"], 3)
             self.assertEqual(saved["manager_aliases"], [])
 
     def test_best_team_and_overlap_are_deduplicated(self):

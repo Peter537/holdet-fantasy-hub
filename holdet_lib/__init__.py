@@ -78,9 +78,11 @@ from .standings import StandingRow, build_standings
 from .refresh import (
     GameRefreshResult,
     GroupRefreshResult,
+    PlayerRefresh,
     TeamRefresh,
     refresh_game,
     refresh_group,
+    refresh_manager_game,
 )
 from .tournament import (
     STAGE_NAMES,
@@ -140,6 +142,7 @@ from .player_exports import (
     player_export_to_markdown,
     player_export_to_txt,
     player_query_to_dict,
+    player_query_from_dict,
     player_row,
     serialize_player_export,
 )
@@ -217,6 +220,14 @@ from .game_metadata import (
     GameMetadataStore,
     game_metadata_from_context,
 )
+from .fixtures import (
+    FIXTURE_CACHE_SCHEMA_VERSION,
+    FixtureRecord,
+    FixtureSnapshot,
+    FixtureSourceProfile,
+    FixtureStore,
+    parse_fixture_records,
+)
 from .hall_of_fame import (
     HALL_OF_FAME_EVENT_SCHEMA_VERSION,
     HallOfFame,
@@ -229,18 +240,59 @@ from .hall_of_fame import (
     remap_manager_events,
 )
 from .hub_settings import (
+    DEFAULT_PLAYER_TAGS,
     HUB_SETTINGS_SCHEMA_VERSION,
     HallOfFameScoreProfile,
     HubSettings,
     HubSettingsStore,
     ManagerAlias,
     ManagerProfile,
+    OwnTeamSelection,
+    PlayerAnnotation,
+    SavedPlayerFilter,
     WatchlistEntry,
     build_effective_manager_settings,
     manager_identity_keys,
     player_identity,
     resolve_manager_identity,
     watchlist_entry,
+)
+from .rules import (
+    AUDITED_RULE_PROFILES,
+    AnalysisCertainty,
+    AnalysisProvenance,
+    GameRuleProfile,
+    game_rule_from_dict,
+    game_rule_to_dict,
+    rule_profile_for_game,
+)
+from .analysis_inbox import (
+    ANALYSIS_INBOX_SCHEMA_VERSION,
+    AnalysisInboxStore,
+    WatchlistAlert,
+    build_watchlist_alerts,
+    select_alert_baseline,
+)
+from .decision_analysis import (
+    BankAnalysis,
+    CaptainAlternative,
+    CaptainAnalysis,
+    ExposureRow,
+    GroupComparison,
+    GroupExposure,
+    IdealTeamResult,
+    PlayerDecisionAnalysis,
+    SimulationResult,
+    TeamDecisionLedger,
+    TransferDecision,
+    build_bank_analysis,
+    build_captain_analysis,
+    build_group_comparison,
+    build_group_exposure,
+    build_player_decision_analysis,
+    build_team_decision_ledger,
+    optimize_ideal_team,
+    simulate_transfer_scenario,
 )
 from .transfers import (
     CYCLING_RULES,
@@ -333,10 +385,13 @@ __all__ = [
     "create_tournament_config", "filter_player_statistics", "normalize_game_url",
     "normalize_manager_game", "player_statistics_from_dict",
     "player_statistics_to_dict", "player_statistics_to_json", "refresh_game",
-    "refresh_group", "resolve_paths", "serialize_player_export",
+    "refresh_group", "refresh_manager_game", "resolve_paths", "serialize_player_export",
     "BackupManifest", "BackupManifestEntry", "BackupValidation",
     "RestoreResult", "DataQualityReport", "DataQualityRound", "HistoryPoint",
     "PlayerHistoryPoint", "PlayerSnapshotChange", "SnapshotDiff",
+    "PlayerRefresh",
+    "FIXTURE_CACHE_SCHEMA_VERSION", "FixtureRecord", "FixtureSnapshot",
+    "FixtureSourceProfile", "FixtureStore",
     "TeamRankChange", "TeamSnapshotDiff", "GameMetadata", "GameMetadataStore",
     "HubSettings", "HubSettingsStore", "ManagerAlias", "WatchlistEntry",
     "HallOfFame", "HallOfFameEvent", "HallOfFamePlacement", "HallOfFameRow",
@@ -378,3 +433,20 @@ __all__ += [
     "validate_tournament_pairing_revision",
 ]
 __all__ += ["validate_official_group_url"]
+__all__ += [
+    "ANALYSIS_INBOX_SCHEMA_VERSION", "AUDITED_RULE_PROFILES",
+    "AnalysisCertainty", "AnalysisInboxStore", "AnalysisProvenance",
+    "BankAnalysis", "CaptainAlternative", "CaptainAnalysis",
+    "DEFAULT_PLAYER_TAGS", "ExposureRow", "GameRuleProfile",
+    "GroupComparison", "GroupExposure", "IdealTeamResult",
+    "OwnTeamSelection", "PlayerAnnotation", "PlayerDecisionAnalysis",
+    "SavedPlayerFilter", "SimulationResult", "TeamDecisionLedger",
+    "TransferDecision", "WatchlistAlert", "build_bank_analysis",
+    "build_captain_analysis", "build_group_comparison",
+    "build_group_exposure", "build_player_decision_analysis",
+    "build_team_decision_ledger", "build_watchlist_alerts",
+    "game_rule_from_dict", "game_rule_to_dict", "optimize_ideal_team",
+    "parse_fixture_records", "player_query_from_dict", "rule_profile_for_game",
+    "select_alert_baseline",
+    "simulate_transfer_scenario",
+]

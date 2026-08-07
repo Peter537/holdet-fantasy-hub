@@ -19,7 +19,7 @@ Destinationerne står i denne rækkefølge:
 1. **Mine managerspil** – kun managerspilskort og overordnede handlinger; Rundecenter vises ikke her.
 2. **Tilføj managerspil**.
 3. **Spillerstatistik** og **Holdstatistik** – selvstændige paneler med én nødvendig managerspilvælger.
-4. Aktive managerspil med deres grupper.
+4. Aktive managerspil med deres grupper. Et spilnavn viser antal ulæste statusalarmer, når tallet er større end nul.
 5. **Arkiverede managerspil**.
 6. **Managers** – Rangliste, Medaljer og rekorder, Sammenlign, Sæsoner og Identiteter.
 7. **Kalender** – cachebaserede fantasyopgør og manglende tidspunkter.
@@ -33,19 +33,23 @@ Managers viser Hall of Fame-point og Elo side om side. Identiteter kan samles og
 
 ### Managerspil og kontekst
 
-Et managerspil åbner på **Rundecenter** og har syv lazy-loadede faner:
+Et managerspil åbner på **Rundecenter** og har ni lazy-loadede faner:
 
 - Rundecenter
 - Grupper
 - Spillerstatistik
+- Statusalarmer
 - Holdstatistik
 - Historik
+- Analyse
 - Administration
 - Indstillinger
 
 Rundecenter viser aktiv runde, næste deadline, seneste spiller- og holddata, seneste manuelle refresh, manglende snapshots med holdnavne, skader, karantæner og væsentlige rangbevægelser. Links fører direkte til den relevante spiller-, hold-, gruppe- eller datavisning. Opdateringsknappen er eksplicit; oversigten foretager ikke selv netværkskald.
 
-Spillerstatistik genbruger managerspil og runde til Spillerliste, Sammenligning og watchlist samt Ændringer. Holdstatistik vælger hold og runde én gang og genbruger dem til Overblik, Holdopstilling, Transferlaboratorium, Historik, Ændringer og Eksport. En gruppe, som allerede har valgt spil eller hold, åbner de samme paneler uden overflødige vælgere.
+Analyse har query-parametret segmentvalg mellem Beslutninger, Gruppe, Idealhold og Eksperimentel. Kun det aktive segment beregnes. Standardhold gemmes pr. spil, mens et midlertidigt valg ikke ændrer standarden. Eksperimentelle fixtures og Monte Carlo kræver et gemt opt-in og viser en synlig modeladvarsel.
+
+Spillerstatistik genbruger managerspil og runde til Spillerliste, Sammenligning og watchlist samt Ændringer. **Statusalarmer** viser kun det aktuelle managerspils hændelser, antal watchlistspillere og en genvej til watchlist-editoren. Ulæste alarmer tælles både på fanen og ved managerspillets navn. Holdstatistik vælger hold og runde én gang og genbruger dem til Overblik, Holdopstilling, Transferlaboratorium, Historik, Ændringer og Eksport. En gruppe, som allerede har valgt spil eller hold, åbner de samme paneler uden overflødige vælgere.
 
 ### Deeplinks og session state
 
@@ -54,22 +58,26 @@ Query-parametrene kan kombineres:
 | Parameter | Betydning |
 | --- | --- |
 | `view` | Hoveddestination, eksempelvis et managerspil, `managers`, `calendar` eller Data og lager |
-| `section` | Managerspillets hovedfane |
+| `section` | Managerspillets hovedfane, herunder `alerts` for Statusalarmer |
+| `analysis` | Aktivt Analyse-panel: `decisions`, `group`, `ideal` eller `experimental` |
 | `panel` | Underfane i spiller-, hold-, gruppe- eller datavisningen |
 | `round` | Valgt runde |
 | `team` | Valgt hold |
 | `group` | Valgt gruppe |
-
+| `player` | Stabil spilleridentitet på den selvstændige spillerdetaljerute |
 | `manager` / `opponent` | De to managerprofiler i Sammenlign |
 | `season` | Valgt sæsonmesterskab |
 | `date` | Kalenderens valgte dato |
+
 Valg i Streamlit-state navngives efter spil, gruppe, hold og runde, så de ikke lækker mellem managerspil. Faner læses først, når de vises.
 
 ### Offline-first
 
-Navigation, faneskift, rundeskift, grafer, sammenligning, ændringsvisning og transfersimulation læser kun kompatible snapshots. Netværk bruges kun af tydeligt navngivne handlinger som **Hent**, **Find hold**, **Opdater** eller **Prøv igen**. Simuleringer lever i `st.session_state` og skriver hverken snapshots eller konfiguration.
+Navigation, faneskift, rundeskift, grafer, Analyse, spillerdetaljer, spilafgrænset alarmfiltrering, sammenligning, ændringsvisning og transfersimulation læser kun kompatible snapshots. Netværk bruges kun af tydeligt navngivne handlinger som **Hent**, **Find hold**, **Opdater** eller **Prøv igen**. Alarmer skriver kun ved **Markér som læst**, **Afvis** eller **Ryd afviste alarmer**. Simuleringer lever i `st.session_state`; kun eksplicit gem af noter, filtre, standardhold eller opt-in skriver konfiguration.
 
-Læs mere om [Spillerstatistik](player-statistics.md), [Holdstatistik](team-statistics.md), [Managers og sæsoner](managers-and-seasons.md), [Grupper og turneringer](groups-and-tournaments.md) og [Datalagring](data-storage.md).
+Den kanoniske alarmroute er `?view=game&locale=…&game=…&section=alerts`. `?view=alerts&locale=…&game=…` bevares som en skjult, spilfiltreret kompatibilitetsroute for watchlists fra den selvstændige Spillerstatistik. Hvis spillet er gemt som managerspil, viderestilles den til den kanoniske fane.
+
+Læs mere om [Spillerstatistik](player-statistics.md), [Holdstatistik](team-statistics.md), [Analyse- og beslutningscenter](decision-analysis.md), [Managers og sæsoner](managers-and-seasons.md), [Grupper og turneringer](groups-and-tournaments.md) og [Datalagring](data-storage.md).
 
 ### Sikker genstart
 

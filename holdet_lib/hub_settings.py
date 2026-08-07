@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
+from datetime import datetime
 import json
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
@@ -15,9 +16,15 @@ if TYPE_CHECKING:
 from .errors import PayloadError
 from .models import GameUrl, PlayerEntry
 from .persistence import replace_text_atomically
+from .player_exports import (
+    PlayerStatisticsQuery,
+    player_query_from_dict,
+    player_query_to_dict,
+)
 
 
-HUB_SETTINGS_SCHEMA_VERSION = 2
+HUB_SETTINGS_SCHEMA_VERSION = 3
+DEFAULT_PLAYER_TAGS = ("overvej", "undgå", "kaptajn", "langsigtet")
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,11 +89,69 @@ class ManagerProfile:
 
 
 @dataclass(frozen=True, slots=True)
+class PlayerAnnotation:
+    game_locale: str
+    game_slug: str
+    player_key: str
+    note: str = ""
+    tags: tuple[str, ...] = ()
+    updated_at: datetime | None = None
+
+    def __post_init__(self) -> None:
+        if len(self.note) > 2_000:
+            raise ValueError("En spillernote må højst være 2.000 tegn")
+        normalized = tuple(
+            dict.fromkeys(
+                " ".join(tag.casefold().split()) for tag in self.tags if tag.strip()
+            )
+        )
+        if len(normalized) > 12 or any(len(tag) > 24 for tag in normalized):
+            raise ValueError("Der må være højst 12 tags á 24 tegn")
+        object.__setattr__(self, "tags", normalized)
+
+
+@dataclass(frozen=True, slots=True)
+class SavedPlayerFilter:
+    filter_id: str
+    name: str
+    game_locale: str
+    game_slug: str
+    query: PlayerStatisticsQuery
+
+    def __post_init__(self) -> None:
+        name = " ".join(self.name.split())
+        if not self.filter_id.strip() or not name:
+            raise ValueError("Filterprofilen kræver id og navn")
+        if len(name) > 80:
+            raise ValueError("Filterprofilnavnet må højst være 80 tegn")
+        if not self.game_locale.strip() or not self.game_slug.strip():
+            raise ValueError("Filterprofilen kræver spilidentitet")
+        object.__setattr__(self, "name", name)
+
+
+@dataclass(frozen=True, slots=True)
+class OwnTeamSelection:
+    game_locale: str
+    game_slug: str
+    team_id: int
+
+    def __post_init__(self) -> None:
+        if not self.game_locale.strip() or not self.game_slug.strip():
+            raise ValueError("Standardholdet kræver spilidentitet")
+        if self.team_id < 1:
+            raise ValueError("Standardholdet kræver et positivt team-ID")
+
+
+@dataclass(frozen=True, slots=True)
 class HubSettings:
     watchlist: tuple[WatchlistEntry, ...] = ()
     manager_aliases: tuple[ManagerAlias, ...] = ()
     hall_of_fame_score: HallOfFameScoreProfile = HallOfFameScoreProfile()
     manager_profiles: tuple[ManagerProfile, ...] = ()
+    player_annotations: tuple[PlayerAnnotation, ...] = ()
+    saved_player_filters: tuple[SavedPlayerFilter, ...] = ()
+    own_teams: tuple[OwnTeamSelection, ...] = ()
+    experimental_games: tuple[tuple[str, str], ...] = ()
 
 
 def effective_manager_profiles(settings: HubSettings) -> tuple[ManagerProfile, ...]:
@@ -421,10 +486,7 @@ def _validate_manager_profiles(
 def _settings_from_dict(payload: object) -> HubSettings:
     root = _require_object(payload, "Hub-indstillinger")
     source_schema_version = root.get("schema_version")
-    if source_schema_version == 1:
-        root = dict(root)
-        root["schema_version"] = HUB_SETTINGS_SCHEMA_VERSION
-    if root.get("schema_version") != HUB_SETTINGS_SCHEMA_VERSION:
+    if source_schema_version not in {1, 2, HUB_SETTINGS_SCHEMA_VERSION}:
         raise PayloadError("ukendt skema for Hub-indstillinger")
     raw_watchlist = root.get("watchlist", [])
     raw_aliases = root.get("manager_aliases", [])
@@ -461,7 +523,7 @@ def _settings_from_dict(payload: object) -> HubSettings:
             )
         )
     profiles: list[ManagerProfile] = []
-    if source_schema_version == HUB_SETTINGS_SCHEMA_VERSION:
+    if source_schema_version in {2, HUB_SETTINGS_SCHEMA_VERSION}:
         raw_profiles = root.get("manager_profiles", [])
         if not isinstance(raw_profiles, list):
             raise PayloadError("manager_profiles skal være en liste")
@@ -493,11 +555,112 @@ def _settings_from_dict(payload: object) -> HubSettings:
                     tuple(dict.fromkeys(value.strip() for value in manual_keys)),
                 )
             )
+    annotations: list[PlayerAnnotation] = []
+    filters: list[SavedPlayerFilter] = []
+    own_teams: list[OwnTeamSelection] = []
+    experimental_games: list[tuple[str, str]] = []
+    if source_schema_version == HUB_SETTINGS_SCHEMA_VERSION:
+        raw_annotations = root.get("player_annotations", [])
+        raw_filters = root.get("saved_player_filters", [])
+        raw_teams = root.get("own_teams", [])
+        raw_experimental = root.get("experimental_games", [])
+        if not all(
+            isinstance(value, list)
+            for value in (
+                raw_annotations,
+                raw_filters,
+                raw_teams,
+                raw_experimental,
+            )
+        ):
+            raise PayloadError("Analyseindstillingerne skal være lister")
+        for index, raw in enumerate(raw_annotations):
+            item = _require_object(raw, f"player_annotations[{index}]")
+            tags = item.get("tags", [])
+            if not isinstance(tags, list) or not all(
+                isinstance(tag, str) for tag in tags
+            ):
+                raise PayloadError("Spillertags skal være tekst")
+            updated = item.get("updated_at")
+            try:
+                updated_at = (
+                    datetime.fromisoformat(updated)
+                    if isinstance(updated, str)
+                    else None
+                )
+                annotations.append(
+                    PlayerAnnotation(
+                        _require_text(
+                            item.get("game_locale"), "game_locale"
+                        ).casefold(),
+                        _require_text(item.get("game_slug"), "game_slug"),
+                        _require_text(item.get("player_key"), "player_key"),
+                        str(item.get("note", "")),
+                        tuple(tags),
+                        updated_at,
+                    )
+                )
+            except ValueError as exc:
+                raise PayloadError(f"Ugyldig spillernote: {exc}") from exc
+        for index, raw in enumerate(raw_filters):
+            item = _require_object(raw, f"saved_player_filters[{index}]")
+            try:
+                query = player_query_from_dict(item.get("query"))
+                saved_filter = SavedPlayerFilter(
+                    _require_text(item.get("filter_id"), "filter_id"),
+                    _require_text(item.get("name"), "name"),
+                    _require_text(
+                        item.get("game_locale"), "game_locale"
+                    ).casefold(),
+                    _require_text(item.get("game_slug"), "game_slug"),
+                    query,
+                )
+            except ValueError as exc:
+                raise PayloadError(
+                    f"Ugyldigt gemt spillerfilter: {exc}"
+                ) from exc
+            filters.append(saved_filter)
+        for index, raw in enumerate(raw_teams):
+            item = _require_object(raw, f"own_teams[{index}]")
+            team_id = _optional_integer(item.get("team_id"), "team_id")
+            if team_id is None or team_id < 1:
+                raise PayloadError("Eget hold skal have et positivt team_id")
+            own_teams.append(
+                OwnTeamSelection(
+                    _require_text(
+                        item.get("game_locale"), "game_locale"
+                    ).casefold(),
+                    _require_text(item.get("game_slug"), "game_slug"),
+                    team_id,
+                )
+            )
+        for index, raw in enumerate(raw_experimental):
+            item = _require_object(raw, f"experimental_games[{index}]")
+            experimental_games.append(
+                (
+                    _require_text(
+                        item.get("game_locale"), "game_locale"
+                    ).casefold(),
+                    _require_text(item.get("game_slug"), "game_slug"),
+                )
+            )
+    filter_names: set[tuple[str, str, str]] = set()
+    for item in filters:
+        key = (item.game_locale, item.game_slug, item.name.casefold())
+        if key in filter_names:
+            raise PayloadError(
+                "Gemte filterprofiler skal have entydige navne pr. spil"
+            )
+        filter_names.add(key)
     return HubSettings(
         tuple(watched),
         tuple(aliases),
         _score_from_dict(root.get("hall_of_fame_score", {})),
         _validate_manager_profiles(tuple(profiles)),
+        tuple(annotations),
+        tuple(filters),
+        tuple(own_teams),
+        tuple(dict.fromkeys(experimental_games)),
     )
 
 
@@ -537,6 +700,41 @@ def _settings_to_dict(settings: HubSettings) -> dict[str, object]:
             "tournament_semifinalist": score.tournament_semifinalist,
             "global_round_win": score.global_round_win,
         },
+        "player_annotations": [
+            {
+                "game_locale": item.game_locale,
+                "game_slug": item.game_slug,
+                "player_key": item.player_key,
+                "note": item.note,
+                "tags": list(item.tags),
+                "updated_at": (
+                    item.updated_at.isoformat() if item.updated_at else None
+                ),
+            }
+            for item in settings.player_annotations
+        ],
+        "saved_player_filters": [
+            {
+                "filter_id": item.filter_id,
+                "name": item.name,
+                "game_locale": item.game_locale,
+                "game_slug": item.game_slug,
+                "query": player_query_to_dict(item.query),
+            }
+            for item in settings.saved_player_filters
+        ],
+        "own_teams": [
+            {
+                "game_locale": item.game_locale,
+                "game_slug": item.game_slug,
+                "team_id": item.team_id,
+            }
+            for item in settings.own_teams
+        ],
+        "experimental_games": [
+            {"game_locale": locale, "game_slug": slug}
+            for locale, slug in settings.experimental_games
+        ],
     }
 
 
@@ -591,5 +789,88 @@ class HubSettingsStore:
                 )
             ),
         )
+        self.save(updated)
+        return updated
+
+    def set_player_annotations(
+        self,
+        settings: HubSettings,
+        annotations: tuple[PlayerAnnotation, ...],
+    ) -> HubSettings:
+        unique = {item.player_key: item for item in annotations}
+        updated = replace(
+            settings,
+            player_annotations=tuple(
+                sorted(unique.values(), key=lambda item: item.player_key)
+            ),
+        )
+        self.save(updated)
+        return updated
+
+    def set_saved_player_filters(
+        self,
+        settings: HubSettings,
+        filters: tuple[SavedPlayerFilter, ...],
+    ) -> HubSettings:
+        seen: set[tuple[str, str, str]] = set()
+        for item in filters:
+            key = (
+                item.game_locale.casefold(),
+                item.game_slug,
+                item.name.casefold(),
+            )
+            if key in seen:
+                raise ValueError("Filterprofilnavnet findes allerede i spillet")
+            seen.add(key)
+        updated = replace(
+            settings,
+            saved_player_filters=tuple(
+                sorted(
+                    filters,
+                    key=lambda item: (
+                        item.game_locale,
+                        item.game_slug,
+                        item.name.casefold(),
+                    ),
+                )
+            ),
+        )
+        self.save(updated)
+        return updated
+
+    def set_own_team(
+        self,
+        settings: HubSettings,
+        selection: OwnTeamSelection,
+    ) -> HubSettings:
+        identity = (selection.game_locale.casefold(), selection.game_slug)
+        values = [
+            item
+            for item in settings.own_teams
+            if (item.game_locale.casefold(), item.game_slug) != identity
+        ]
+        values.append(selection)
+        updated = replace(
+            settings,
+            own_teams=tuple(
+                sorted(values, key=lambda item: (item.game_locale, item.game_slug))
+            ),
+        )
+        self.save(updated)
+        return updated
+
+    def set_experimental_game(
+        self,
+        settings: HubSettings,
+        game: GameUrl,
+        enabled: bool,
+    ) -> HubSettings:
+        identity = (game.locale.casefold(), game.slug)
+        values = set(settings.experimental_games)
+        if enabled:
+            values.add(identity)
+        else:
+            values.discard(identity)
+        updated = replace(settings, experimental_games=tuple(sorted(values)))
         self.save(updated)
         return updated

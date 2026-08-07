@@ -467,10 +467,11 @@ def test_backup_checksums_traversal_and_restore(tmp_path: Path) -> None:
         ),
         encoding="utf-8",
     )
+    holdet.AnalysisInboxStore(source_paths.analysis_inbox_file).save(())
     data, manifest = holdet.create_backup_bytes(source_paths, now=NOW)
     validation = holdet.validate_backup(data)
     assert validation.is_valid
-    assert len(manifest.files) == 2
+    assert len(manifest.files) == 3
 
     target_paths = paths_for(tmp_path / "target")
     target_paths.config_dir.mkdir(parents=True)
@@ -478,6 +479,7 @@ def test_backup_checksums_traversal_and_restore(tmp_path: Path) -> None:
     result = holdet.restore_backup(data, target_paths, now=NOW)
     assert result.rollback_path.exists()
     assert json.loads(target_paths.groups_file.read_text(encoding="utf-8"))["schema_version"] == 7
+    assert holdet.AnalysisInboxStore(target_paths.analysis_inbox_file).load() == ()
 
     bad = BytesIO()
     with zipfile.ZipFile(bad, "w") as archive:
@@ -528,6 +530,16 @@ def test_settings_and_metadata_are_additive_and_versioned(tmp_path: Path) -> Non
     loaded = metadata_store.load(GAME)
     assert loaded is not None
     assert loaded.final_round == 2
+    metadata_path = next((tmp_path / "metadata").glob("*.json"))
+    legacy_metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    legacy_metadata["schema_version"] = 1
+    legacy_metadata.pop("rules", None)
+    metadata_path.write_text(json.dumps(legacy_metadata), encoding="utf-8")
+    before_metadata = metadata_path.read_bytes()
+    legacy_loaded = metadata_store.load(GAME)
+    assert legacy_loaded is not None
+    assert legacy_loaded.rule_profile is None
+    assert metadata_path.read_bytes() == before_metadata
 
     (tmp_path / "hub.json").write_text(
         json.dumps({"schema_version": 99}),

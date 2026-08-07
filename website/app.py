@@ -8,6 +8,8 @@ from datetime import datetime
 import json
 from pathlib import Path
 import sys
+from urllib.parse import quote
+from uuid import uuid4
 
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -34,6 +36,7 @@ from website.hub_pages import (
     team_changes_panel,
     transfer_lab_panel,
 )
+from website.analysis_pages import analysis_panel, alerts_view, player_detail_view
 from website.hub_pages import (
     calendar_view,
     managers_view,
@@ -51,6 +54,8 @@ from holdet_lib import (
     GameMetadataStore,
     HallOfFameStore,
     HubSettingsStore,
+    AnalysisInboxStore,
+    SavedPlayerFilter,
     build_live_hall_of_fame_events,
 
     build_manager_ratings,
@@ -84,6 +89,9 @@ from holdet_lib import (
     TeamSnapshot,
     TeamReference,
     build_player_export,
+    build_player_decision_analysis,
+    build_watchlist_alerts,
+    select_alert_baseline,
     build_standings,
     build_tournament_head_to_head,
     build_tournament_state,
@@ -99,8 +107,9 @@ from holdet_lib import (
     normalize_manager_game,
     player_column_labels,
     player_display_rows,
+    player_identity,
     parse_direct_team_url,
-    refresh_game,
+    refresh_manager_game,
     refresh_group,
     resolve_paths,
 )
@@ -394,6 +403,53 @@ def _sorted_manager_games(
     return tuple(sorted(games, key=_manager_game_sort_key))
 
 
+def _unread_alert_counts() -> dict[tuple[str, str], int]:
+    """Return unread alert counts by game without mutating the inbox."""
+
+    try:
+        alerts = AnalysisInboxStore(APP_PATHS.analysis_inbox_file).load()
+    except (OSError, PayloadError, ValueError):
+        return {}
+    counts: dict[tuple[str, str], int] = {}
+    for alert in alerts:
+        if not alert.is_unread:
+            continue
+        identity = (alert.game_locale, alert.game_slug)
+        counts[identity] = counts.get(identity, 0) + 1
+    return counts
+
+
+def _requested_game_from_query() -> GameUrl | None:
+    locale = str(st.query_params.get("locale", "")).casefold()
+    slug = str(st.query_params.get("game", ""))
+    if not locale or not slug:
+        return None
+    try:
+        return normalize_game_url(
+            f"https://www.holdet.dk/{quote(locale, safe='')}/fantasy/"
+            f"{quote(slug, safe='')}"
+        )
+    except (PayloadError, ValueError):
+        return None
+
+
+def _legacy_alert_target(
+    games: Iterable[ManagerGame],
+) -> ManagerGame | None:
+    ordered = _sorted_manager_games(games)
+    counts = _unread_alert_counts()
+    for candidates in (
+        tuple(game for game in ordered if not game.is_archived),
+        tuple(game for game in ordered if game.is_archived),
+    ):
+        target = next((game for game in candidates if counts.get(game.identity)), None)
+        if target is not None:
+            return target
+        if candidates:
+            return candidates[0]
+    return None
+
+
 def _format_table_integer(value: object) -> str:
     if value is None or bool(pd.isna(value)):
         return "–"
@@ -644,6 +700,14 @@ def _styles() -> None:
         .positive { color: #76da91; }
         .negative { color: #ff777d; }
         div[data-testid="stDataFrame"] { border: 1px solid #303642; border-radius: 12px; overflow: hidden; }
+        @media (prefers-reduced-motion: reduce) {
+            div[class*="st-key-nav-card-"] [data-testid="stButton"] button {
+                transition: none !important;
+            }
+            div[class*="st-key-nav-card-"] [data-testid="stButton"] button:hover {
+                transform: none;
+            }
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -708,11 +772,18 @@ def _sidebar(
             type="primary" if view == "teams" else "secondary",
         ):
             _navigate("teams")
+        unread_alerts = _unread_alert_counts()
         st.caption("MANAGERSPIL")
         for game in active_games:
             active = selected_game is not None and game.identity == selected_game.identity
+            unread_count = unread_alerts.get(game.identity, 0)
+            game_label = (
+                f"{game.name} ({unread_count} ulæste)"
+                if unread_count
+                else game.name
+            )
             if st.button(
-                game.name,
+                game_label,
                 key=f"nav-game-{game.game.locale}-{game.game.slug}",
                 width="stretch",
                 type="primary" if active else "secondary",
@@ -1095,6 +1166,9 @@ def _player_failure_details(error: object) -> tuple[str, int | None, bool]:
 
 def _fetch_player_statistics(game: GameUrl, round_number: int | None) -> None:
     error_key = (game.locale.casefold(), game.slug)
+    snapshot_store = PlayerStatisticsStore(OUTPUT_DIR)
+    before_index = snapshot_store.scan(game)
+    alert_warning: str | None = None
     try:
         with st.spinner(
             "Henter seneste spillerstatistik …"
@@ -1109,7 +1183,33 @@ def _fetch_player_statistics(game: GameUrl, round_number: int | None) -> None:
                     f"Holdet returnerede runde {statistics.round_number} "
                     f"i stedet for runde {round_number}."
                 )
-            saved = PlayerStatisticsStore(OUTPUT_DIR).save(statistics)
+            saved = snapshot_store.save(statistics)
+            alert_count = 0
+            previous = select_alert_baseline(
+                before_index,
+                game,
+                statistics.round_number,
+            )
+            if round_number is None and previous is not None:
+                try:
+                    current = snapshot_store.scan(game).newest(
+                        game, statistics.round_number
+                    )
+                    if current is not None:
+                        settings = HubSettingsStore(
+                            APP_PATHS.hub_settings_file
+                        ).load()
+                        alerts = build_watchlist_alerts(
+                            previous,
+                            current,
+                            settings.watchlist,
+                        )
+                        AnalysisInboxStore(
+                            APP_PATHS.analysis_inbox_file
+                        ).merge(alerts)
+                        alert_count = len(alerts)
+                except (OSError, PayloadError, ValueError) as exc:
+                    alert_warning = str(exc)
     except Exception as exc:
         st.session_state.setdefault("player_statistics_errors", {})[error_key] = {
             "details": str(exc),
@@ -1121,7 +1221,20 @@ def _fetch_player_statistics(game: GameUrl, round_number: int | None) -> None:
         st.session_state.setdefault("player_statistics_errors", {}).pop(error_key, None)
         st.session_state.setdefault("player_statistics_notices", {})[error_key] = (
             f"Runde {statistics.round_number} blev hentet og gemt som {saved.name}."
+            + (
+                f" {alert_count} nye statusalarmer blev oprettet."
+                if alert_count
+                else ""
+            )
         )
+        if alert_count:
+            st.session_state.setdefault(
+                "player_statistics_alert_counts", {}
+            )[error_key] = alert_count
+        if alert_warning:
+            st.session_state.setdefault(
+                "player_statistics_alert_warnings", {}
+            )[error_key] = alert_warning
         st.rerun()
 
 
@@ -1181,6 +1294,193 @@ def _fetch_missing_player_rounds(
 def _optional_number_input(label: str, key: str) -> int | None:
     value = st.number_input(label, value=None, step=1_000, key=key)
     return int(value) if value is not None else None
+
+
+def _set_player_filter_state(
+    scope: str,
+    query: PlayerStatisticsQuery,
+) -> None:
+    """Apply a validated profile to the existing native filter widgets."""
+
+    st.session_state[f"{scope}-search"] = query.search
+    st.session_state[f"{scope}-min-value"] = query.min_value
+    st.session_state[f"{scope}-max-value"] = query.max_value
+    st.session_state[f"{scope}-teams"] = list(query.teams)
+    st.session_state[f"{scope}-positions"] = list(query.positions)
+    st.session_state[f"{scope}-min-total-growth"] = query.min_total_growth
+    st.session_state[f"{scope}-max-total-growth"] = query.max_total_growth
+    st.session_state[f"{scope}-min-round-growth"] = query.min_round_growth
+    st.session_state[f"{scope}-max-round-growth"] = query.max_round_growth
+    st.session_state[f"{scope}-missing-total"] = query.missing_total_growth
+    st.session_state[f"{scope}-missing-round"] = query.missing_round_growth
+    st.session_state[f"{scope}-columns"] = list(query.columns[1:])
+    st.session_state[f"{scope}-sort-field"] = query.sort_field
+    st.session_state[f"{scope}-sort-order"] = query.sort_order
+    labels = {"ignore": "Ignorér", "require": "Kræv", "exclude": "Udeluk"}
+    for status in PLAYER_STATUSES:
+        st.session_state[f"{scope}-status-{status}"] = labels[
+            query.status_rule(status)
+        ]
+
+
+def _built_in_player_filters(statistics) -> tuple[tuple[str, str, PlayerStatisticsQuery], ...]:
+    profiles: list[tuple[str, str, PlayerStatisticsQuery]] = []
+    money_game = statistics.unit != "points"
+    defenders = tuple(
+        sorted(
+            {
+                item.position
+                for item in statistics.entries
+                if "forsvar" in item.position.casefold()
+                or "defender" in item.position.casefold()
+            },
+            key=str.casefold,
+        )
+    )
+    if money_game and defenders:
+        profiles.append(
+            (
+                "builtin-cheap-defenders",
+                "Billige forsvarere",
+                PlayerStatisticsQuery(
+                    positions=defenders,
+                    max_value=5_000_000,
+                    sort_field="value",
+                    sort_order="asc",
+                ),
+            )
+        )
+    if money_game:
+        profiles.append(
+            (
+                "builtin-active-under-five",
+                "Aktive under 5 mio.",
+                PlayerStatisticsQuery(
+                    max_value=5_000_000,
+                    status_rules=(("inactive", "exclude"), ("disabled", "exclude")),
+                    sort_field="total_growth",
+                    sort_order="desc",
+                ),
+            )
+        )
+    profiles.append(
+        (
+            "builtin-injured",
+            "Skadede spillere",
+            PlayerStatisticsQuery(
+                status_rules=(("injured", "require"),),
+                sort_field="value",
+                sort_order="desc",
+            ),
+        )
+    )
+    return tuple(profiles)
+
+
+def _player_filter_profile_manager(statistics, scope: str) -> tuple[object, object]:
+    game = statistics.game
+    store = HubSettingsStore(APP_PATHS.hub_settings_file)
+    settings = store.load()
+    saved = tuple(
+        item
+        for item in settings.saved_player_filters
+        if item.game_locale.casefold() == game.locale.casefold()
+        and item.game_slug == game.slug
+    )
+    profiles = {
+        profile_id: (name, query, None)
+        for profile_id, name, query in _built_in_player_filters(statistics)
+    }
+    profiles.update(
+        {
+            f"saved-{item.filter_id}": (item.name, item.query, item)
+            for item in saved
+        }
+    )
+    if profiles:
+        with st.container(horizontal=True, vertical_alignment="bottom"):
+            selected_id = st.selectbox(
+                "Filterprofil",
+                tuple(profiles),
+                format_func=lambda profile_id: profiles[profile_id][0],
+                key=f"{scope}-profile",
+            )
+            if st.button(
+                "Anvend profil",
+                icon=":material/filter_alt:",
+                key=f"{scope}-apply-profile",
+            ):
+                _set_player_filter_state(scope, profiles[selected_id][1])
+                st.rerun()
+        selected_saved = profiles[selected_id][2]
+        if selected_saved is not None:
+            with st.expander("Administrer gemt filterprofil"):
+                renamed = st.text_input(
+                    "Profilnavn",
+                    value=selected_saved.name,
+                    max_chars=80,
+                    key=f"{scope}-rename-profile",
+                )
+                actions = st.columns(2)
+                if actions[0].button(
+                    "Gem nyt navn", key=f"{scope}-save-profile-name"
+                ):
+                    values = tuple(
+                        replace(item, name=renamed.strip())
+                        if item.filter_id == selected_saved.filter_id
+                        else item
+                        for item in settings.saved_player_filters
+                    )
+                    try:
+                        store.set_saved_player_filters(settings, values)
+                    except ValueError as exc:
+                        st.error(str(exc))
+                    else:
+                        st.rerun()
+                if actions[1].button(
+                    "Slet profil", key=f"{scope}-delete-profile"
+                ):
+                    values = tuple(
+                        item
+                        for item in settings.saved_player_filters
+                        if item.filter_id != selected_saved.filter_id
+                    )
+                    store.set_saved_player_filters(settings, values)
+                    st.rerun()
+    return store, settings
+
+
+def _save_player_filter_profile(
+    statistics,
+    scope: str,
+    query: PlayerStatisticsQuery,
+    store,
+    settings,
+) -> None:
+    with st.expander("Gem aktuelle filtre"):
+        with st.form(f"{scope}-save-filter-profile"):
+            name = st.text_input("Profilnavn", max_chars=80)
+            submitted = st.form_submit_button("Gem filterprofil")
+        if submitted:
+            if not name.strip():
+                st.error("Profilnavnet må ikke være tomt.")
+            else:
+                profile = SavedPlayerFilter(
+                    uuid4().hex,
+                    name.strip(),
+                    statistics.game.locale,
+                    statistics.game.slug,
+                    query,
+                )
+                try:
+                    store.set_saved_player_filters(
+                        settings,
+                        (*settings.saved_player_filters, profile),
+                    )
+                except ValueError as exc:
+                    st.error(str(exc))
+                else:
+                    st.rerun()
 
 
 def _player_filter_query(statistics, scope: str) -> PlayerStatisticsQuery:
@@ -1389,6 +1689,7 @@ def _player_list_panel(selected, empty_label: str) -> None:
     statistics = selected.statistics
     game = statistics.game
     scope = f"player-filter-{game.locale}-{game.slug}"
+    settings_store, settings = _player_filter_profile_manager(statistics, scope)
     try:
         query = _player_filter_query(statistics, scope)
     except ValueError as exc:
@@ -1413,14 +1714,64 @@ def _player_list_panel(selected, empty_label: str) -> None:
             _reset_player_filters(scope)
     if entries:
         rows, integer_columns = _player_statistics_rows(statistics, query)
+        player_index = PlayerStatisticsStore(OUTPUT_DIR).scan(game)
+        annotations = {
+            item.player_key: item
+            for item in settings.player_annotations
+            if item.game_locale.casefold() == game.locale.casefold()
+            and item.game_slug == game.slug
+        }
+        for row, entry in zip(rows, entries, strict=True):
+            key = player_identity(game, entry)
+            analysis = build_player_decision_analysis(player_index, game, key)
+            if statistics.unit != "points":
+                row["Vækst pr. mio."] = (
+                    None if analysis is None else analysis.growth_per_million
+                )
+            row["Form 3"] = None if analysis is None else analysis.form_3
+            row["Form 5"] = None if analysis is None else analysis.form_5
+            row["Stabilitet"] = (
+                "–"
+                if analysis is None or analysis.stability_score is None
+                else f"{analysis.stability_score}/100 · {analysis.stability_label}"
+            )
+            row["Datastatus"] = (
+                "unverified" if analysis is None else analysis.provenance.certainty
+            )
+            row["Grundlag"] = (
+                0 if analysis is None else analysis.provenance.sample_size
+            )
+            row["Tags"] = (
+                " · ".join(annotations[key].tags) if key in annotations else ""
+            )
+            row["Detaljer"] = (
+                f"?view=player&locale={quote(game.locale, safe='')}&"
+                f"game={quote(game.slug, safe='')}&player={quote(key, safe='')}&"
+                f"round={statistics.round_number}"
+            )
         st.dataframe(
             _style_integer_columns(rows, integer_columns),
             hide_index=True,
             width="stretch",
+            column_config={
+                "Detaljer": st.column_config.LinkColumn(
+                    "Detaljer", display_text="Åbn spiller"
+                ),
+                "Form 3": st.column_config.NumberColumn(format="%.1f"),
+                "Form 5": st.column_config.NumberColumn(format="%.1f"),
+                "Vækst pr. mio.": st.column_config.NumberColumn(format="%.1f"),
+            },
             key=(
                 f"player-statistics-{game.locale}-{game.slug}-"
                 f"{statistics.round_number}-{empty_label}"
             ),
+        )
+        _save_player_filter_profile(
+            statistics,
+            scope,
+            query,
+            settings_store,
+            settings,
         )
         _player_export_section(statistics, query, selected, scope)
     else:
@@ -1440,6 +1791,27 @@ def _player_statistics_panel(
     notice = st.session_state.setdefault("player_statistics_notices", {}).pop(identity, None)
     if notice:
         st.success(notice)
+    alert_count = st.session_state.setdefault(
+        "player_statistics_alert_counts", {}
+    ).pop(identity, 0)
+    if alert_count:
+        st.link_button(
+            f"Se statusalarmer ({alert_count})",
+            (
+                f"?view=alerts&locale={quote(game.locale, safe='')}"
+                f"&game={quote(game.slug, safe='')}"
+            ),
+            icon=":material/notifications:",
+            key=f"latest-player-alerts-{game.locale}-{game.slug}-{empty_label}",
+        )
+    alert_warning = st.session_state.setdefault(
+        "player_statistics_alert_warnings", {}
+    ).pop(identity, None)
+    if alert_warning:
+        st.warning(
+            "Spillerdata blev gemt, men statusalarmer kunne ikke opdateres: "
+            f"{alert_warning}"
+        )
     batch = st.session_state.setdefault(
         "player_statistics_batch_results", {}
     ).pop(identity, None)
@@ -1668,9 +2040,27 @@ def _standalone_player_statistics(games: tuple[ManagerGame, ...]) -> None:
         item[0].original: f"{item[1]} · {item[0].slug}"
         for item in sorted_suggestions
     }
-    option_labels = {
-        item[0].original: item[1] for item in sorted_suggestions
-    }
+    selection_key = "standalone-player-game"
+    requested_game = _requested_game_from_query()
+    if requested_game is not None:
+        requested = suggestions.get(
+            (requested_game.locale.casefold(), requested_game.slug)
+        )
+        st.session_state[selection_key] = (
+            requested[0].original if requested is not None else requested_game.original
+        )
+
+    def sync_standalone_game() -> None:
+        selected = st.session_state.get(selection_key)
+        if not selected:
+            return
+        try:
+            selected_game = normalize_manager_game(str(selected)).game
+        except (PayloadError, ValueError):
+            return
+        st.query_params["locale"] = selected_game.locale
+        st.query_params["game"] = selected_game.slug
+
     selected_source = st.selectbox(
         "Managerspil",
         option_values,
@@ -1678,7 +2068,8 @@ def _standalone_player_statistics(games: tuple[ManagerGame, ...]) -> None:
         accept_new_options=True,
         placeholder="Vælg et spil, eller indtast URL/slug",
         format_func=lambda value: option_labels.get(value, value),
-        key="standalone-player-game",
+        key=selection_key,
+        on_change=sync_standalone_game,
     )
     if not selected_source:
         st.info("Vælg eller indtast et managerspil for at se spillerstatistik.")
@@ -1688,7 +2079,24 @@ def _standalone_player_statistics(games: tuple[ManagerGame, ...]) -> None:
     except (PayloadError, ValueError) as exc:
         st.error(f"Ugyldigt managerspil: {exc}")
         return
-    st.caption(f"Valgt spil: {game.slug} · sprog: {game.locale}")
+    unread_alerts = _unread_alert_counts().get(
+        (game.locale.casefold(), game.slug), 0
+    )
+    with st.container(horizontal=True, vertical_alignment="center"):
+        st.caption(f"Valgt spil: {game.slug} · sprog: {game.locale}")
+        st.link_button(
+            (
+                f"Se statusalarmer ({unread_alerts})"
+                if unread_alerts
+                else "Se statusalarmer"
+            ),
+            (
+                f"?view=alerts&locale={quote(game.locale, safe='')}"
+                f"&game={quote(game.slug, safe='')}"
+            ),
+            icon=":material/notifications:",
+            key=f"standalone-alerts-{game.locale}-{game.slug}",
+        )
     _player_statistics_panel(game, empty_label="spillet")
 @st.dialog("Arkivér managerspil")
 def _confirm_archive_manager_game(
@@ -1750,12 +2158,19 @@ def _game_round_center_tab(
         else:
             with st.spinner("Henter hvert aktivt hold højst én gang …"):
                 _save_game_metadata_if_available(manager_game.game)
-                result = refresh_game(
+                result = refresh_manager_game(
                     manager_game,
                     game_groups,
                     _client(),
                     SnapshotStore(OUTPUT_DIR),
+                    PlayerStatisticsStore(OUTPUT_DIR),
                     ManifestStore(MANIFEST_DIR),
+                    settings=HubSettingsStore(
+                        APP_PATHS.hub_settings_file
+                    ).load(),
+                    inbox_store=AnalysisInboxStore(
+                        APP_PATHS.analysis_inbox_file
+                    ),
                 )
             _invalidate_snapshot_index()
             refreshed_index = _scan_snapshots(str(OUTPUT_DIR.resolve()))
@@ -1795,13 +2210,52 @@ def _game_round_center_tab(
             )
             if pairing_errors:
                 pairing_detail += " " + " | ".join(pairing_errors)
+            player_detail = ""
+            if result.player is not None:
+                if result.player.status == "success":
+                    player_detail = (
+                        f" Spillerlisten er opdateret for runde "
+                        f"{result.player.round_number}."
+                    )
+                elif result.player.status == "cached_fallback":
+                    player_detail = (
+                        " Spillerlisten kunne ikke opdateres; den seneste cache "
+                        "vises."
+                    )
+                else:
+                    player_detail = " Spillerlisten kunne ikke hentes."
+                if result.player.alert_count:
+                    player_detail += (
+                        f" {result.player.alert_count} nye statusalarmer."
+                    )
+                if result.player.error:
+                    player_detail += f" Spillerfejl: {result.player.error}"
             st.session_state["game_refresh_notice"] = (
                 f"{successes} hold opdateret. {fallbacks} bruger cache. "
-                f"Manifest: {result.manifest_path.name}.{pairing_detail}"
+                f"Manifest: {result.manifest_path.name}.{player_detail}"
+                f"{pairing_detail}"
             )
             st.rerun()
     if notice := st.session_state.pop("game_refresh_notice", None):
         st.success(notice)
+        try:
+            inbox = AnalysisInboxStore(APP_PATHS.analysis_inbox_file).load()
+        except (OSError, PayloadError, ValueError):
+            inbox = ()
+        if any(
+            alert.is_unread
+            and (alert.game_locale, alert.game_slug) == manager_game.identity
+            for alert in inbox
+        ):
+            st.link_button(
+                "Se statusalarmer",
+                (
+                    f"?view=game&locale={quote(manager_game.game.locale, safe='')}"
+                    f"&game={quote(manager_game.game.slug, safe='')}"
+                    "&section=alerts"
+                ),
+                icon=":material/notifications:",
+            )
     manager_round_center(manager_game, groups, index, APP_PATHS)
 
 
@@ -1923,13 +2377,21 @@ def _game_view(
     )
     st.title(manager_game.name, anchor=f"managerspil-{manager_game.game.slug}")
     st.caption(manager_game.game.slug)
+    unread_alerts = _unread_alert_counts().get(manager_game.identity, 0)
+    alert_tab_label = (
+        f"Statusalarmer ({unread_alerts})"
+        if unread_alerts
+        else "Statusalarmer"
+    )
     tabs = _stateful_tabs(
         (
             "Rundecenter",
             "Grupper",
             "Spillerstatistik",
+            alert_tab_label,
             "Holdstatistik",
             "Historik",
+            "Analyse",
             "Administration",
             "Indstillinger",
         ),
@@ -1937,8 +2399,10 @@ def _game_view(
             "round-center",
             "groups",
             "players",
+            "alerts",
             "teams",
             "history",
+            "analysis",
             "administration",
             "settings",
         ),
@@ -1949,8 +2413,10 @@ def _game_view(
         round_center_tab,
         groups_tab,
         players_tab,
+        alerts_tab,
         teams_tab,
         history_tab,
+        analysis_tab,
         manage_tab,
         settings_tab,
     ) = tabs
@@ -1972,6 +2438,13 @@ def _game_view(
     if players_tab.open:
         with players_tab:
             _player_statistics_tab(manager_game, read_only=read_only)
+    if alerts_tab.open:
+        with alerts_tab:
+            alerts_view(
+                APP_PATHS,
+                manager_game.game,
+                read_only=read_only,
+            )
     if teams_tab.open:
         with teams_tab:
             _team_statistics_game_tab(
@@ -1980,6 +2453,15 @@ def _game_view(
     if history_tab.open:
         with history_tab:
             game_history_panel(manager_game, groups, index)
+    if analysis_tab.open:
+        with analysis_tab:
+            analysis_panel(
+                manager_game,
+                groups,
+                index,
+                APP_PATHS,
+                read_only=read_only,
+            )
     if manage_tab.open:
         with manage_tab:
             _manage_game(
@@ -4303,7 +4785,9 @@ def main() -> None:
     for warning in (*configuration_warnings, *pairing_warnings):
         st.warning(warning)
     read_only = bool(selected_game and selected_game.is_archived)
-    if read_only and selected_game is not None and view in {"game", "group", "team"}:
+    if read_only and selected_game is not None and view in {
+        "game", "group", "team", "player"
+    }:
         _archived_banner(
             group_store,
             selected_game,
@@ -4334,6 +4818,47 @@ def main() -> None:
             index,
             APP_PATHS,
         )
+    elif view == "alerts":
+        requested_game = _requested_game_from_query()
+        if requested_game is not None and selected_game is not None:
+            _navigate(
+                "game",
+                locale=selected_game.game.locale,
+                game=selected_game.game.slug,
+                section="alerts",
+            )
+        elif requested_game is not None:
+            alerts_view(APP_PATHS, requested_game, standalone=True)
+        elif target := _legacy_alert_target(games):
+            _navigate(
+                "game",
+                locale=target.game.locale,
+                game=target.game.slug,
+                section="alerts",
+            )
+        else:
+            st.title("Statusalarmer", anchor="statusalarmer")
+            st.info(
+                "Tilføj et managerspil eller vælg et spil under "
+                "Spillerstatistik for at bruge statusalarmer."
+            )
+    elif view == "player":
+        detail_game = selected_game
+        if detail_game is None:
+            requested_game = _requested_game_from_query()
+            if requested_game is not None:
+                detail_game = ManagerGame(requested_game, requested_game.slug)
+        player_key = str(st.query_params.get("player", ""))
+        if player_key and detail_game is not None:
+            player_detail_view(
+                detail_game,
+                player_key,
+                APP_PATHS,
+                read_only=bool(selected_game and selected_game.is_archived),
+            )
+        else:
+            st.title("Spilleren blev ikke fundet")
+            st.error("Spillerlinket mangler en spilleridentitet.")
     elif view == "players":
         _standalone_player_statistics(games)
     elif view == "teams":
@@ -4362,7 +4887,7 @@ def main() -> None:
     elif view == "game":
         st.error("Managerspillet findes ikke.")
         st.link_button("Gå til Mine managerspil", "?view=home")
-    elif view in {"group", "team"}:
+    elif view in {"group", "team", "player"}:
         st.error("Gruppen eller holdet findes ikke.")
         st.link_button("Gå til Mine managerspil", "?view=home")
     else:

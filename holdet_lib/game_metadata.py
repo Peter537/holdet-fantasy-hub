@@ -12,10 +12,16 @@ from .errors import PayloadError
 from .models import GameUrl, ScheduleRound
 from .output import sanitize_path_component
 from .persistence import aware_local, replace_text_atomically
+from .rules import (
+    GameRuleProfile,
+    game_rule_from_dict,
+    game_rule_to_dict,
+    rule_profile_for_game,
+)
 from .teams import GameContext
 
 
-GAME_METADATA_SCHEMA_VERSION = 1
+GAME_METADATA_SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,6 +35,7 @@ class GameMetadata:
     display_name: str | None
     rounds: tuple[ScheduleRound, ...]
     fetched_at: datetime
+    rule_profile: GameRuleProfile | None = None
 
     @property
     def identity(self) -> tuple[str, str]:
@@ -54,8 +61,9 @@ class GameMetadata:
 def game_metadata_from_context(
     context: GameContext, *, fetched_at: datetime | None = None
 ) -> GameMetadata:
+    game = context.game
     return GameMetadata(
-        context.game,
+        game,
         context.variant,
         context.format,
         context.game_id,
@@ -64,6 +72,12 @@ def game_metadata_from_context(
         context.display_name,
         context.rounds,
         aware_local(fetched_at),
+        rule_profile_for_game(
+            game,
+            game_id=context.game_id,
+            salary_cap=context.salary_cap,
+            label=context.display_name,
+        ),
     )
 
 
@@ -91,6 +105,11 @@ def _metadata_to_dict(metadata: GameMetadata) -> dict[str, object]:
             }
             for item in metadata.rounds
         ],
+        "rules": (
+            game_rule_to_dict(metadata.rule_profile)
+            if metadata.rule_profile is not None
+            else None
+        ),
     }
 
 
@@ -123,7 +142,8 @@ def _timestamp(value: object, label: str) -> datetime:
 def _metadata_from_dict(payload: object) -> GameMetadata:
     if not isinstance(payload, dict):
         raise PayloadError("Metadataroden skal være et objekt")
-    if payload.get("schema_version") != GAME_METADATA_SCHEMA_VERSION:
+    schema_version = payload.get("schema_version")
+    if schema_version not in {1, GAME_METADATA_SCHEMA_VERSION}:
         raise PayloadError("Ukendt skema for spilmetadata")
     game = payload.get("game")
     rounds = payload.get("rounds")
@@ -152,6 +172,12 @@ def _metadata_from_dict(payload: object) -> GameMetadata:
     salary_cap = _integer(game.get("salary_cap"), "game.salary_cap")
     assert all(value is not None for value in (url, locale, slug, variant, game_format))
     assert game_id is not None and salary_cap is not None
+    rule_profile = None
+    if schema_version == GAME_METADATA_SCHEMA_VERSION and payload.get("rules") is not None:
+        try:
+            rule_profile = game_rule_from_dict(payload.get("rules"))
+        except ValueError as exc:
+            raise PayloadError(f"Ugyldig regelprofil: {exc}") from exc
     return GameMetadata(
         GameUrl(url, locale, slug),
         variant,
@@ -162,6 +188,7 @@ def _metadata_from_dict(payload: object) -> GameMetadata:
         _text(game.get("display_name"), "game.display_name", optional=True),
         tuple(sorted(parsed_rounds, key=lambda item: item.round_number)),
         _timestamp(payload.get("fetched_at"), "fetched_at"),
+        rule_profile,
     )
 
 

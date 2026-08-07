@@ -26,6 +26,7 @@ class TransferRuleProfile:
     free_through_round: int = 1
     captain_count: int = 0
     known: bool = True
+    fee_basis_points: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -287,8 +288,13 @@ def simulate_transfers(
         entry.value for player_id, entry in current.items() if player_id in sold_ids
     )
     purchase_total = sum(entry.value for entry in purchases)
+    fee_basis_points = (
+        profile.fee_basis_points
+        if profile.fee_basis_points is not None
+        else profile.fee_percent * 100
+    )
     transfer_fee = sum(
-        ceil(entry.value * profile.fee_percent / 100) for entry in purchases
+        ceil(entry.value * fee_basis_points / 10_000) for entry in purchases
     )
     ending_bank = None
     if profile.budget_enabled:
@@ -392,4 +398,3 @@ def simulate_transfers(
         tuple(dict.fromkeys(warnings)),
         certainty,
     )
-

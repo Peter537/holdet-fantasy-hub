@@ -66,6 +66,7 @@ def _canonical_files(paths: AppPaths) -> tuple[tuple[str, Path], ...]:
         ("data/group-revisions", paths.group_revision_dir),
         ("data/tournament-pairings", paths.tournament_pairing_dir),
         ("data/game-metadata", paths.game_metadata_dir),
+        ("data/fixtures", paths.fixture_dir),
         ("data/hall-of-fame", paths.hall_of_fame_dir),
     )
     result: list[tuple[str, Path]] = []
@@ -193,7 +194,9 @@ def _known_schema(path: str, data: bytes) -> str | None:
         return f"{path}: ukendt gruppeschema"
     if path == "config/groups.json" and version == 8:
         return None
-    if path == "config/hub-settings.json" and version == 2:
+    if path == "config/hub-settings.json" and version in {2, 3}:
+        return None
+    if path == "config/analysis-inbox.json" and version == 1:
         return None
     if path == "config/seasons.json" and version == 1:
         return None
@@ -203,8 +206,12 @@ def _known_schema(path: str, data: bytes) -> str | None:
         return None
     if path == "config/hub-settings.json" and version != 1:
         return f"{path}: ukendt Hub-schema"
-    if path.startswith("data/game-metadata/") and version != 1:
+    if path == "config/analysis-inbox.json":
+        return f"{path}: ukendt alarmschema"
+    if path.startswith("data/game-metadata/") and version not in {1, 2}:
         return f"{path}: ukendt metadataschema"
+    if path.startswith("data/fixtures/") and version != 1:
+        return f"{path}: ukendt fixtureschema"
     if path.startswith("data/hall-of-fame/") and version != 1:
         return f"{path}: ukendt Hall of Fame-schema"
     if "/players/" in path and "player-round" in path and version not in {1, 2, 3}:

@@ -189,6 +189,7 @@ class DashboardTests(unittest.TestCase):
             patch.object(dashboard.st, "markdown"),
             patch.object(dashboard.st, "caption"),
             patch.object(dashboard.st, "divider"),
+            patch.object(dashboard, "_unread_alert_counts", return_value={}),
         ):
             dashboard._sidebar(
                 (manager_game, alpha_game), (group,), manager_game, group, "game"
@@ -222,6 +223,7 @@ class DashboardTests(unittest.TestCase):
             patch.object(dashboard.st, "markdown"),
             patch.object(dashboard.st, "caption"),
             patch.object(dashboard.st, "divider"),
+            patch.object(dashboard, "_unread_alert_counts", return_value={}),
         ):
             dashboard._sidebar(
                 (manager_game, alpha_game), (group,), manager_game, group, "data"
@@ -871,8 +873,10 @@ class DashboardTests(unittest.TestCase):
                     "Rundecenter",
                     "Grupper",
                     "Spillerstatistik",
+                    "Statusalarmer",
                     "Holdstatistik",
                     "Historik",
+                    "Analyse",
                     "Administration",
                     "Indstillinger",
                 ],
@@ -1472,6 +1476,242 @@ class DashboardTests(unittest.TestCase):
                 self.assertTrue(
                     any("Runde 6 blev hentet" in item.value for item in app.success)
                 )
+
+    def test_analysis_player_and_alert_routes_are_cache_only_and_edit_explicitly(self) -> None:
+        class OfflineClient:
+            def __init__(self):
+                self.calls = 0
+
+            def fetch_players(self, *_args, **_kwargs):
+                self.calls += 1
+                raise AssertionError("Navigation må ikke hente data")
+
+            def fetch_team(self, *_args, **_kwargs):
+                self.calls += 1
+                raise AssertionError("Navigation må ikke hente data")
+
+        client = OfflineClient()
+        with website_environment() as (config, output):
+            statistics = sample_statistics()
+            game = statistics.game
+            holdet.GroupStore(config / "groups.json").create_manager_game(
+                game, "Tourspillet"
+            )
+            holdet.PlayerStatisticsStore(output).save(statistics)
+            settings_path = config / "hub-settings.json"
+            with patch("holdet_lib.HoldetClient", return_value=client):
+                app = AppTest.from_file(APP_PATH).run(timeout=15)
+                navigate(app, "game", locale=game.locale, game=game.slug)
+                select_game_tab(app, game, "Analyse")
+                self.assertFalse(app.exception)
+                self.assertEqual(client.calls, 0)
+                self.assertFalse(settings_path.exists())
+                self.assertTrue(
+                    any(item.value == "Analyse og beslutninger" for item in app.header)
+                )
+                self.assertTrue(
+                    any(item.label == "Analyseområde" for item in app.segmented_control)
+                )
+
+                player = statistics.entries[0]
+                player_key = holdet.player_identity(game, player)
+                navigate(
+                    app,
+                    "player",
+                    locale=game.locale,
+                    game=game.slug,
+                    player=player_key,
+                    round=statistics.round_number,
+                )
+                self.assertFalse(app.exception)
+                self.assertEqual([item.value for item in app.title], [player.name])
+                self.assertEqual(client.calls, 0)
+                widget(app, "text_area", "Note").input("Hold øje med rollen")
+                widget(app, "text_input", "Tags, adskilt med komma").input(
+                    "overvej, langsigtet"
+                )
+                button(app, "Gem note og tags").click().run(timeout=15)
+                saved = holdet.HubSettingsStore(settings_path).load()
+                self.assertEqual(saved.player_annotations[0].note, "Hold øje med rollen")
+                self.assertEqual(
+                    saved.player_annotations[0].tags,
+                    ("overvej", "langsigtet"),
+                )
+
+                navigate(
+                    app,
+                    "game",
+                    locale=game.locale,
+                    game=game.slug,
+                    section="alerts",
+                )
+                self.assertFalse(app.exception)
+                self.assertEqual([item.value for item in app.title], ["Tourspillet"])
+                self.assertTrue(
+                    any(item.value == "Statusalarmer" for item in app.header)
+                )
+                self.assertFalse(
+                    any(item.label == "Managerspil" for item in app.selectbox)
+                )
+                self.assertEqual(client.calls, 0)
+
+    def test_manager_alerts_are_scoped_badged_and_clear_only_current_game(self) -> None:
+        with website_environment() as (config, output):
+            statistics = sample_statistics()
+            game = statistics.game
+            other_game = holdet.normalize_manager_game(
+                "other-alert-game", "Andet spil"
+            )
+            game_store = holdet.GroupStore(config / "groups.json")
+            game_store.create_manager_game(game, "Tourspillet")
+            game_store.create_manager_game(other_game.game, other_game.name)
+            holdet.PlayerStatisticsStore(output).save(statistics)
+
+            player = statistics.entries[0]
+            player_key = holdet.player_identity(game, player)
+            settings_store = holdet.HubSettingsStore(config / "hub-settings.json")
+            settings_store.set_watchlist(
+                holdet.HubSettings(),
+                (holdet.watchlist_entry(game, player),),
+            )
+            detected = datetime(2026, 8, 7, 12, tzinfo=timezone.utc)
+            current_unread = holdet.WatchlistAlert(
+                alert_id="current-unread",
+                game_locale=game.locale.casefold(),
+                game_slug=game.slug,
+                player_key=player_key,
+                player_name=player.name,
+                kind="injured",
+                message=f"{player.name} er blevet markeret som skadet.",
+                detected_at=detected,
+                round_number=statistics.round_number,
+            )
+            current_dismissed = replace(
+                current_unread,
+                alert_id="current-dismissed",
+                kind="disabled",
+                dismissed_at=detected,
+                read_at=detected,
+            )
+            other_dismissed = replace(
+                current_dismissed,
+                alert_id="other-dismissed",
+                game_locale=other_game.game.locale.casefold(),
+                game_slug=other_game.game.slug,
+            )
+            inbox = holdet.AnalysisInboxStore(config / "analysis-inbox.json")
+            inbox.save((current_unread, current_dismissed, other_dismissed))
+
+            app = AppTest.from_file(APP_PATH).run(timeout=15)
+            sidebar_labels = [item.label for item in app.button]
+            self.assertIn("Tourspillet (1 ulæste)", sidebar_labels)
+            self.assertNotIn("Statusalarmer", sidebar_labels)
+
+            navigate(app, "alerts")
+            self.assertFalse(app.exception)
+            self.assertEqual(app.query_params["view"], ["game"])
+            self.assertEqual(app.query_params["section"], ["alerts"])
+            self.assertEqual([item.value for item in app.title], ["Tourspillet"])
+            self.assertTrue(
+                any(item.value == "Statusalarmer" for item in app.header)
+            )
+            self.assertIn("Statusalarmer (1)", [item.label for item in app.tabs])
+            self.assertFalse(
+                any(item.label == "Managerspil" for item in app.selectbox)
+            )
+            self.assertTrue(
+                any(
+                    item.label == "Administrér watchlist"
+                    for item in app.get("link_button")
+                )
+            )
+            self.assertTrue(
+                any(item.label == "Se spiller" for item in app.get("link_button"))
+            )
+
+            button(app, "Markér som læst").click().run(timeout=15)
+            self.assertIn("Statusalarmer", [item.label for item in app.tabs])
+            self.assertNotIn(
+                "Tourspillet (1 ulæste)", [item.label for item in app.button]
+            )
+            button(app, "Ryd afviste alarmer").click().run(timeout=15)
+            self.assertEqual(
+                {item.alert_id for item in inbox.load()},
+                {"current-unread", "other-dismissed"},
+            )
+
+    def test_hidden_alert_route_supports_non_manager_games_and_inbox_errors(self) -> None:
+        with website_environment() as (config, output):
+            statistics = sample_statistics()
+            game = statistics.game
+            holdet.PlayerStatisticsStore(output).save(statistics)
+            player = statistics.entries[0]
+            player_key = holdet.player_identity(game, player)
+            holdet.AnalysisInboxStore(config / "analysis-inbox.json").save(
+                (
+                    holdet.WatchlistAlert(
+                        alert_id="standalone-alert",
+                        game_locale=game.locale.casefold(),
+                        game_slug=game.slug,
+                        player_key=player_key,
+                        player_name=player.name,
+                        kind="injured",
+                        message=f"{player.name} er blevet markeret som skadet.",
+                        detected_at=datetime(2026, 8, 7, 12, tzinfo=timezone.utc),
+                        round_number=statistics.round_number,
+                    ),
+                )
+            )
+            app = AppTest.from_file(APP_PATH).run(timeout=15)
+            navigate(
+                app,
+                "alerts",
+                locale=game.locale,
+                game=game.slug,
+            )
+            self.assertFalse(app.exception)
+            self.assertEqual([item.value for item in app.title], ["Statusalarmer"])
+            self.assertFalse(
+                any(item.label == "Managerspil" for item in app.selectbox)
+            )
+
+            navigate(
+                app,
+                "players",
+                locale=game.locale,
+                game=game.slug,
+                panel="compare",
+            )
+            self.assertFalse(app.exception)
+            self.assertEqual(
+                widget(app, "selectbox", "Managerspil").value,
+                game.original,
+            )
+
+            navigate(
+                app,
+                "player",
+                locale=game.locale,
+                game=game.slug,
+                player=player_key,
+                round=statistics.round_number,
+            )
+            self.assertFalse(app.exception)
+            self.assertEqual([item.value for item in app.title], [player.name])
+
+            (config / "analysis-inbox.json").write_text(
+                "{not valid json", encoding="utf-8"
+            )
+            navigate(
+                app,
+                "alerts",
+                locale=game.locale,
+                game=game.slug,
+            )
+            self.assertFalse(app.exception)
+            self.assertTrue(
+                any("Alarmindbakken kunne ikke læses" in item.value for item in app.error)
+            )
 
     def test_failed_player_refresh_keeps_cache_details_and_retries_exact_round(self) -> None:
         class FlakyClient:

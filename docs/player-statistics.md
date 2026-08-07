@@ -12,6 +12,18 @@ Spillerstatistik kan bruges som selvstændig side eller inde i et managerspil. D
 
 Den nyeste kompatible cache vises med det samme. Netværk bruges kun af **Hent seneste spillerstatistik**, **Hent manglende runder**, **Hent runde X**, **Opdater runde X** eller **Prøv igen**. Hver hentning gemmer hele det ufiltrerede resultat som et kanonisk JSON-snapshot; rundestatus og hentetidspunkt fryses sammen med dataene.
 
+Spillerlisten tilføjer cacheberegnede kolonner for form 3/5, stabilitet og, i pengespil, historisk vækst pr. aktuel million. Hver række har et direkte link til `?view=player&locale=…&game=…&player=…&round=…`.
+
+## Spillerdetalje, noter og statusalarmer
+
+Spillerdetaljen har én H1 og viser pris-/pointkurve på faktiske rundenumre, form, stabilitet, vækst pr. million, statushistorik, watchlist samt note/tag-editor. En ikke-afsluttet runde markeres `preliminary`; en tom eller ikke-numerisk serie forklares uden at oprette en tom graf.
+
+Noter og tags gemmes kun ved **Gem note og tags**. Noten er højst 2.000 tegn, og højst 12 tags á 24 tegn normaliseres case-insensitivt uden dubletter. Standardtags er `overvej`, `undgå`, `kaptajn` og `langsigtet`, men egne tags er tilladt.
+
+Efter **Hent seneste spillerstatistik** sammenlignes watchliststatus med forrige snapshot fra samme eller seneste tidligere runde. Nye skader, deaktivering, inaktivitet, karantæne eller fjernelse fra spillerlisten vises i det relevante managerspils **Statusalarmer**-fane. Fanen viser watchlistens størrelse og linker tilbage til **Sammenligning og watchlist**; den duplikerer ikke editoren. **Solgt** bruges kun, hvis en fremtidig kilde leverer et eksplicit felt. En historisk rundehentning udløser ikke alarmer.
+
+Watchlists for spil, der kun bruges på den selvstændige Spillerstatistik, åbner en skjult spilfiltreret alarmroute uden global sidebar-destination. Alarmvisning og filtrering er cachebaseret; kun læst, afvist og rydning skriver alarmtilstand.
+
 ## Sammenligning og watchlist
 
 Vælg 2–5 spillere for at sammenligne pris eller point, totalvækst, rundevækst, status og historiske kurver. Spillere identificeres primært med spilidentitet og `entry_id`. Ældre snapshots uden sikker ID bruger en tydeligt markeret fallback med navn, hold og position.
@@ -47,6 +59,8 @@ Cykling kan ikke klassificeres ud fra route-navnet alene; rulesettets `salaryCap
 
 Filtre påvirker kun den viste og eksporterede tabel, aldrig det kanoniske snapshot. De omfatter fritekst, hold/land, position/kategori, pris/point, vækst, status, kolonner og sortering. Status kan ignoreres, kræves eller udelukkes; flere krævede statustyper skal alle være til stede.
 
+Aktuelle filtre, kolonner og sortering kan gemmes, omdøbes og slettes som en versioneret profil med unikt navn pr. spil. De ikke-persistente profiler **Billige forsvarere**, **Aktive under 5 mio.** og **Skadede spillere** vises kun, når enhed og felter gør dem meningsfulde. En profil anvendes først ved et eksplicit klik.
+
 Numeriske felter bevares som tal, så Streamlits sortering virker, men vises med danske tusindtalsseparatorer. Manglende værdier vises som `–`. Navn bruges som stabil tie-breaker.
 
 ## Eksport
@@ -57,4 +71,4 @@ Numeriske felter bevares som tal, så Streamlits sortering virker, men vises med
 %LOCALAPPDATA%\Holdet Fantasy Hub\exports\players\<game-slug>\data-round<round>_<MMDD>_<HHmmss>[_N].<format>
 ```
 
-Se [Klienter](clients.md) for CLI-eksempler og [Datalagring](data-storage.md) for forskellen mellem snapshots, Hub-indstillinger og afledte eksporter.
+Se [Analyse- og beslutningscenter](decision-analysis.md) for formler og provenance, [Klienter](clients.md) for CLI-eksempler og [Datalagring](data-storage.md) for forskellen mellem snapshots, Hub-indstillinger og afledte eksporter.
