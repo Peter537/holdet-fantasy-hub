@@ -2,6 +2,8 @@
 
 `website/server.py` er den kanoniske `st.App`-wrapper omkring den eksisterende `website/app.py`. Wrapperen registrerer API-ruter på samme port; AppTest kan fortsat køre direkte mod `website/app.py`.
 
+OpenAPI-dokumentets `servers`-URL er relativ (`/`). Kontrakten virker derfor uændret, når serveren startes på en tilfældig fri loopback-port i UI-tests eller på standardporten 8501.
+
 ```powershell
 py -3.14 -m streamlit run .\website\server.py
 ```

@@ -27,7 +27,7 @@ Destinationerne står i denne rækkefølge:
 
 Der findes ingen global Værktøjer-sektion. De tidligere globale views `transfer`, `compare`, `history` og `changes` er fjernet og viser den kontrollerede side **Siden findes ikke**. Data-deeplinks med `accounts`, `quality`, `locations` og `backup` mappes til de nye områder.
 
-Den tidligere `view=hall-of-fame` viderestiller til `view=managers`. Managers og Kalender er globale views og starter ingen hentning. Kalenderen kan filtreres på manager, managerspil, gruppe/turnering og dato.
+Den tidligere `view=hall-of-fame` viderestiller til `/managers`. Managers og Kalender er globale sider og starter ingen hentning. Kalenderen kan filtreres på manager, managerspil, gruppe/turnering og dato.
 
 Managers viser Hall of Fame-point og Elo side om side. Identiteter kan samles og ophæves manuelt, H2H har officielle kampe og fælles grupperunder som separate spor, og sæsoner sammensættes af eksisterende konkurrencer.
 
@@ -53,11 +53,10 @@ Spillerstatistik genbruger managerspil og runde til Spillerliste, Sammenligning 
 
 ### Deeplinks og session state
 
-Query-parametrene kan kombineres:
+Pathen vælger hoveddestinationen; query-parametrene bærer kun kontekst:
 
 | Parameter | Betydning |
 | --- | --- |
-| `view` | Hoveddestination, eksempelvis et managerspil, `managers`, `calendar` eller Data og lager |
 | `section` | Managerspillets hovedfane eller aktivt Data og lager-område |
 | `analysis` | Aktivt Analyse-panel: `decisions`, `group`, `ideal` eller `experimental` |
 | `panel` | Underfane i spiller-, hold-, gruppe- eller datavisningen |
@@ -69,13 +68,13 @@ Query-parametrene kan kombineres:
 | `season` | Valgt sæsonmesterskab |
 | `date` | Kalenderens valgte dato |
 
-Valg i Streamlit-state navngives efter spil, gruppe, hold og runde, så de ikke lækker mellem managerspil. Faner læses først, når de vises.
+Eksempel: `/game?locale=da&game=tour-de-france-2026&section=players`. Valg i Streamlit-state navngives efter route, spil, gruppe, hold og komponent, så de ikke lækker mellem managerspil. Faner læses først, når de vises. Se [Navigation](navigation.md) for alle paths og legacy-redirects.
 
 ### Offline-first
 
 Navigation, faneskift, rundeskift, grafer, Analyse, spillerdetaljer, spilafgrænset alarmfiltrering, sammenligning, ændringsvisning og transfersimulation læser kun kompatible snapshots. Netværk bruges kun af tydeligt navngivne handlinger som **Hent**, **Find hold**, **Opdater** eller **Prøv igen**. Alarmer skriver kun ved **Markér som læst**, **Afvis** eller **Ryd afviste alarmer**. Simuleringer lever i `st.session_state`; kun eksplicit gem af noter, filtre, standardhold eller opt-in skriver konfiguration.
 
-Den kanoniske alarmroute er `?view=game&locale=…&game=…&section=alerts`. `?view=alerts&locale=…&game=…` bevares som en skjult, spilfiltreret kompatibilitetsroute for watchlists fra den selvstændige Spillerstatistik. Hvis spillet er gemt som managerspil, viderestilles den til den kanoniske fane.
+Den kanoniske alarmroute er `/game?locale=…&game=…&section=alerts`. `/alerts?locale=…&game=…` er den skjulte, spilfiltrerede kompatibilitetsside for watchlists fra den selvstændige Spillerstatistik. Hvis spillet er gemt som managerspil, viderestilles den til den kanoniske fane.
 
 Læs mere om [Spillerstatistik](player-statistics.md), [Holdstatistik](team-statistics.md), [Analyse- og beslutningscenter](decision-analysis.md), [Managers og sæsoner](managers-and-seasons.md), [Grupper og turneringer](groups-and-tournaments.md) og [Datalagring](data-storage.md).
 

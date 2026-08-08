@@ -12,7 +12,7 @@ Managers indeholder:
 - **Sæsoner**: manuelle samlinger af grupper og turneringer;
 - **Identiteter**: forslag, manuel samling, omdøbning og ophævelse.
 
-Nye links bruger `?view=managers`, `manager`, `opponent` og `season`. `?view=hall-of-fame` er en kompatibilitetsroute, som viderestiller til Managers.
+Nye links bruger `/managers` med `manager`, `opponent` og `season` som query-parametre. `?view=hall-of-fame` er en kompatibilitetsroute, som viderestiller til `/managers` og bevarer den øvrige kontekst.
 
 ## Manageridentitet
 

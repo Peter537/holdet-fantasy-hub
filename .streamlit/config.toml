@@ -3,3 +3,34 @@ address = "127.0.0.1"
 
 [client]
 toolbarMode = "viewer"
+
+[theme]
+base = "dark"
+primaryColor = "#ff4b4b"
+backgroundColor = "#111419"
+secondaryBackgroundColor = "#20252d"
+textColor = "#f2f4f7"
+linkColor = "#ff777d"
+borderColor = "#343b47"
+showWidgetBorder = true
+showSidebarBorder = true
+baseRadius = "12px"
+buttonRadius = "10px"
+dataframeBorderColor = "#343b47"
+dataframeHeaderBackgroundColor = "#20252d"
+font = "sans-serif"
+headingFontSizes = ["2rem", "1.5rem", "1.25rem", "1rem", "0.875rem", "0.75rem"]
+headingFontWeights = [700, 650, 650, 600, 600, 600]
+redColor = "#ff777d"
+orangeColor = "#f6a95c"
+yellowColor = "#e7c45c"
+greenColor = "#76da91"
+blueColor = "#6bb8ff"
+violetColor = "#bc9cff"
+
+[theme.sidebar]
+backgroundColor = "#191d24"
+secondaryBackgroundColor = "#232831"
+textColor = "#e7eaf0"
+borderColor = "#343b47"
+primaryColor = "#ff4b4b"

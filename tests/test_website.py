@@ -20,12 +20,14 @@ from streamlit.testing.v1 import AppTest
 import holdet_lib as holdet
 from tests.test_library_storage import sample_team
 from tests.test_player_statistics import sample_statistics
-from website import app as dashboard
+from website import ui as dashboard
 from website import data_page
+from website.navigation import PageId, page_source
 
 
 PROJECT_ROOT = Path(__file__).parents[1]
 APP_PATH = PROJECT_ROOT / "website" / "app.py"
+UI_PATH = PROJECT_ROOT / "website" / "ui.py"
 
 
 @contextmanager
@@ -66,11 +68,25 @@ def widget(app: AppTest, kind: str, label: str):
 
 
 def navigate(app: AppTest, view: str, **parameters: object) -> AppTest:
-    app.query_params = {
-        "view": view,
-        **{key: str(value) for key, value in parameters.items()},
-    }
-    return app.run(timeout=15)
+    page_id = {
+        "home": PageId.HOME,
+        "manage-games": PageId.MANAGE_GAMES,
+        "archive": PageId.ARCHIVE,
+        "players": PageId.PLAYERS,
+        "teams": PageId.TEAMS,
+        "managers": PageId.MANAGERS,
+        "hall-of-fame": PageId.MANAGERS,
+        "calendar": PageId.CALENDAR,
+        "data": PageId.DATA,
+        "game": PageId.GAME,
+        "group": PageId.GROUP,
+        "team": PageId.TEAM,
+        "player": PageId.PLAYER,
+        "alerts": PageId.ALERTS,
+    }.get(view, PageId.NOT_FOUND)
+    app.query_params = {key: str(value) for key, value in parameters.items()}
+    relative_page = page_source(page_id).relative_to(APP_PATH.parent)
+    return app.switch_page(str(relative_page)).run(timeout=15)
 def select_game_tab(app: AppTest, game: holdet.GameContext, label: str) -> AppTest:
     app.session_state[f"game-tabs-{game.locale}-{game.slug}"] = label
     return app.run(timeout=15)
@@ -161,16 +177,17 @@ class DashboardTests(unittest.TestCase):
         self.assertIn("linear-gradient(125deg, #123456, #20252d)", markup)
         self.assertEqual(dashboard._markdown_literal("<A_[x]*>"), "\\<A\\_\\[x\\]\\*\\>")
 
-        with patch.object(dashboard.st, "markdown") as render_styles:
+        with patch.object(dashboard.st, "html") as render_styles:
             dashboard._styles()
         css = render_styles.call_args.args[0]
-        self.assertIn('div[class*="st-key-nav-card-"]', css)
-        self.assertIn('div[class*="st-key-sidebar-group-"]', css)
+        self.assertIn('[class*="st-key-nav-card-"]', css)
+        self.assertIn('[class*="st-key-sidebar-group-"]', css)
         self.assertIn("margin-left: 1.25rem", css)
-        self.assertIn('button[kind="primary"]', css)
-        self.assertIn("border-left: 3px solid #ff4b4b", css)
         self.assertIn("button:hover {", css)
         self.assertIn("button:focus-visible {", css)
+        self.assertIn("prefers-reduced-motion: reduce", css)
+        self.assertNotIn("data-testid", css)
+        self.assertNotIn(".stApp", css)
 
     def test_sidebar_orders_manager_actions_and_nested_groups(self) -> None:
         team = sample_team(58, name="Menupunkt")
@@ -367,7 +384,7 @@ class DashboardTests(unittest.TestCase):
     def test_danish_user_facing_copy_has_no_parenthesis_plurals(self) -> None:
         pattern = re.compile(r"\((?:e|er|r)\)")
         paths = (
-            PROJECT_ROOT / "website" / "app.py",
+            UI_PATH,
             PROJECT_ROOT / "website" / "data_page.py",
             PROJECT_ROOT / "holdet_lib" / "tournament.py",
         )
@@ -400,9 +417,7 @@ class DashboardTests(unittest.TestCase):
                 self.assertIsNone(mojibake.search(text))
 
     def test_danish_navigation_and_tournament_copy_uses_native_letters(self) -> None:
-        app_copy = (PROJECT_ROOT / "website" / "app.py").read_text(
-            encoding="utf-8"
-        )
+        app_copy = UI_PATH.read_text(encoding="utf-8")
         hub_copy = (PROJECT_ROOT / "website" / "hub_pages.py").read_text(
             encoding="utf-8"
         )
@@ -606,7 +621,13 @@ class DashboardTests(unittest.TestCase):
 
                 navigate(app, "calendar")
                 self.assertFalse(app.exception)
-                labels = {item.label for item in app.get("link_button")}
+                labels = {
+                    item.label
+                    for item in (
+                        *app.get("link_button"),
+                        *app.get("page_link"),
+                    )
+                }
                 self.assertIn("\u00c5bn spilinfo", labels)
                 self.assertIn("Officiel gruppe", labels)
 
@@ -830,7 +851,7 @@ class DashboardTests(unittest.TestCase):
             )
             app = AppTest.from_file(APP_PATH).run(timeout=15)
             self.assertFalse(app.exception)
-            self.assertTrue(any("Mine managerspil" in item.value for item in app.markdown))
+            self.assertIn("Mine managerspil", [item.value for item in app.title])
             self.assertFalse(
                 any(item.value == "Rundecenter" for item in (*app.title, *app.subheader))
             )
@@ -1042,13 +1063,13 @@ class DashboardTests(unittest.TestCase):
         with website_environment() as (config, _output):
             with patch("holdet_lib.HoldetClient") as client_type:
                 app = AppTest.from_file(APP_PATH).run(timeout=15)
-                self.assertTrue(any("Mine managerspil" in item.value for item in app.markdown))
+                self.assertIn("Mine managerspil", [item.value for item in app.title])
                 self.assertEqual(client_type.mock_calls, [])
 
                 add_label = "Tilf" + chr(0xf8) + "j managerspil"
                 add_buttons = [item for item in app.button if item.label == add_label]
                 self.assertEqual(len(add_buttons), 2)
-                add_buttons[1].click().run(timeout=15)
+                navigate(app, "manage-games")
                 widget(app, "text_input", "Holdet-URL eller slug").input(
                     "super-manager-fall-2026"
                 )
@@ -1059,6 +1080,15 @@ class DashboardTests(unittest.TestCase):
                 button(app, add).click().run(timeout=15)
 
                 self.assertFalse(app.exception)
+                configuration = holdet.GroupStore(
+                    config / "groups.json"
+                ).load_configuration()
+                navigate(
+                    app,
+                    "game",
+                    locale=configuration.games[0].game.locale,
+                    game=configuration.games[0].game.slug,
+                )
                 self.assertTrue(
                     any(
                         item.value == "Superliga Efter" + chr(0xe5) + "r 2026"
@@ -1066,9 +1096,6 @@ class DashboardTests(unittest.TestCase):
                     )
                 )
                 self.assertEqual(client_type.mock_calls, [])
-                configuration = holdet.GroupStore(
-                    config / "groups.json"
-                ).load_configuration()
                 self.assertEqual(len(configuration.games), 1)
                 self.assertEqual(configuration.groups, ())
                 self.assertEqual(configuration.games[0].game.locale, "da")
@@ -1625,7 +1652,7 @@ class DashboardTests(unittest.TestCase):
 
             navigate(app, "alerts")
             self.assertFalse(app.exception)
-            self.assertEqual(app.query_params["view"], ["game"])
+            self.assertNotIn("view", app.query_params)
             self.assertEqual(app.query_params["section"], ["alerts"])
             self.assertEqual([item.value for item in app.title], ["Tourspillet"])
             self.assertTrue(
@@ -1638,7 +1665,7 @@ class DashboardTests(unittest.TestCase):
             self.assertTrue(
                 any(
                     item.label == "Administrér watchlist"
-                    for item in app.get("link_button")
+                    for item in app.get("page_link")
                 )
             )
             self.assertTrue(
@@ -1933,7 +1960,7 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(config["server"]["address"], "127.0.0.1")
         self.assertNotIn("port", config["server"])
         self.assertEqual(config["client"]["toolbarMode"], "viewer")
-        app_source = APP_PATH.read_text(encoding="utf-8")
+        app_source = UI_PATH.read_text(encoding="utf-8")
         data_source = (PROJECT_ROOT / "website" / "data_page.py").read_text(
             encoding="utf-8"
         )

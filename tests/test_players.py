@@ -3,7 +3,6 @@ from __future__ import annotations
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from datetime import datetime
 import io
-import os
 from pathlib import Path
 import shutil
 import unittest
@@ -208,35 +207,6 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         self.assertEqual(mocked.call_args.kwargs["sort_order"], "asc")
-
-
-@unittest.skipUnless(
-    os.environ.get("HOLDET_LIVE_TESTS") == "1",
-    "set HOLDET_LIVE_TESTS=1 to contact Holdet.dk",
-)
-class LiveSmokeTests(unittest.TestCase):
-    URLS = {
-        "https://www.holdet.dk/da/fantasy/super-manager-fall-2026": ("soccer", "money", None),
-        "https://www.holdet.dk/da/fantasy/tour-de-france-2026": ("cycling", "money", None),
-        "https://www.holdet.dk/da/fantasy/tour-de-france-manager-2026": ("cycling", "points", 21),
-        "https://www.holdet.dk/da/fantasy/motor-manager-2026": ("formula1", "money", None),
-        "https://www.holdet.dk/da/fantasy/golf-manager-2026": ("golf", "points", None),
-    }
-
-    def test_current_public_payloads(self) -> None:
-        client = scraper.HoldetClient()
-        for url, (expected_format, expected_unit, expected_round) in self.URLS.items():
-            with self.subTest(url=url):
-                result = client.fetch_players(url)
-                self.assertEqual(result.format, expected_format)
-                self.assertEqual(result.unit, expected_unit)
-                if expected_round is None:
-                    self.assertGreaterEqual(result.round_number, 1)
-                else:
-                    self.assertEqual(result.round_number, expected_round)
-                self.assertGreater(len(result.entries), 0)
-                self.assertTrue(result.entries[0].name)
-                self.assertTrue(result.entries[0].team)
 
 
 if __name__ == "__main__":

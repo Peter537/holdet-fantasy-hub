@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from datetime import datetime
-from urllib.parse import quote
-
 import pandas as pd
 import streamlit as st
+
+from website.navigation import PageId, page_link, relative_url
 
 from holdet_lib import (
     AnalysisInboxStore,
@@ -194,6 +194,7 @@ def _selected_analysis_panel(manager_game: ManagerGame) -> str:
     return slug
 
 
+@st.fragment
 def analysis_panel(
     manager_game: ManagerGame,
     groups: tuple[GroupDefinition, ...],
@@ -209,11 +210,13 @@ def analysis_panel(
         "Alle tal beregnes fra lokale snapshots. Regelafhængige resultater "
         "vises kun, når den konkrete sæson er verificeret."
     )
-    game_groups = _game_groups(manager_game, groups)
-    player_index = PlayerStatisticsStore(paths.snapshot_dir).scan(manager_game.game)
-    rules = _rule_profile(manager_game, paths)
     panel = _selected_analysis_panel(manager_game)
     if panel == "decisions":
+        game_groups = _game_groups(manager_game, groups)
+        player_index = PlayerStatisticsStore(paths.snapshot_dir).scan(
+            manager_game.game
+        )
+        rules = _rule_profile(manager_game, paths)
         _decision_panel(
             manager_game,
             game_groups,
@@ -224,10 +227,22 @@ def analysis_panel(
             read_only=read_only,
         )
     elif panel == "group":
+        game_groups = _game_groups(manager_game, groups)
+        player_index = PlayerStatisticsStore(paths.snapshot_dir).scan(
+            manager_game.game
+        )
         _group_panel(manager_game, game_groups, snapshots, player_index, paths)
     elif panel == "ideal":
+        player_index = PlayerStatisticsStore(paths.snapshot_dir).scan(
+            manager_game.game
+        )
+        rules = _rule_profile(manager_game, paths)
         _ideal_panel(manager_game, player_index, rules)
     else:
+        game_groups = _game_groups(manager_game, groups)
+        player_index = PlayerStatisticsStore(paths.snapshot_dir).scan(
+            manager_game.game
+        )
         _experimental_panel(
             manager_game,
             game_groups,
@@ -328,6 +343,10 @@ def _decision_panel(
             ],
             hide_index=True,
             width="stretch",
+            key=(
+                f"analysis:{manager_game.game.locale}:"
+                f"{manager_game.game.slug}:decision-ledger"
+            ),
         )
         cards = st.columns(3)
         cards[0].metric(
@@ -370,6 +389,10 @@ def _decision_panel(
             ],
             hide_index=True,
             width="stretch",
+            key=(
+                f"analysis:{manager_game.game.locale}:"
+                f"{manager_game.game.slug}:captain-alternatives"
+            ),
         )
     if located[1].bank is not None:
         st.markdown("#### Bankens break-even")
@@ -540,6 +563,10 @@ def _group_panel(manager_game, groups, snapshots, player_index, paths) -> None:
             column_config={
                 "Eksponering": st.column_config.ProgressColumn(format="percent")
             },
+            key=(
+                f"analysis:{manager_game.game.locale}:"
+                f"{manager_game.game.slug}:group-exposure"
+            ),
         )
     else:
         st.info("Ingen dækkede rundetrupper er tilgængelige for eksponering.")
@@ -612,6 +639,10 @@ def _ideal_panel(manager_game, player_index, rules) -> None:
             ],
             hide_index=True,
             width="stretch",
+            key=(
+                f"analysis:{manager_game.game.locale}:"
+                f"{manager_game.game.slug}:ideal-team"
+            ),
         )
 
 
@@ -676,7 +707,15 @@ def _experimental_panel(
                 row["Officiel difficulty"] = item.official_difficulty
             fixture_rows.append(row)
         if fixture_rows:
-            st.dataframe(fixture_rows, hide_index=True, width="stretch")
+            st.dataframe(
+                fixture_rows,
+                hide_index=True,
+                width="stretch",
+                key=(
+                    f"analysis:{manager_game.game.locale}:"
+                    f"{manager_game.game.slug}:fixtures"
+                ),
+            )
         else:
             st.info("Fixturecachen er verificeret, men indeholder ingen kampe.")
         if not fixture_snapshot.source.difficulty_verified:
@@ -823,9 +862,12 @@ def player_detail_view(
     if analysis is None or latest_entry is None:
         st.title("Spilleren blev ikke fundet")
         st.info("Spilleren findes ikke i de lokale snapshots for dette spil.")
-        st.link_button(
+        page_link(
+            PageId.GAME,
             "Tilbage til spillerstatistik",
-            f"?view=game&locale={manager_game.game.locale}&game={manager_game.game.slug}&section=players",
+            locale=manager_game.game.locale,
+            game=manager_game.game.slug,
+            section="players",
         )
         return
     st.title(analysis.name, anchor=f"spiller-{latest_entry.entry_id or latest_entry.source_index}")
@@ -880,7 +922,15 @@ def player_detail_view(
                 "Der er kun ét numerisk datapunkt. Grafen vises, når mindst "
                 "to runder er gemt."
             )
-        st.dataframe(frame, hide_index=True, width="stretch")
+        st.dataframe(
+            frame,
+            hide_index=True,
+            width="stretch",
+            key=(
+                f"player:{manager_game.game.locale}:"
+                f"{manager_game.game.slug}:{player_key}:curve"
+            ),
+        )
         if any(value != "final" for value in frame["Datastatus"]):
             st.caption(
                 "Punkter fra en ikke-afsluttet runde er markeret som "
@@ -924,7 +974,15 @@ def player_detail_view(
             }
         )
     if status_rows:
-        st.dataframe(status_rows, hide_index=True, width="stretch")
+        st.dataframe(
+            status_rows,
+            hide_index=True,
+            width="stretch",
+            key=(
+                f"player:{manager_game.game.locale}:"
+                f"{manager_game.game.slug}:{player_key}:status"
+            ),
+        )
     else:
         st.info("Der er ingen gemte statusobservationer for spilleren.")
     st.subheader("Egne noter og tags")
@@ -976,9 +1034,12 @@ def player_detail_view(
             values = (*values, watchlist_entry(manager_game.game, latest_entry))
         settings_store.set_watchlist(settings, values)
         st.rerun()
-    st.link_button(
+    page_link(
+        PageId.GAME,
         "Tilbage til spillerstatistik",
-        f"?view=game&locale={manager_game.game.locale}&game={manager_game.game.slug}&section=players",
+        locale=manager_game.game.locale,
+        game=manager_game.game.slug,
+        section="players",
     )
 
 
@@ -1014,23 +1075,18 @@ def alerts_view(
     watchlist_label = (
         "Se watchlist" if read_only else "Administrér watchlist"
     )
-    watchlist_url = (
-        f"?view=players&locale={quote(game.locale)}&game={quote(game.slug)}&panel=compare"
-        if standalone
-        else (
-            f"?view=game&locale={quote(game.locale)}&game={quote(game.slug)}"
-            "&section=players&panel=compare"
-        )
-    )
     with st.container(horizontal=True, vertical_alignment="center"):
         if settings_error is None:
             suffix = "spiller" if len(watched) == 1 else "spillere"
             st.write(f"**Watchlist:** {len(watched)} {suffix}")
-        st.link_button(
+        page_link(
+            PageId.PLAYERS if standalone else PageId.GAME,
             watchlist_label,
-            watchlist_url,
             icon=":material/star:",
-            key=f"alert-watchlist-{game.locale}-{game.slug}",
+            locale=game.locale,
+            game=game.slug,
+            panel="compare",
+            **({} if standalone else {"section": "players"}),
         )
     if settings_error is not None:
         st.warning(
@@ -1107,14 +1163,12 @@ def alerts_view(
                 f"Runde {item.round_number if item.round_number is not None else 'ukendt'} · "
                 f"{item.detected_at.astimezone().strftime('%d.%m.%Y %H:%M')}"
             )
-            player_url = (
-                f"?view=player&locale={quote(game.locale)}&game={quote(game.slug)}"
-                f"&player={quote(item.player_key)}"
-                + (
-                    f"&round={item.round_number}"
-                    if item.round_number is not None
-                    else ""
-                )
+            player_url = relative_url(
+                PageId.PLAYER,
+                locale=game.locale,
+                game=game.slug,
+                player=item.player_key,
+                round=item.round_number,
             )
             with st.container(horizontal=True):
                 st.link_button(
@@ -1123,20 +1177,25 @@ def alerts_view(
                     icon=":material/person:",
                     key=f"open-alert-player-{item.alert_id}",
                 )
-                if item.read_at is None and st.button(
-                    "Markér som læst", key=f"read-alert-{item.alert_id}"
-                ):
-                    store.mark_read(item.alert_id)
-                    st.rerun()
-                if item.dismissed_at is None and st.button(
-                    "Afvis", key=f"dismiss-alert-{item.alert_id}"
-                ):
-                    store.dismiss(item.alert_id)
-                    st.rerun()
-    if any(item.dismissed_at is not None for item in alerts) and st.button(
-        "Ryd afviste alarmer",
-        type="secondary",
-        key=f"clear-alerts-{game.locale}-{game.slug}",
-    ):
-        store.clear_dismissed(game_identity=identity)
-        st.rerun()
+                if item.read_at is None:
+                    st.button(
+                        "Markér som læst",
+                        key=f"read-alert-{item.alert_id}",
+                        on_click=store.mark_read,
+                        args=(item.alert_id,),
+                    )
+                if item.dismissed_at is None:
+                    st.button(
+                        "Afvis",
+                        key=f"dismiss-alert-{item.alert_id}",
+                        on_click=store.dismiss,
+                        args=(item.alert_id,),
+                    )
+    if any(item.dismissed_at is not None for item in alerts):
+        st.button(
+            "Ryd afviste alarmer",
+            type="secondary",
+            key=f"clear-alerts-{game.locale}-{game.slug}",
+            on_click=store.clear_dismissed,
+            kwargs={"game_identity": identity},
+        )

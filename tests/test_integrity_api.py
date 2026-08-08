@@ -172,6 +172,8 @@ def test_local_api_catalog_filters_and_security_headers(tmp_path: Path, monkeypa
 
     catalog = client.get("/api/v1/catalog").json()
     assert {item["name"] for item in catalog["datasets"]} == set(holdet.LOCAL_API_DATASETS)
+    openapi = client.get("/api/v1/openapi.json").json()
+    assert openapi["servers"] == [{"url": "/"}]
     invalid = client.get("/api/v1/data/players")
     assert invalid.status_code == 400
     assert invalid.json()["error"]["code"] == "invalid_query"

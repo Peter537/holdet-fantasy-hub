@@ -27,6 +27,7 @@ class VersionAndDispatchTests(unittest.TestCase):
             "team-statistics.md",
             "testing.md",
             "local-api.md",
+            "navigation.md",
         }
         self.assertEqual({path.name for path in documents[1:]}, expected_docs)
         self.assertFalse((root / "examples").exists())

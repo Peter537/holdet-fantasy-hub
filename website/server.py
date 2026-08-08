@@ -102,7 +102,7 @@ def _openapi_document() -> dict[str, object]:
     return {
         "openapi": "3.1.0",
         "info": {"title": "Holdet Fantasy Hub local API", "version": "1.0.0"},
-        "servers": [{"url": "http://127.0.0.1:8501"}],
+        "servers": [{"url": "/"}],
         "paths": {
             "/api/v1/health": {"get": {"responses": {"200": {"description": "Status"}}}},
             "/api/v1/catalog": {"get": {"responses": {"200": {"description": "Datasætkatalog"}}}},

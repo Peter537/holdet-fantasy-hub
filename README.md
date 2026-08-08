@@ -37,7 +37,7 @@ py -3.14 -m streamlit run .\website\server.py
 
 ## Navigation
 
-Sidebaren indeholder **Mine managerspil**, statistikvisninger, aktive og arkiverede managerspil, **Managers**, **Kalender** og **Data og lager**. Ulæste statusalarmer vises ved det relevante managerspil og i managerspillets egen **Statusalarmer**-fane. Den gamle route `?view=hall-of-fame` viderestiller til Managers.
+Streamlit ejer routingen via `st.navigation`/`st.Page`, mens den dynamiske sidebar fortsat viser **Mine managerspil**, statistikvisninger, aktive og arkiverede managerspil, **Managers**, **Kalender** og **Data og lager**. Ulæste statusalarmer vises ved det relevante managerspil og i managerspillets egen **Statusalarmer**-fane. Gamle `?view=…`-links viderestilles; eksempelvis går `?view=hall-of-fame` til `/managers`.
 
 Managers har fanerne Rangliste, Medaljer og rekorder, Sammenlign, Sæsoner og Identiteter. Kalenderen kan filtreres på managerspil og gruppe eller turnering. Gruppe-, hold- og managerkort viser officielle links, når de findes i cache eller konfiguration.
 
@@ -47,6 +47,7 @@ Managers har fanerne Rangliste, Medaljer og rekorder, Sammenlign, Sæsoner og Id
 | --- | --- |
 | Arkitektur, dataflow og offentlige API'er | [Arkitektur](docs/architecture.md) |
 | Dashboard, deeplinks og CLI | [Klienter](docs/clients.md) |
+| Canonical routes og legacy-kompatibilitet | [Navigation](docs/navigation.md) |
 | Manageridentitet, Elo, awards, H2H og sæsoner | [Managers og sæsoner](docs/managers-and-seasons.md) |
 | Grupper og turneringsformater | [Grupper og turneringer](docs/groups-and-tournaments.md) |
 | Hentning fra Holdet.dk | [Datahentning](docs/data-retrieval.md) |

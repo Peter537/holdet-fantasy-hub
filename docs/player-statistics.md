@@ -12,7 +12,7 @@ Spillerstatistik kan bruges som selvstændig side eller inde i et managerspil. D
 
 Den nyeste kompatible cache vises med det samme. Netværk bruges kun af **Hent seneste spillerstatistik**, **Hent manglende runder**, **Hent runde X**, **Opdater runde X** eller **Prøv igen**. Hver hentning gemmer hele det ufiltrerede resultat som et kanonisk JSON-snapshot; rundestatus og hentetidspunkt fryses sammen med dataene.
 
-Spillerlisten tilføjer cacheberegnede kolonner for form 3/5, stabilitet og, i pengespil, historisk vækst pr. aktuel million. Hver række har et direkte link til `?view=player&locale=…&game=…&player=…&round=…`.
+Spillerlisten tilføjer cacheberegnede kolonner for form 3/5, stabilitet og, i pengespil, historisk vækst pr. aktuel million. Hver række har et direkte link til `/player?locale=…&game=…&player=…&round=…`.
 
 ## Spillerdetalje, noter og statusalarmer
 
@@ -57,7 +57,9 @@ Cykling kan ikke klassificeres ud fra route-navnet alene; rulesettets `salaryCap
 
 ## Filtre og tabel
 
-Filtre påvirker kun den viste og eksporterede tabel, aldrig det kanoniske snapshot. De omfatter fritekst, hold/land, position/kategori, pris/point, vækst, status, kolonner og sortering. Status kan ignoreres, kræves eller udelukkes; flere krævede statustyper skal alle være til stede.
+Filtre påvirker kun den viste og eksporterede tabel, aldrig det kanoniske snapshot. De omfatter fritekst, hold/land, position/kategori, pris/point, vækst, status, kolonner og sortering. De samles i en formular og træder først i kraft ved **Anvend filtre**; **Nulstil** rydder hele filtersættet. Status kan ignoreres, kræves eller udelukkes; flere krævede statustyper skal alle være til stede.
+
+Spillerlisten, filtrene og eksporten kører i samme sekventielle fragment. Dataframe-keyen er baseret på route og spilidentitet med en eksplicit schema-version, ikke runde, tidspunkt eller rækkeantal. Derfor bevares sorteringsvalg og den native tabelscroll ved et relateret fragment-rerun.
 
 Aktuelle filtre, kolonner og sortering kan gemmes, omdøbes og slettes som en versioneret profil med unikt navn pr. spil. De ikke-persistente profiler **Billige forsvarere**, **Aktive under 5 mio.** og **Skadede spillere** vises kun, når enhed og felter gør dem meningsfulde. En profil anvendes først ved et eksplicit klik.
 

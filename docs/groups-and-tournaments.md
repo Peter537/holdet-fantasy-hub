@@ -23,7 +23,7 @@ Competition ranking bruges ved ties, og holdnavn er den deterministiske sekundæ
 
 ## Turneringsformater
 
-Schema-8-runtimeformatet er fortsat `TournamentConfig`; `TournamentDefinition` er det kompatible offentlige alias. `LeagueTemplateConfig`, `SwissTemplateConfig`, `GroupKnockoutTemplateConfig` og `DoubleEliminationTemplateConfig` er validerede projektioner via `tournament_template_config`. Guiden vælger template, deltagere, fantasy-runder, seedning og tie-breakers og viser en fixture-preview før gem.
+Schema-8-runtimeformatet er fortsat `TournamentConfig`; `TournamentDefinition` er det kompatible offentlige alias. `LeagueTemplateConfig`, `SwissTemplateConfig`, `GroupKnockoutTemplateConfig` og `DoubleEliminationTemplateConfig` er validerede projektioner via `tournament_template_config`. Guiden er opdelt i fire synlige trin: type/spil, navn/deltagere/regler, valideret preview og afsluttende oprettelse. Den bevarer indtastninger efter valideringsfejl og udfører ingen write før det sidste submit.
 
 | Template | Plan |
 | --- | --- |
@@ -64,7 +64,7 @@ Turneringens faner tilpasses templaten. Overblik, Kampe og Historik bevares; sta
 
 ## Managers og sæsoner
 
-Den globale **Managers**-destination erstatter Hall of Fame som navigationsnavn. Den samler Elo, den eksisterende pointprofil, medaljer, rekorder, H2H, sæsoner og identitetsstyring. Den gamle `?view=hall-of-fame`-route viderestiller fortsat.
+Den globale **Managers**-destination på `/managers` erstatter Hall of Fame som navigationsnavn. Den samler Elo, den eksisterende pointprofil, medaljer, rekorder, H2H, sæsoner og identitetsstyring. Den gamle `?view=hall-of-fame`-route viderestiller fortsat.
 
 Managerens bedste hold pr. spil/runde tæller, og selvopgør fjernes. Komplette managerresultater publiceres som append-only eventrevisioner; navigation viser kun cachebaserede previews. Læs [Managers og sæsoner](managers-and-seasons.md) for identitet, Elo, awards, H2H og sæsonpoint.
 

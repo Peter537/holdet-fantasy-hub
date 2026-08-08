@@ -7,7 +7,11 @@ Holdet Fantasy Hub har et importerbart domænebibliotek, et lokalt Streamlit-das
 ```mermaid
 flowchart TB
     subgraph Clients["Klienter"]
-        Web["website/server.py<br/>st.App + Streamlit-dashboard"]
+        Web["website/server.py<br/>st.App + lokale API-ruter"]
+        Shell["website/app.py<br/>tynd Streamlit-entrypoint"]
+        Pages["navigation.py + app_pages/<br/>st.navigation / st.Page"]
+        Context["UiContext + dynamisk sidebar"]
+        Fragments["Formularer og sekventielle fragments"]
         Api["Loopback read-only API<br/>Starlette-ruter"]
         Cli["cli/main.py<br/>Eksisterende spiller-, hold- og datakommandoer"]
     end
@@ -20,7 +24,11 @@ flowchart TB
         Tournament["Generisk turneringsmotor"]
         Stores["Versionsstyrede stores og backup"]
     end
-    Web --> Fetch
+    Web --> Shell
+    Shell --> Pages
+    Pages --> Context
+    Context --> Fragments
+    Fragments --> Fetch
     Api --> Stores
     Cli --> Fetch
     Fetch --> Domain
@@ -28,7 +36,7 @@ flowchart TB
     Domain --> Manager
     Domain --> Analysis
     Domain --> Tournament
-    Web --> Stores
+    Fragments --> Stores
     Cli --> Stores
     Stores --> AppData["Windows AppData"]
     Fetch --> Holdet["Offentlige Holdet.dk-endpoints"]
@@ -54,7 +62,22 @@ Rene builders skriver ikke filer. Stores skriver kun efter eksplicitte handlinge
 
 ### Streamlit
 
-`website/server.py` er den kanoniske `st.App`-wrapper og registrerer loopback-only API-ruter. `website/app.py` ejer fortsat UI-routing, AppTest-entrypoint og eksplicitte refresh-hooks. `website/hub_pages.py` ejer Managers, Kalender, Rundens historie og relaterede paneler. `website/data_sections.py` ejer de nye data-, import-, integritets- og oprydningsflows. Query-parametre og navngivet session state fastholder kontekst. Almindelig navigation læser cache.
+`website/server.py` er den kanoniske `st.App`-wrapper og registrerer loopback-only API-ruter. `website/app.py` er en tynd entrypoint: den konfigurerer siden, registrerer filbaserede sider, bygger den typed `UiContext`, håndterer legacy-links, tegner den dynamiske sidebar og kører den valgte side. `website/navigation.py` er den eneste route-tabel og ejer `PageId`, `go_to`, `page_link` og legacy-mapping. De filbaserede moduler i `website/app_pages/` gør native routing og `AppTest.switch_page` ensartede.
+
+`website/ui.py` ejer den fælles kontekst og de eksisterende domænevisninger. `website/hub_pages.py` ejer Managers, Kalender, Rundens historie og relaterede paneler; `website/analysis_pages.py` ejer beslutningspaneler; `website/data_sections.py` ejer data-, import-, integritets- og oprydningsflows. Spillerfiltre/-tabel, analysepanel, kalender og managercenter er sekventielle `st.fragment`-grænser. Muterende handlinger afsluttes med fuld `st.rerun()`, mens filterændringer bliver i fragmentet. Query-parametre og semantiske session-state-nøgler fastholder kontekst. Almindelig navigation læser cache.
+
+```mermaid
+flowchart LR
+    Entry["website/app.py"] --> Registry["Page-register"]
+    Registry --> Page["app_pages/*.py"]
+    Entry --> UiContext["UiContext"]
+    UiContext --> Sidebar["Dynamisk sidebar"]
+    Page --> Fragments["Fragments og formularer"]
+    Fragments --> Builders["Rene builders + cache_data"]
+    Builders --> Stores["Versionerede stores"]
+```
+
+Se [Navigation](navigation.md) for canonical paths og den komplette legacy-matrix.
 
 ### CLI
 

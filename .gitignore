@@ -1,7 +1,15 @@
 __pycache__/
 *.py[cod]
 *.egg-info/
+.pytest_cache/
+pytest-cache-files-*/
+pytest-plan-*/
 .streamlit/secrets.toml
+/tests/_test-*/
+/tests/ui/baselines/
+/tests/ui/artifacts/
+/test-results/
+/playwright-report/
 
 # Legacy and personalized runtime data
 /config/

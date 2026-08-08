@@ -13,6 +13,8 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
+from website.navigation import PageId, page_link
+
 from holdet_lib import (
     AppPaths,
     GameMetadataStore,
@@ -247,38 +249,53 @@ def manager_round_center(
         with st.container(border=True):
             st.markdown("**Rangbevægelser**")
             if rank_rows:
-                st.dataframe(rank_rows, hide_index=True)
+                st.dataframe(
+                    rank_rows,
+                    hide_index=True,
+                    key=(
+                        f"round-center:{manager_game.game.locale}:"
+                        f"{manager_game.game.slug}:rank-movements"
+                    ),
+                )
             else:
                 st.caption("Ingen bevægelser mellem de seneste tilgængelige runder.")
     with right:
         with st.container(border=True):
             st.markdown("**Skader og karantæner**")
             if injury_rows:
-                st.dataframe(injury_rows, hide_index=True)
+                st.dataframe(
+                    injury_rows,
+                    hide_index=True,
+                    key=(
+                        f"round-center:{manager_game.game.locale}:"
+                        f"{manager_game.game.slug}:injuries"
+                    ),
+                )
             else:
                 st.caption("Ingen markeringer i det valgte spillersnapshot.")
 
     with st.container(horizontal=True):
-        st.link_button(
+        page_link(
+            PageId.GAME,
             "Åbn spillerstatistik",
-            (
-                f"?view=game&locale={manager_game.game.locale}&game="
-                f"{manager_game.game.slug}&section=players"
-            ),
             icon=":material/query_stats:",
+            locale=manager_game.game.locale,
+            game=manager_game.game.slug,
+            section="players",
         )
-        st.link_button(
+        page_link(
+            PageId.GAME,
             "Åbn holdstatistik",
-            (
-                f"?view=game&locale={manager_game.game.locale}&game="
-                f"{manager_game.game.slug}&section=teams"
-            ),
             icon=":material/groups:",
+            locale=manager_game.game.locale,
+            game=manager_game.game.slug,
+            section="teams",
         )
-        st.link_button(
+        page_link(
+            PageId.DATA,
             "Åbn Datastatus",
-            "?view=data&section=quality",
             icon=":material/data_check:",
+            section="quality",
         )
 
 
@@ -477,6 +494,10 @@ def transfer_lab_panel(
             for item in result.ending_roster
         ],
         hide_index=True,
+        key=(
+            f"transfer-lab:{team.reference.game.locale}:"
+            f"{team.reference.game.slug}:{team.reference.team_id}:roster"
+        ),
     )
 
 
@@ -566,6 +587,7 @@ def player_compare_panel(
             for key in selected
         ],
         hide_index=True,
+        key=f"player-compare:{game.locale}:{game.slug}:selection",
     )
     history = build_player_history(players, game, tuple(selected))
     frame = pd.DataFrame(
@@ -647,7 +669,14 @@ def player_changes_panel(
         if expander.open:
             with expander:
                 if items:
-                    st.dataframe(rows(items), hide_index=True)
+                    st.dataframe(
+                        rows(items),
+                        hide_index=True,
+                        key=(
+                            f"player-changes:{game.locale}:{game.slug}:"
+                            f"{label}:v1"
+                        ),
+                    )
                 else:
                     st.caption("Ingen ændringer.")
 
@@ -915,13 +944,13 @@ def data_quality_panel(
                     )
                 if latest.last_error_message:
                     st.error(latest.last_error_message)
-            st.link_button(
+            page_link(
+                PageId.GAME,
                 "Åbn Rundecenter",
-                (
-                    f"?view=game&locale={manager_game.game.locale}&game="
-                    f"{manager_game.game.slug}&section=round-center"
-                ),
                 icon=":material/open_in_new:",
+                locale=manager_game.game.locale,
+                game=manager_game.game.slug,
+                section="round-center",
             )
             if len(rows) > 1:
                 expander = st.expander(
@@ -953,6 +982,10 @@ def data_quality_panel(
                                 for row in rows[1:]
                             ],
                             hide_index=True,
+                            key=(
+                                f"data-quality:{manager_game.game.locale}:"
+                                f"{manager_game.game.slug}:history"
+                            ),
                         )
 
 
@@ -1027,6 +1060,7 @@ def legacy_manager_view(
             column_config={
                 "Sejrsrate": st.column_config.NumberColumn(format="percent")
             },
+            key="legacy-managers:ranking",
         )
     else:
         st.info(
@@ -1051,6 +1085,7 @@ def legacy_manager_view(
                         for row in preview.rows
                     ],
                     hide_index=True,
+                    key="legacy-managers:preview-ranking",
                 )
             st.dataframe(
                 [
@@ -1063,6 +1098,7 @@ def legacy_manager_view(
                     for item in live
                 ],
                 hide_index=True,
+                key="legacy-managers:live-events",
             )
     for warning in warnings:
         st.warning(warning)
@@ -1176,6 +1212,7 @@ def backup_view(paths: AppPaths) -> None:
             for item in validation.manifest.files
         ],
         hide_index=True,
+        key="backup:manifest",
     )
     confirm = st.checkbox(
         "Jeg forstår, at aktiv konfiguration og aktive data erstattes",
@@ -1238,6 +1275,7 @@ def render_tournament_bracket(
             ],
             hide_index=True,
             width="stretch",
+            key=f"tournament:{group.group_id}:double-elimination-bracket",
         )
         st.caption("GF2 spilles kun, hvis taberbracket-vinderen vinder GF1.")
         return
@@ -1382,6 +1420,40 @@ def _manager_settings(paths: AppPaths) -> tuple[HubSettingsStore, HubSettings]:
         return store, HubSettings()
 
 
+@st.cache_data(max_entries=8, show_spinner=False)
+def _cached_manager_live_events(groups, teams, settings, final_rounds):
+    return build_live_hall_of_fame_events(
+        groups,
+        teams,
+        settings,
+        final_rounds=final_rounds,
+    )
+
+
+@st.cache_data(max_entries=8, show_spinner=False)
+def _cached_manager_round_results(groups, teams, settings):
+    return build_manager_round_results(groups, teams, settings)
+
+
+@st.cache_data(max_entries=8, show_spinner=False)
+def _cached_manager_ratings(groups, teams, settings):
+    return build_manager_ratings(groups, teams, settings)
+
+
+@st.cache_data(max_entries=8, show_spinner=False)
+def _cached_manager_board(frozen, settings):
+    return build_hall_of_fame(
+        frozen,
+        settings.hall_of_fame_score,
+        settings=settings,
+    )
+
+
+@st.cache_data(max_entries=8, show_spinner=False)
+def _cached_manager_careers(frozen, round_results):
+    return build_manager_careers(frozen, round_results)
+
+
 def _manager_tabs():
     labels = (
         "Rangliste",
@@ -1423,6 +1495,7 @@ def _manager_tabs():
     )
 
 
+@st.fragment
 def managers_view(
     groups: tuple[GroupDefinition, ...],
     teams: SnapshotIndex,
@@ -1439,22 +1512,10 @@ def managers_view(
         for item in metadata
         if item.final_round is not None
     }
-    live = build_live_hall_of_fame_events(
-        groups,
-        teams,
-        settings,
-        final_rounds=final_rounds,
-    )
+    live = _cached_manager_live_events(groups, teams, settings, final_rounds)
     frozen, ledger_warnings = HallOfFameStore(paths.hall_of_fame_dir).scan()
     frozen = remap_manager_events(frozen, settings)
-    board = build_hall_of_fame(
-        frozen,
-        settings.hall_of_fame_score,
-        settings=settings,
-    )
-    round_results = build_manager_round_results(groups, teams, settings)
-    ratings = build_manager_ratings(groups, teams, settings)
-    careers = build_manager_careers(frozen, round_results)
+    round_results = _cached_manager_round_results(groups, teams, settings)
     profiles = effective_manager_profiles(settings)
 
     with st.container(horizontal=True):
@@ -1492,6 +1553,8 @@ def managers_view(
     ) = _manager_tabs()
     if rank_tab.open:
         with rank_tab:
+            board = _cached_manager_board(frozen, settings)
+            ratings = _cached_manager_ratings(groups, teams, settings)
             rating_by_id = {item.manager_id: item for item in ratings}
             rows = []
             for row in board.rows:
@@ -1528,7 +1591,12 @@ def managers_view(
                 if rating.manager_id not in known
             )
             if rows:
-                st.dataframe(rows, hide_index=True, width="stretch")
+                st.dataframe(
+                    rows,
+                    hide_index=True,
+                    width="stretch",
+                    key="managers:ranking",
+                )
             else:
                 st.info("Ingen komplette managerresultater endnu.")
             with st.expander("Foreløbig visning", on_change="rerun") as preview:
@@ -1544,6 +1612,7 @@ def managers_view(
                         ],
                         hide_index=True,
                         width="stretch",
+                        key="managers:ranking-preview",
                     )
             st.subheader("Pointprofil")
             score = settings.hall_of_fame_score
@@ -1581,6 +1650,7 @@ def managers_view(
 
     if medal_tab.open:
         with medal_tab:
+            careers = _cached_manager_careers(frozen, round_results)
             if careers:
                 st.dataframe(
                     [
@@ -1601,12 +1671,15 @@ def managers_view(
                     ],
                     hide_index=True,
                     width="stretch",
+                    key="managers:medals-records",
                 )
             else:
                 st.info("Medaljer og rekorder vises efter f\u00f8rste komplette event.")
 
     if compare_tab.open:
         with compare_tab:
+            ratings = _cached_manager_ratings(groups, teams, settings)
+            careers = _cached_manager_careers(frozen, round_results)
             names = {
                 item.manager_id: item.manager_name
                 for item in ratings
@@ -1785,6 +1858,7 @@ def managers_view(
                     ],
                     hide_index=True,
                     width="stretch",
+                    key=f"managers:comparison:{first}:{second}",
                 )
 
     if season_tab.open:
@@ -1832,6 +1906,7 @@ def managers_view(
                     ],
                     hide_index=True,
                     width="stretch",
+                    key=f"managers:season:{season.season_id}:standings",
                 )
                 if not season.is_archived:
                     with st.expander(
@@ -1934,6 +2009,7 @@ def managers_view(
                     ],
                     hide_index=True,
                     width="stretch",
+                    key="managers:identities",
                 )
             with st.form("manager-profile-merge"):
                 target = st.selectbox(
@@ -2184,6 +2260,74 @@ def managers_view(
         st.warning(warning)
 
 
+def _calendar_filter_controls(
+    game_identities,
+    slug_counts,
+    event_group_ids,
+    group_names,
+    manager_names,
+):
+    with st.form("calendar-filters", border=False):
+        game_filter = st.selectbox(
+            "Managerspil",
+            (None, *game_identities),
+            format_func=lambda identity: (
+                "Alle managerspil"
+                if identity is None
+                else (
+                    identity[1]
+                    if slug_counts[identity[1]] == 1
+                    else f"{identity[1]} ({identity[0]})"
+                )
+            ),
+            key="calendar:game",
+            persist_state="session",
+        )
+        group_filter = st.selectbox(
+            "Gruppe eller turnering",
+            (None, *event_group_ids),
+            format_func=lambda key: (
+                "Alle grupper" if key is None else group_names.get(key, key)
+            ),
+            key="calendar:group",
+            persist_state="session",
+        )
+        manager_filter = st.selectbox(
+            "Manager",
+            (
+                None,
+                *sorted(
+                    manager_names,
+                    key=lambda key: (manager_names[key].casefold(), key),
+                ),
+            ),
+            format_func=lambda key: (
+                "Alle managers" if key is None else manager_names.get(key, key)
+            ),
+            key="calendar:manager",
+            persist_state="session",
+        )
+        date_filter = st.date_input(
+            "Dato",
+            value=None,
+            key="calendar:date",
+            persist_state="session",
+        )
+        include_past = st.toggle(
+            "Vis tidligere begivenheder",
+            value=False,
+            key="calendar:include-past",
+            persist_state="session",
+        )
+        st.form_submit_button(
+            "Anvend filtre",
+            icon=":material/filter_alt:",
+            type="primary",
+        )
+    return game_filter, group_filter, manager_filter, date_filter, include_past
+
+
+@st.fragment
 def calendar_view(
     groups: tuple[GroupDefinition, ...],
     paths: AppPaths,
@@ -2234,49 +2378,20 @@ def calendar_view(
         slug: sum(identity[1] == slug for identity in game_identities)
         for _, slug in game_identities
     }
-    game_filter = st.selectbox(
-        "Managerspil",
-        (None, *game_identities),
-        format_func=lambda identity: (
-            "Alle managerspil"
-            if identity is None
-            else (
-                identity[1]
-                if slug_counts[identity[1]] == 1
-                else f"{identity[1]} ({identity[0]})"
-            )
-        ),
-    )
     group_names = {group.group_id: group.name for group in groups}
-    group_filter = st.selectbox(
-        "Gruppe eller turnering",
-        (None, *sorted({item.group_id for item in events})),
-        format_func=lambda key: (
-            "Alle grupper"
-            if key is None
-            else group_names.get(key, key)
-        ),
+    (
+        game_filter,
+        group_filter,
+        manager_filter,
+        date_filter,
+        include_past,
+    ) = _calendar_filter_controls(
+        game_identities,
+        slug_counts,
+        tuple(sorted({item.group_id for item in events})),
+        group_names,
+        manager_names,
     )
-    manager_filter = st.selectbox(
-        "Manager",
-        (
-            None,
-            *sorted(
-                manager_names,
-                key=lambda key: (
-                    manager_names[key].casefold(),
-                    key,
-                ),
-            ),
-        ),
-        format_func=lambda key: (
-            "Alle managers"
-            if key is None
-            else manager_names.get(key, key)
-        ),
-    )
-    date_filter = st.date_input("Dato", value=None)
-    include_past = st.toggle("Vis tidligere begivenheder", value=False)
     now = datetime.now().astimezone()
 
     def matches_date(item: CalendarEvent) -> bool:
@@ -2332,14 +2447,16 @@ def calendar_view(
             ],
             hide_index=True,
             width="stretch",
+            key="calendar:events",
         )
         for item in timed:
             with st.container(horizontal=True):
-                st.link_button(
+                page_link(
+                    PageId.GROUP,
                     item.title,
-                    item.internal_url,
                     icon=":material/open_in_new:",
-                    key=f"calendar-event-{item.event_id}",
+                    group=item.group_id,
+                    round=item.round_number,
                 )
                 if item.official_url:
                     st.link_button(
@@ -2355,16 +2472,13 @@ def calendar_view(
         for item in missing:
             with st.container(horizontal=True):
                 st.write(f"{item.title} - runde {item.round_number}")
-                st.link_button(
+                page_link(
+                    PageId.GAME,
                     "Åbn spilinfo",
-                    (
-                        "?view=game"
-                        f"&locale={item.game_locale.casefold()}"
-                        f"&game={item.game_slug}"
-                        "&section=administration"
-                    ),
                     icon=":material/event:",
-                    key=f"calendar-missing-{item.event_id}",
+                    locale=item.game_locale.casefold(),
+                    game=item.game_slug,
+                    section="administration",
                 )
                 if item.official_url:
                     st.link_button(

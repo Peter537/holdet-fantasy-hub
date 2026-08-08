@@ -18,6 +18,11 @@ classifiers = [
 website = ["streamlit>=1.60,<2", "starlette>=0.50,<1"]
 parquet = ["pyarrow>=23,<24"]
 test = ["pytest>=9,<10"]
+ui-test = [
+    "playwright>=1.61,<2",
+    "pytest-playwright>=0.8,<1",
+    "pillow>=12.3,<13",
+]
 
 [project.scripts]
 holdet = "cli.main:main"
