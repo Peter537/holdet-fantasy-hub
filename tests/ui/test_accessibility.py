@@ -74,6 +74,7 @@ def test_player_sort_and_dataframe_scroll_survive_fragment_rerun(
     ui_server: UiServer,
 ) -> None:
     _open_players(page, ui_server)
+    page.get_by_text("Filtre · 0", exact=True).click()
     page.get_by_text("Avancerede filtre og kolonner", exact=True).click()
     sorter = page.get_by_role("combobox", name="Sortér efter")
     expect(sorter).to_have_value("Pris")

@@ -26,7 +26,18 @@ Holdet Fantasy Hub er et uofficielt, lokalt Windows-værktøj til offentlige fan
 Projektet kræver Windows og Python 3.14. Kør fra repositoryets rod i PowerShell:
 
 ```powershell
-py -3.14 -m pip install -e ".[website,test]"
+py -3.14 .\scripts\install_locked_dependencies.py
+py -3.14 -m pip install --no-deps --no-build-isolation -e .
+```
+
+`pylock.toml` låser hele Windows/Python 3.14-miljøet, inklusive Parquet- og
+UI-testafhængigheder, til kontrollerede PyPI-wheels med SHA-256. Pips
+`lock`/`pylock.toml`-understøttelse er fortsat eksperimentel og platformsspecifik;
+installationsscriptet validerer derfor låsen og giver pip de eksakte wheel-URL'er
+og hashes. Låsen må kun opdateres på Windows med Python 3.14:
+
+```powershell
+py -3.14 .\scripts\refresh_dependency_lock.py
 ```
 
 ```powershell
@@ -69,6 +80,7 @@ Repositoryet må ikke indeholde virkelige profil-ID'er, fantasy-team-ID'er eller
 
 ```powershell
 py -3.14 -m pytest tests -q
+py -3.14 .\scripts\refresh_dependency_lock.py --check
 ```
 
 ```powershell

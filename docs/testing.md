@@ -7,7 +7,20 @@ Pytest er projektets autoritative test runner. Suiten indeholder både unittest-
 Installer website- og testafhængigheder fra repositoryets rod:
 
 ```powershell
-py -3.14 -m pip install -e ".[website,test]"
+py -3.14 .\scripts\install_locked_dependencies.py
+py -3.14 -m pip install --no-deps --no-build-isolation -e .
+```
+
+Den ene repositorylås indeholder core-, website-, Parquet-, test- og
+UI-testgrafen for Windows/Python 3.14. Opdatér den kun med den fail-closed
+resolver- og OSV-kontrol, som sender offentlige PyPI-navne og versioner, men
+ingen repositoryfiler eller private data. Da pips `lock`-kommando og
+`pylock.toml`-format stadig er eksperimentelle, validerer installationsscriptet
+låsen og installerer dens eksakte wheel-URL'er med SHA-256-kontrol:
+
+```powershell
+py -3.14 .\scripts\refresh_dependency_lock.py
+py -3.14 .\scripts\refresh_dependency_lock.py --check
 ```
 
 Kør derefter hele suiten:
@@ -57,10 +70,10 @@ AppTest åbner hovedroutes og query-parametre uden en virkelig server. Tests bev
 
 ## Lokal UI-regression og accessibility
 
-Installer det valgfrie UI-miljø og Chromium én gang:
+Den fulde lås installerer UI-testpakkerne. Installér derefter kun den af
+Playwright-versionen fastlagte Chromium-build én gang:
 
 ```powershell
-py -3.14 -m pip install -e ".[website,test,ui-test]"
 py -3.14 -m playwright install chromium
 ```
 
@@ -97,6 +110,7 @@ py -3.14 -m pytest tests -q
 py -3.14 -m pytest tests/ui -q --run-ui --browser chromium
 py -3.14 -m pytest tests/parser_canary -q --run-parser-canary
 py -3.14 -m pip check
+py -3.14 .\scripts\refresh_dependency_lock.py --check
 git diff --check
 ```
 
