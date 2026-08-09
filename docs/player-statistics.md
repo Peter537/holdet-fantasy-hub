@@ -1,6 +1,6 @@
 # Spillerstatistik
 
-Spillerstatistik kan bruges som selvstændig side eller inde i et managerspil. Den selvstændige side vælger ét managerspil; managerspilsfanen genbruger allerede valgt spil. Ingen af dem registrerer eller henter data ved almindelig navigation.
+Spillerstatistik kan bruges som selvstændig side eller inde i et managerspil. Den selvstændige side vælger et registreret spil eller indsætter en Holdet-URL i feltet **Spil eller Holdet-URL**; managerspilsfanen genbruger allerede valgt spil. Ingen af dem registrerer eller henter data ved almindelig navigation.
 
 ## Runde og paneler
 
@@ -16,7 +16,7 @@ Spillerlisten tilføjer cacheberegnede kolonner for form 3/5, stabilitet og, i p
 
 ## Spillerdetalje, noter og statusalarmer
 
-Spillerdetaljen har én H1 og viser pris-/pointkurve på faktiske rundenumre, form, stabilitet, vækst pr. million, statushistorik, watchlist samt note/tag-editor. En ikke-afsluttet runde markeres `preliminary`; en tom eller ikke-numerisk serie forklares uden at oprette en tom graf.
+Spillerdetaljen har én H1 og viser pris-/pointkurve på faktiske rundenumre, form, stabilitet, vækst pr. million, statushistorik, watchlist samt note/tag-editor. En ikke-afsluttet runde markeres **Foreløbig**; en tom eller ikke-numerisk serie forklares uden at oprette en tom graf.
 
 Noter og tags gemmes kun ved **Gem note og tags**. Noten er højst 2.000 tegn, og højst 12 tags á 24 tegn normaliseres case-insensitivt uden dubletter. Standardtags er `overvej`, `undgå`, `kaptajn` og `langsigtet`, men egne tags er tilladt.
 
@@ -57,7 +57,7 @@ Cykling kan ikke klassificeres ud fra route-navnet alene; rulesettets `salaryCap
 
 ## Filtre og tabel
 
-Filtre påvirker kun den viste og eksporterede tabel, aldrig det kanoniske snapshot. De omfatter fritekst, hold/land, position/kategori, pris/point, vækst, status, kolonner og sortering. De samles i en formular og træder først i kraft ved **Anvend filtre**; **Nulstil** rydder hele filtersættet. Status kan ignoreres, kræves eller udelukkes; flere krævede statustyper skal alle være til stede.
+Filtre påvirker kun den viste og eksporterede tabel, aldrig det kanoniske snapshot. De omfatter fritekst, hold/land, position/kategori, pris/point, vækst, status, kolonner og sortering. De fulde filtre ligger i panelet **Filtre**, mens anvendte filtre vises som kompakte chips i en sticky handlingslinje. De træder først i kraft ved **Anvend filtre**; **Nulstil** rydder hele filtersættet. Status kan ignoreres, kræves eller udelukkes; flere krævede statustyper skal alle være til stede.
 
 Spillerlisten, filtrene og eksporten kører i samme sekventielle fragment. Dataframe-keyen er baseret på route og spilidentitet med en eksplicit schema-version, ikke runde, tidspunkt eller rækkeantal. Derfor bevares sorteringsvalg og den native tabelscroll ved et relateret fragment-rerun.
 
@@ -67,7 +67,7 @@ Numeriske felter bevares som tal, så Streamlits sortering virker, men vises med
 
 ## Eksport
 
-**Opret eksport** fryser det aktuelle filtrerede resultat som TXT, JSON, Markdown, CSV, XLSX og/eller valgfri Parquet, gemmer filerne og opretter downloads med præcis de samme bytes. CSV bruger UTF-8 med BOM; XLSX og CSV neutraliserer regnearksformler. Et tomt filterresultat kan ikke eksporteres.
+Eksportsektionen er kollapset som standard. **Opret eksport** fryser det aktuelle filtrerede resultat som TXT, JSON, Markdown, CSV, XLSX og/eller valgfri Parquet, gemmer filerne og opretter downloads med præcis de samme bytes. CSV bruger UTF-8 med BOM; XLSX og CSV neutraliserer regnearksformler. Et tomt filterresultat kan ikke eksporteres.
 
 ```text
 %LOCALAPPDATA%\Holdet Fantasy Hub\exports\players\<game-slug>\data-round<round>_<MMDD>_<HHmmss>[_N].<format>

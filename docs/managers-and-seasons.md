@@ -38,7 +38,7 @@ En ratingperiode er én komplet runde i ét managerspil identificeret ved `(loca
 - alle par sammenlignes på `RoundSummary.change`;
 - rating før perioden bruges til alle forventninger i perioden.
 
-Startværdien er 1500 og `K=32`. Managerens periodedelta er `K × (gennemsnitligt faktisk resultat − gennemsnitligt forventet resultat)`. En uafgjort giver 0,5. Perioder sorteres efter rundens officielle sluttid; snapshotets tidspunkt er markeret fallback. Ratingen er foreløbig indtil fem perioder.
+Startværdien er 1500 og `K=32`. Managerens periodedelta er `K × (gennemsnitligt faktisk resultat − gennemsnitligt forventet resultat)`. En uafgjort giver 0,5. Perioder sorteres efter rundens officielle sluttid; snapshotets tidspunkt er markeret fallback. Ratingen er foreløbig indtil fem perioder. Ranglisten viser manglende rang og Elo som `–`, og Elo afrundes konsekvent til nærmeste heltal med halve værdier væk fra nul.
 
 ## Medaljer, rekorder og awards
 

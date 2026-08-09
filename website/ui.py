@@ -43,6 +43,13 @@ from website.hub_pages import (
     managers_view,
 )
 from website.navigation import PageId, go_to, page_link, relative_url
+from website.presentation import (
+    data_status_label,
+    dataframe,
+    format_relative_precise,
+    next_schedule_action,
+    sport_label,
+)
 
 
 from holdet_lib import (
@@ -348,8 +355,8 @@ def _local_data_status(
     round_status: str | None = None,
 ) -> str:
     if generated_at is None:
-        return "Ingen lokale data endnu \u00b7 Klar til manuel opdatering"
-    prefix = f"Viser lokale data fra {_format_local_date(generated_at)}"
+        return "Mangler · Klar til manuel opdatering"
+    prefix = f"Lokale data: {format_relative_precise(generated_at)}"
     if round_number is None or round_number <= 0:
         return prefix
     if round_status == "in_progress":
@@ -425,6 +432,22 @@ def _unread_alert_counts() -> dict[tuple[str, str], int]:
     counts: dict[tuple[str, str], int] = {}
     for alert in alerts:
         if not alert.is_unread:
+            continue
+        identity = (alert.game_locale, alert.game_slug)
+        counts[identity] = counts.get(identity, 0) + 1
+    return counts
+
+
+def _active_alert_counts() -> dict[tuple[str, str], int]:
+    """Return non-dismissed alert counts by game without mutating the inbox."""
+
+    try:
+        alerts = AnalysisInboxStore(APP_PATHS.analysis_inbox_file).load()
+    except (OSError, PayloadError, ValueError):
+        return {}
+    counts: dict[tuple[str, str], int] = {}
+    for alert in alerts:
+        if alert.dismissed_at is not None:
             continue
         identity = (alert.game_locale, alert.game_slug)
         counts[identity] = counts.get(identity, 0) + 1
@@ -572,15 +595,22 @@ def _navigation_card(
     view: str,
     icon: str | None = None,
     action: str = "\u00c5bn",
+    signals: tuple[str, ...] = (),
+    metadata: str | None = None,
     **parameters: object,
 ) -> None:
     """Render a native, keyboard-accessible card without a browser reload."""
-    label = (
-        f"**{_markdown_literal(title)}**  \n"
-        f":small[{_markdown_literal(subtitle)}]  \n"
-        f"{_markdown_literal(detail)}  \n"
-        f"**{_markdown_literal(action)} \u2192**"
-    )
+    lines = [
+        f"**{_markdown_literal(title)}**",
+        f":small[{_markdown_literal(subtitle)}]",
+    ]
+    lines.extend(_markdown_literal(signal) for signal in signals)
+    if detail:
+        lines.append(_markdown_literal(detail))
+    if metadata:
+        lines.append(f":small[Teknisk ID · {_markdown_literal(metadata)}]")
+    lines.append(f"**{_markdown_literal(action)} \u2192**")
+    label = "  \n".join(lines)
     with st.container(key=f"nav-card-{card_key}"):
         st.html(
             f"""<style>
@@ -669,6 +699,33 @@ def _styles() -> None:
         [class*="st-key-nav-card-"] button:focus-visible {
             outline: 3px solid #ff4b4b; outline-offset: 3px;
         }
+        [class*="st-key-home-game-slot-"] [class*="st-key-nav-card-"] button {
+            min-height: 190px;
+        }
+        [class*="st-key-sticky-action-bar-"] {
+            position: sticky;
+            top: 3.75rem;
+            z-index: 5;
+            overflow-x: auto;
+            padding: .55rem .65rem;
+            margin: .15rem 0 .75rem;
+            border: 1px solid #343b47;
+            border-radius: 12px;
+            background: rgba(17, 20, 25, .96);
+            box-shadow: 0 8px 24px rgba(0, 0, 0, .22);
+        }
+        [class*="st-key-sticky-action-bar-"] :where(button, [tabindex]) {
+            scroll-margin-top: 7rem;
+        }
+        [class*="st-key-round-status-"] {
+            min-height: 112px;
+        }
+        [class*="st-key-round-status-"] a {
+            width: 100%;
+            min-height: 3.5rem;
+            align-items: flex-start;
+            justify-content: flex-start;
+        }
         [class*="st-key-sidebar-group-"] {
             margin-left: 1.25rem;
             width: calc(100% - 1.25rem);
@@ -693,6 +750,15 @@ def _styles() -> None:
             }
             [class*="st-key-nav-card-"] button:hover {
                 transform: none;
+            }
+        }
+        @media (max-width: 640px) {
+            [class*="st-key-sticky-action-bar-"] {
+                top: 3.25rem;
+                padding: .45rem .5rem;
+            }
+            [class*="st-key-home-game-slot-"] [class*="st-key-nav-card-"] button {
+                min-height: 190px;
             }
         }
         </style>
@@ -918,32 +984,40 @@ def _manager_game_card(
     manager_game: ManagerGame,
     groups: tuple[GroupDefinition, ...],
     index: SnapshotIndex,
+    player_index=None,
+    metadata_by_identity: dict[tuple[str, str], object] | None = None,
+    active_alerts: dict[tuple[str, str], int] | None = None,
 ) -> None:
     color, foreground = _colors(manager_game.game.slug)
     group_count, team_count, _ = _game_statistics(manager_game, groups, index)
-    newest_snapshot = max(
-        (
-            snapshot
-            for snapshot in index.snapshots
-            if _game_identity(snapshot.team.reference.game)
-            == manager_game.identity
-        ),
-        key=lambda snapshot: snapshot.generated_at,
-        default=None,
+    player_snapshot = (
+        None if player_index is None else player_index.newest(manager_game.game)
     )
+    metadata = (metadata_by_identity or {}).get(manager_game.identity)
+    signals: list[str] = []
+    alert_count = (active_alerts or {}).get(manager_game.identity, 0)
+    if alert_count:
+        signals.append(count_label(alert_count, "aktiv alarm", "aktive alarmer"))
+    if player_snapshot is None:
+        signals.append("Spillerdata mangler")
+    else:
+        signals.append(
+            f"Spillerdata: {format_relative_precise(player_snapshot.generated_at)}"
+        )
+    schedule_action = next_schedule_action(metadata)
+    signals.append(schedule_action or "Tidsplan er ikke verificeret")
     _navigation_card(
         card_key=f"game-{manager_game.game.locale}-{manager_game.game.slug}",
         title=manager_game.name,
-        subtitle=manager_game.game.slug,
-        detail=(
-            f"{_group_count_label(group_count)} · {team_count} unikke hold · "
-            f"{_snapshot_data_status(newest_snapshot)}"
-        ),
+        subtitle=sport_label(manager_game.game.slug),
+        detail=f"{_group_count_label(group_count)} · {team_count} unikke hold",
         color=color,
         foreground=foreground,
         aria_label=f"Åbn managerspil {manager_game.name}",
         icon=_sport_icon(manager_game.game.slug),
-        action="\u00c5bn og opdater manuelt",
+        action="Åbn managerspil",
+        signals=tuple(signals),
+        metadata=manager_game.game.slug,
         view="game",
         locale=manager_game.game.locale,
         game=manager_game.game.slug,
@@ -955,7 +1029,6 @@ def _home(
     groups: tuple[GroupDefinition, ...],
     index: SnapshotIndex,
 ) -> None:
-
     with st.container(
         key="home-header",
         horizontal=True,
@@ -987,6 +1060,17 @@ def _home(
             ):
                 _navigate("manage-games")
     st.caption("Grupper og turneringer samlet efter managerspil.")
+    home_data_slot = st.container()
+    with home_data_slot:
+        with st.skeleton(height=120):
+            player_index = PlayerStatisticsStore(OUTPUT_DIR).scan()
+            metadata_values, _ = GameMetadataStore(
+                APP_PATHS.game_metadata_dir
+            ).scan()
+            metadata_by_identity = {
+                item.identity: item for item in metadata_values
+            }
+            active_alerts = _active_alert_counts()
     if games:
         with st.container(horizontal=True, gap="medium", key="home-game-grid"):
             for manager_game in _sorted_manager_games(games):
@@ -997,7 +1081,14 @@ def _home(
                         f"{manager_game.game.slug}"
                     ),
                 ):
-                    _manager_game_card(manager_game, groups, index)
+                    _manager_game_card(
+                        manager_game,
+                        groups,
+                        index,
+                        player_index,
+                        metadata_by_identity,
+                        active_alerts,
+                    )
     else:
         st.info("Du har ingen managerspil endnu. Tilføj dit første managerspil.")
 
@@ -1327,6 +1418,55 @@ def _set_player_filter_state(
         st.session_state[f"{scope}-status-{status}"] = labels[
             query.status_rule(status)
         ]
+    st.session_state[f"{scope}-applied-query"] = query
+
+
+def _player_filter_chips(
+    statistics,
+    query: PlayerStatisticsQuery,
+) -> tuple[str, ...]:
+    labels = player_column_labels(statistics)
+    chips: list[str] = []
+    if query.search.strip():
+        chips.append(f"Søg: {query.search.strip()}")
+    if query.teams:
+        chips.append(
+            f"{labels['team']}: {query.teams[0]}"
+            + (f" +{len(query.teams) - 1}" if len(query.teams) > 1 else "")
+        )
+    if query.positions:
+        chips.append(
+            f"{labels['position']}: {query.positions[0]}"
+            + (f" +{len(query.positions) - 1}" if len(query.positions) > 1 else "")
+        )
+    for label, minimum, maximum in (
+        (labels["value"], query.min_value, query.max_value),
+        (labels["total_growth"], query.min_total_growth, query.max_total_growth),
+        (labels["round_growth"], query.min_round_growth, query.max_round_growth),
+    ):
+        if minimum is not None and maximum is not None:
+            chips.append(
+                f"{label}: {format_integer(minimum)}–{format_integer(maximum)}"
+            )
+        elif minimum is not None:
+            chips.append(f"{label} ≥ {format_integer(minimum)}")
+        elif maximum is not None:
+            chips.append(f"{label} ≤ {format_integer(maximum)}")
+    rule_labels = {"require": "kræv", "exclude": "udeluk"}
+    for status, rule in query.status_rules:
+        if rule != "ignore":
+            chips.append(f"{STATUS_LABELS_DA[status]}: {rule_labels[rule]}")
+    if query.missing_total_growth != "include":
+        chips.append(f"Manglende {labels['total_growth'].casefold()}")
+    if query.missing_round_growth != "include":
+        chips.append(f"Manglende {labels['round_growth'].casefold()}")
+    if query.columns != PLAYER_COLUMNS:
+        chips.append(f"Kolonner: {len(query.columns)}")
+    if query.sort_field != "value" or query.sort_order != "desc":
+        direction = "stigende" if query.sort_order == "asc" else "faldende"
+        sort_label = "Kilderækkefølge" if query.sort_field == "source" else labels[query.sort_field]
+        chips.append(f"Sortering: {sort_label}, {direction}")
+    return tuple(chips)
 
 
 def _built_in_player_filters(statistics) -> tuple[tuple[str, str, PlayerStatisticsQuery], ...]:
@@ -1642,14 +1782,14 @@ def _reset_player_filters(scope: str) -> None:
         f"{scope}-search", f"{scope}-min-", f"{scope}-max-",
         f"{scope}-status-", f"{scope}-teams", f"{scope}-positions",
         f"{scope}-missing-", f"{scope}-columns", f"{scope}-sort-",
+        f"{scope}-applied-query",
     )
     for key in tuple(st.session_state):
         if any(str(key).startswith(prefix) for prefix in prefixes):
             st.session_state.pop(key, None)
 
 
-def _player_export_section(statistics, query, selected, scope: str) -> None:
-    st.subheader("Eksport")
+def _player_export_controls(statistics, query, selected, scope: str) -> None:
     format_labels = {
         "txt": "TXT",
         "json": "JSON",
@@ -1707,32 +1847,73 @@ def _player_export_section(statistics, query, selected, scope: str) -> None:
             )
 
 
+def _player_export_section(statistics, query, selected, scope: str) -> None:
+    with st.expander(
+        "Eksport",
+        icon=":material/file_export:",
+    ):
+        _player_export_controls(statistics, query, selected, scope)
+
+
 
 @st.fragment
 def _player_list_panel(selected, empty_label: str) -> None:
     statistics = selected.statistics
     game = statistics.game
     scope = f"player-filter-{game.locale}-{game.slug}"
-    settings_store, settings = _player_filter_profile_manager(statistics, scope)
-    with st.form(f"{scope}-filters", border=False):
-        try:
-            query = _player_filter_query(statistics, scope)
-        except ValueError as exc:
-            st.error(str(exc))
-            return
-        with st.container(horizontal=True):
-            st.form_submit_button(
-                "Anvend filtre",
-                icon=":material/filter_alt:",
-                type="primary",
+    applied_key = f"{scope}-applied-query"
+    applied_query = st.session_state.get(applied_key, PlayerStatisticsQuery())
+    active_chips = _player_filter_chips(statistics, applied_query)
+    with st.container(
+        key=f"sticky-action-bar-player-{game.locale}-{game.slug}",
+        horizontal=True,
+        vertical_alignment="center",
+        gap="small",
+    ):
+        with st.popover(
+            f"Filtre · {len(active_chips)}",
+            icon=":material/filter_alt:",
+            key=f"{scope}-filter-panel",
+        ):
+            settings_store, settings = _player_filter_profile_manager(
+                statistics, scope
             )
-            st.form_submit_button(
-                "Nulstil",
-                icon=":material/filter_alt_off:",
-                on_click=_reset_player_filters,
-                args=(scope,),
+            with st.form(f"{scope}-filters", border=False):
+                try:
+                    query = _player_filter_query(statistics, scope)
+                except ValueError as exc:
+                    st.error(str(exc))
+                    return
+                submitted = st.form_submit_button(
+                    "Anvend filtre",
+                    icon=":material/filter_alt:",
+                    type="primary",
+                )
+            _save_player_filter_profile(
+                statistics,
+                scope,
+                query,
+                settings_store,
+                settings,
             )
-    entries = filter_player_statistics(statistics, query)
+        for chip in active_chips[:6]:
+            st.badge(chip, color="gray")
+        if len(active_chips) > 6:
+            st.badge(f"+{len(active_chips) - 6} filtre", color="gray")
+        st.button(
+            "Nulstil",
+            icon=":material/filter_alt_off:",
+            key=f"{scope}-reset-filters",
+            on_click=_reset_player_filters,
+            args=(scope,),
+            disabled=not active_chips,
+        )
+    if submitted:
+        st.session_state[applied_key] = query
+        st.rerun()
+    st.session_state.setdefault(applied_key, query)
+    applied_query = st.session_state[applied_key]
+    entries = filter_player_statistics(statistics, applied_query)
     with st.container(
         horizontal=True,
         horizontal_alignment="distribute",
@@ -1740,82 +1921,104 @@ def _player_list_panel(selected, empty_label: str) -> None:
     ):
         st.caption(
             f"{len(entries)} af {len(statistics.entries)} spillere · runde "
-            f"{statistics.round_number} · gemt "
-            f"{selected.generated_at.astimezone().strftime('%d.%m.%Y %H:%M:%S')}"
+            f"{statistics.round_number} · {format_relative_precise(selected.generated_at)}"
         )
     if entries:
-        rows, integer_columns = _player_statistics_rows(statistics, query)
-        player_index = PlayerStatisticsStore(OUTPUT_DIR).scan(game)
-        player_keys = tuple(player_identity(game, entry) for entry in entries)
-        analyses = _player_decision_analysis_batch(
-            player_index,
-            game,
-            player_keys,
-        )
-        annotations = {
-            item.player_key: item
-            for item in settings.player_annotations
-            if item.game_locale.casefold() == game.locale.casefold()
-            and item.game_slug == game.slug
-        }
-        for row, entry, key, analysis in zip(
-            rows,
-            entries,
-            player_keys,
-            analyses,
-            strict=True,
-        ):
-            if statistics.unit != "points":
-                row["Vækst pr. mio."] = (
-                    None if analysis is None else analysis.growth_per_million
+        results_slot = st.container()
+        with results_slot:
+            with st.skeleton(height=180):
+                rows, integer_columns = _player_statistics_rows(
+                    statistics, applied_query
                 )
-            row["Form 3"] = None if analysis is None else analysis.form_3
-            row["Form 5"] = None if analysis is None else analysis.form_5
-            row["Stabilitet"] = (
-                "–"
-                if analysis is None or analysis.stability_score is None
-                else f"{analysis.stability_score}/100 · {analysis.stability_label}"
-            )
-            row["Datastatus"] = (
-                "unverified" if analysis is None else analysis.provenance.certainty
-            )
-            row["Grundlag"] = (
-                0 if analysis is None else analysis.provenance.sample_size
-            )
-            row["Tags"] = (
-                " · ".join(annotations[key].tags) if key in annotations else ""
-            )
-            row["Detaljer"] = relative_url(
-                PageId.PLAYER,
-                locale=game.locale,
-                game=game.slug,
-                player=key,
-                round=statistics.round_number,
-            )
-        st.dataframe(
-            _style_integer_columns(rows, integer_columns),
-            hide_index=True,
-            width="stretch",
-            column_config={
-                "Detaljer": st.column_config.LinkColumn(
-                    "Detaljer", display_text="Åbn spiller"
+                player_index = PlayerStatisticsStore(OUTPUT_DIR).scan(game)
+                player_keys = tuple(
+                    player_identity(game, entry) for entry in entries
+                )
+                analyses = _player_decision_analysis_batch(
+                    player_index,
+                    game,
+                    player_keys,
+                )
+                annotations = {
+                    item.player_key: item
+                    for item in settings.player_annotations
+                    if item.game_locale.casefold() == game.locale.casefold()
+                    and item.game_slug == game.slug
+                }
+                for row, entry, key, analysis in zip(
+                    rows,
+                    entries,
+                    player_keys,
+                    analyses,
+                    strict=True,
+                ):
+                    if statistics.unit != "points":
+                        row["Vækst pr. mio."] = (
+                            "–"
+                            if analysis is None or analysis.growth_per_million is None
+                            else f"{analysis.growth_per_million:.1f}".replace(".", ",")
+                        )
+                    row["Form 3"] = (
+                        "–"
+                        if analysis is None or analysis.form_3 is None
+                        else f"{analysis.form_3:.1f}".replace(".", ",")
+                    )
+                    row["Form 5"] = (
+                        "–"
+                        if analysis is None or analysis.form_5 is None
+                        else f"{analysis.form_5:.1f}".replace(".", ",")
+                    )
+                    row["Stabilitet"] = (
+                        "–"
+                        if analysis is None or analysis.stability_score is None
+                        else f"{analysis.stability_score}/100 · {analysis.stability_label}"
+                    )
+                    row["Datastatus"] = data_status_label(
+                        "unverified"
+                        if analysis is None
+                        else analysis.provenance.certainty
+                    )
+                    row["Grundlag"] = (
+                        0 if analysis is None else analysis.provenance.sample_size
+                    )
+                    row["Tags"] = (
+                        " · ".join(annotations[key].tags)
+                        if key in annotations
+                        else "–"
+                    )
+                    row["Detaljer"] = relative_url(
+                        PageId.PLAYER,
+                        locale=game.locale,
+                        game=game.slug,
+                        player=key,
+                        round=statistics.round_number,
+                    )
+            dataframe(
+                _style_integer_columns(rows, integer_columns),
+                hide_index=True,
+                width="stretch",
+                column_config={
+                    "Detaljer": st.column_config.LinkColumn(
+                        "Detaljer", display_text="Åbn spiller"
+                    ),
+                    "Form 3": st.column_config.Column(
+                        "Form 3",
+                        help="Gennemsnitlig udvikling over de seneste tre runder.",
+                    ),
+                    "Form 5": st.column_config.Column(
+                        "Form 5",
+                        help="Gennemsnitlig udvikling over de seneste fem runder.",
+                    ),
+                    "Vækst pr. mio.": st.column_config.Column(
+                        "Vækst pr. mio.",
+                        help="Historisk vækst divideret med den aktuelle pris i millioner.",
+                    ),
+                },
+                key=(
+                    f"player-statistics:{game.locale}:{game.slug}:v1"
                 ),
-                "Form 3": st.column_config.NumberColumn(format="%.1f"),
-                "Form 5": st.column_config.NumberColumn(format="%.1f"),
-                "Vækst pr. mio.": st.column_config.NumberColumn(format="%.1f"),
-            },
-            key=(
-                f"player-statistics:{game.locale}:{game.slug}:v1"
-            ),
-        )
-        _save_player_filter_profile(
-            statistics,
-            scope,
-            query,
-            settings_store,
-            settings,
-        )
-        _player_export_section(statistics, query, selected, scope)
+            )
+        _player_export_section(statistics, applied_query, selected, scope)
     else:
         st.info("Ingen spillere matcher de valgte filtre.")
 
@@ -2103,7 +2306,7 @@ def _standalone_player_statistics(games: tuple[ManagerGame, ...]) -> None:
         st.query_params["game"] = selected_game.slug
 
     selected_source = st.selectbox(
-        "Managerspil",
+        "Spil eller Holdet-URL",
         option_values,
         index=None,
         accept_new_options=True,
@@ -2178,21 +2381,32 @@ def _game_round_center_tab(
     *,
     read_only: bool = False,
 ) -> None:
-    st.header("Rundecenter", anchor="rundecenter")
     game_groups = tuple(
         group
         for group in groups
         if _game_identity(group.game) == manager_game.identity
     )
-    if st.button(
-        "Opdater managerspil",
-        type="primary",
-        icon=":material/refresh:",
-        width="stretch",
-        disabled=read_only,
-        help="Gendan managerspillet for at opdatere data." if read_only else None,
-        key=f"refresh-game:{manager_game.game.locale}:{manager_game.game.slug}",
+    with st.container(
+        key="round-center-actions",
+        horizontal=True,
+        horizontal_alignment="distribute",
+        vertical_alignment="center",
     ):
+        st.header("Rundecenter", anchor="rundecenter")
+        refresh_requested = st.button(
+            "Opdater managerspil",
+            type="secondary",
+            icon=":material/refresh:",
+            width="content",
+            disabled=read_only,
+            help=(
+                "Gendan managerspillet for at opdatere data."
+                if read_only
+                else "Hent nye spil-, spiller- og holddata eksplicit."
+            ),
+            key=f"refresh-game:{manager_game.game.locale}:{manager_game.game.slug}",
+        )
+    if refresh_requested:
         if not game_groups:
             st.warning("Managerspillet har ingen grupper at opdatere.")
         else:
@@ -2416,16 +2630,18 @@ def _game_view(
     )
     st.title(manager_game.name, anchor=f"managerspil-{manager_game.game.slug}")
     st.caption(manager_game.game.slug)
-    unread_alerts = _unread_alert_counts().get(manager_game.identity, 0)
-    alert_tab_label = (
-        f"Statusalarmer ({unread_alerts})"
-        if unread_alerts
-        else "Statusalarmer"
+    game_groups = tuple(
+        group
+        for group in groups
+        if _game_identity(group.game) == manager_game.identity
     )
+    active_alerts = _active_alert_counts().get(manager_game.identity, 0)
+    alert_tab_label = f"Statusalarmer · {active_alerts}"
+    group_tab_label = f"Grupper · {len(game_groups)}"
     tabs = _stateful_tabs(
         (
             "Rundecenter",
-            "Grupper",
+            group_tab_label,
             "Spillerstatistik",
             alert_tab_label,
             "Holdstatistik",
@@ -2459,11 +2675,6 @@ def _game_view(
         manage_tab,
         settings_tab,
     ) = tabs
-    game_groups = tuple(
-        group
-        for group in groups
-        if _game_identity(group.game) == manager_game.identity
-    )
     if round_center_tab.open:
         with round_center_tab:
             _game_round_center_tab(
@@ -2548,7 +2759,7 @@ def _standings_table(
             }
         )
     st.caption("Klik p\u00e5 en r\u00e6kke for at \u00e5bne holdet")
-    event = st.dataframe(
+    event = dataframe(
         _style_integer_columns(rows, ("Værdi", "Vækst", "Afstand")),
         hide_index=True,
         width="stretch",
@@ -2696,10 +2907,10 @@ def _round_data_state(
 
 def _round_data_label(status: str) -> str:
     return {
-        "complete": "F\u00e6rdig",
-        "in_progress": "Runde i gang",
-        "unknown": "Rundestatus ukendt",
-        "missing": "Mangler data",
+        "complete": data_status_label("complete"),
+        "in_progress": data_status_label("in_progress"),
+        "unknown": data_status_label("unknown"),
+        "missing": data_status_label("missing"),
     }[status]
 
 
@@ -2724,7 +2935,7 @@ def _tournament_standings_table(
         for row in state.standings
     ]
     st.caption("Klik p\u00e5 en r\u00e6kke for at \u00e5bne holdet")
-    event = st.dataframe(
+    event = dataframe(
         _style_integer_columns(rows, ("For", "Imod", "Forskel")),
         hide_index=True,
         width="stretch",
@@ -2856,7 +3067,7 @@ def _tournament_head_to_head(
                 "Resultat": status,
             }
         )
-    st.dataframe(
+    dataframe(
         _style_integer_columns(
             rows, (summary.team_a_name, summary.team_b_name)
         ),
@@ -2934,7 +3145,7 @@ def _tournament_matches(
                     "Status": status,
                 }
             )
-    st.dataframe(
+    dataframe(
         _style_integer_columns(rows, ("Vækst A", "Vækst B")),
         hide_index=True,
         width="stretch",
@@ -3480,7 +3691,7 @@ def _render_team_snapshot(
                     ("Runderangændring", summary.round_rank_change),
                     ("Ændring i samlet placering", summary.overall_rank_change),
                 ]
-                st.dataframe(
+                dataframe(
                     _style_integer_columns(
                         [
                             {"Del": label, "Ændring": value}
@@ -3515,7 +3726,7 @@ def _render_team_snapshot(
                     "Rolle": "Kaptajn" if player.role == "captain" else player.role,
                     "Status": _team_status(player),
                 } for position, player in enumerate(roster_snapshot.team.roster, 1)]
-                st.dataframe(
+                dataframe(
                     _style_integer_columns(
                         rows,
                         (value_label, "Rundevækst", "Vækst siden køb"),
@@ -3586,7 +3797,7 @@ def _render_team_snapshot(
                     numeric = tuple(
                         key for key in rows[0] if key not in {"Runde"}
                     )
-                    st.dataframe(
+                    dataframe(
                         _style_integer_columns(rows, numeric),
                         hide_index=True,
                         width="stretch",
@@ -3739,7 +3950,7 @@ def _standalone_team_statistics(
     option_values = [item[0].original for item in sorted_known]
     option_labels = {item[0].original: item[1] for item in sorted_known}
     source = st.selectbox(
-        "Managerspil",
+        "Spil eller Holdet-URL",
         option_values,
         index=None,
         accept_new_options=True,
@@ -4374,7 +4585,7 @@ def _manage_game(
                         )
                     names = {member.team_id: member.name for member in preview_members}
                     with st.expander("Forhåndsvis kampplan"):
-                        st.dataframe(
+                        dataframe(
                             [
                                 {
                                     "Runde": fixture.round_number,
@@ -4756,7 +4967,7 @@ def _manage_game(
 
                 if group.archived_revisions:
                     st.markdown("#### Tidligere revisioner")
-                    st.dataframe(
+                    dataframe(
                         [
                             {
                                 "Revision": item.revision,

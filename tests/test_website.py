@@ -338,10 +338,13 @@ class DashboardTests(unittest.TestCase):
         )
         self.assertIn("1 gruppe ·", render.call_args_list[0].kwargs["detail"])
         game_card = render.call_args_list[0].kwargs
-        self.assertIn("Ingen lokale data endnu", game_card["detail"])
+        self.assertIn("Spillerdata mangler", game_card["signals"])
+        self.assertIn("Tidsplan er ikke verificeret", game_card["signals"])
         self.assertNotIn("runde 0", game_card["detail"].casefold())
         self.assertEqual(game_card["icon"], ":material/directions_bike:")
-        self.assertEqual(game_card["action"], chr(0xC5) + "bn og opdater manuelt")
+        self.assertEqual(game_card["subtitle"], "Cykling")
+        self.assertEqual(game_card["metadata"], team.reference.game.slug)
+        self.assertEqual(game_card["action"], chr(0xC5) + "bn managerspil")
 
     def test_manager_game_group_count_uses_danish_singular_and_plural(self) -> None:
         self.assertEqual(dashboard._group_count_label(0), "0 grupper")
@@ -892,9 +895,9 @@ class DashboardTests(unittest.TestCase):
                 [item.label for item in app.tabs],
                 [
                     "Rundecenter",
-                    "Grupper",
+                    "Grupper · 0",
                     "Spillerstatistik",
-                    "Statusalarmer",
+                    "Statusalarmer · 0",
                     "Holdstatistik",
                     "Historik",
                     "Analyse",
@@ -1658,7 +1661,7 @@ class DashboardTests(unittest.TestCase):
             self.assertTrue(
                 any(item.value == "Statusalarmer" for item in app.header)
             )
-            self.assertIn("Statusalarmer (1)", [item.label for item in app.tabs])
+            self.assertIn("Statusalarmer · 1", [item.label for item in app.tabs])
             self.assertFalse(
                 any(item.label == "Managerspil" for item in app.selectbox)
             )
@@ -1673,7 +1676,7 @@ class DashboardTests(unittest.TestCase):
             )
 
             button(app, "Markér som læst").click().run(timeout=15)
-            self.assertIn("Statusalarmer", [item.label for item in app.tabs])
+            self.assertIn("Statusalarmer · 1", [item.label for item in app.tabs])
             self.assertNotIn(
                 "Tourspillet (1 ulæste)", [item.label for item in app.button]
             )
@@ -1727,7 +1730,7 @@ class DashboardTests(unittest.TestCase):
             )
             self.assertFalse(app.exception)
             self.assertEqual(
-                widget(app, "selectbox", "Managerspil").value,
+                widget(app, "selectbox", "Spil eller Holdet-URL").value,
                 game.original,
             )
 
@@ -1848,7 +1851,7 @@ class DashboardTests(unittest.TestCase):
 
             app = AppTest.from_file(APP_PATH).run(timeout=15)
             navigate(app, "players")
-            player_game = widget(app, "selectbox", "Managerspil")
+            player_game = widget(app, "selectbox", "Spil eller Holdet-URL")
             self.assertIsNone(player_game.value)
             self.assertFalse(app.dataframe)
 
@@ -1862,7 +1865,7 @@ class DashboardTests(unittest.TestCase):
             )
 
             navigate(app, "teams")
-            team_game = widget(app, "selectbox", "Managerspil")
+            team_game = widget(app, "selectbox", "Spil eller Holdet-URL")
             self.assertIsNone(team_game.value)
             self.assertEqual([item.value for item in app.title], ["Holdstatistik"])
 

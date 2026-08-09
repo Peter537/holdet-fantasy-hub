@@ -6,6 +6,8 @@ from datetime import datetime
 import pandas as pd
 import streamlit as st
 
+from website.presentation import data_status_label, dataframe
+
 from website.navigation import PageId, page_link, relative_url
 
 from holdet_lib import (
@@ -158,11 +160,6 @@ def _team_options(groups: tuple[GroupDefinition, ...]) -> dict[int, str]:
 
 
 def _certainty(provenance) -> None:
-    labels = {
-        "final": "Endeligt resultat",
-        "preliminary": "Foreløbigt resultat",
-        "unverified": "Ikke verificeret",
-    }
     renderer = st.success if provenance.certainty == "final" else st.warning
     round_text = (
         " · runde " + ", ".join(str(value) for value in provenance.rounds)
@@ -170,7 +167,7 @@ def _certainty(provenance) -> None:
         else ""
     )
     suffix = f" · {provenance.sample_size} observationer{round_text}"
-    renderer(labels[provenance.certainty] + suffix)
+    renderer(data_status_label(provenance.certainty) + suffix)
     if provenance.missing_reasons:
         st.caption(" · ".join(provenance.missing_reasons))
 
@@ -320,7 +317,7 @@ def _decision_panel(
     )
     if ledger.decisions:
         st.markdown("#### Transferregnskab")
-        st.dataframe(
+        dataframe(
             [
                 {
                     "Runde": item.round_number,
@@ -378,7 +375,7 @@ def _decision_panel(
     st.metric("Faktisk kaptajnbonus", _format(captain.actual_bonus))
     _certainty(captain.provenance)
     if captain.alternatives:
-        st.dataframe(
+        dataframe(
             [
                 {
                     "Spiller": item.name,
@@ -548,7 +545,7 @@ def _group_panel(manager_game, groups, snapshots, player_index, paths) -> None:
             + ", ".join(labels.get(team_id, str(team_id)) for team_id in exposure.missing_team_ids)
         )
     if exposure.rows:
-        st.dataframe(
+        dataframe(
             [
                 {
                     "Spiller": item.name,
@@ -626,7 +623,7 @@ def _ideal_panel(manager_game, player_index, rules) -> None:
         f"sikkert loft {_format(result.objective_upper_bound)}."
     )
     if result.players:
-        st.dataframe(
+        dataframe(
             [
                 {
                     "Spiller": item.name,
@@ -707,7 +704,7 @@ def _experimental_panel(
                 row["Officiel difficulty"] = item.official_difficulty
             fixture_rows.append(row)
         if fixture_rows:
-            st.dataframe(
+            dataframe(
                 fixture_rows,
                 hide_index=True,
                 width="stretch",
@@ -906,7 +903,7 @@ def player_detail_view(
         value_column = "Pris" if latest.statistics.unit != "points" else "Point"
         frame = pd.DataFrame(analysis.curve, columns=("Runde", value_column))
         frame["Datastatus"] = frame["Runde"].map(
-            lambda round_number: (
+            lambda round_number: data_status_label(
                 "final"
                 if round_status.get(round_number) == "complete"
                 else "preliminary"
@@ -922,7 +919,7 @@ def player_detail_view(
                 "Der er kun ét numerisk datapunkt. Grafen vises, når mindst "
                 "to runder er gemt."
             )
-        st.dataframe(
+        dataframe(
             frame,
             hide_index=True,
             width="stretch",
@@ -931,10 +928,10 @@ def player_detail_view(
                 f"{manager_game.game.slug}:{player_key}:curve"
             ),
         )
-        if any(value != "final" for value in frame["Datastatus"]):
+        if any(value != "Aktuel" for value in frame["Datastatus"]):
             st.caption(
                 "Punkter fra en ikke-afsluttet runde er markeret som "
-                "preliminary i tabellen."
+                "Foreløbig i tabellen."
             )
     else:
         st.info("Der er ingen numeriske værdier at tegne endnu.")
@@ -967,14 +964,14 @@ def player_detail_view(
                 "Runde": round_number,
                 "Spillerstatus": " · ".join(states) if states else "Aktiv",
                 "Datastatus": (
-                    "final"
+                    data_status_label("final")
                     if snapshot.statistics.round_status == "complete"
-                    else "preliminary"
+                    else data_status_label("preliminary")
                 ),
             }
         )
     if status_rows:
-        st.dataframe(
+        dataframe(
             status_rows,
             hide_index=True,
             width="stretch",

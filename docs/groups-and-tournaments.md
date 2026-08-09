@@ -6,7 +6,7 @@ Dashboardets hierarki er `Managerspil → Gruppe → Hold`. Et managerspil kan h
 
 Et managerspil identificeres af locale og slug og har et redigerbart navn. Det kan oprettes uden netværk. **Hent spilinfo** gemmer senere officielt navn, schedule, deadlines og autoritativ finalerunde, men overskriver ikke automatisk brugerens navn.
 
-Rundecenter er managerspillets første fane. De øvrige er Grupper, Spillerstatistik, Holdstatistik, Historik, Analyse, Administration og Indstillinger. Managerspillets Historik sammenligner holdtrends og kan filtreres til en gruppe. Analyse er lazy-loadet via query-parameter og beregner kun det valgte panel. Arkivering flytter eller sletter ikke grupper, snapshots, manifester, metadata eller Hall of Fame-resultater.
+Rundecenter er managerspillets første fane. **Grupper** og **Statusalarmer** viser indholdstællere direkte i fanenavnet; de øvrige faner er Spillerstatistik, Holdstatistik, Historik, Analyse, Administration og Indstillinger. Rundecenterets statuskort er links til den relevante gruppe-, spiller-, hold-, kalender- eller datavisning. Friskhed vises både relativt og præcist, og data bruger statusordbogen **Aktuel**, **Foreløbig**, **Forældet**, **Mangler**, **Fejlet** og **Ikke verificeret**. Managerspillets Historik sammenligner holdtrends og kan filtreres til en gruppe. Analyse er lazy-loadet via query-parameter og beregner kun det valgte panel. Arkivering flytter eller sletter ikke grupper, snapshots, manifester, metadata eller Hall of Fame-resultater.
 
 ## Almindelige grupper
 

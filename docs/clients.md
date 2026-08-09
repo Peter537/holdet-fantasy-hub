@@ -27,7 +27,7 @@ Destinationerne står i denne rækkefølge:
 
 Der findes ingen global Værktøjer-sektion. De tidligere globale views `transfer`, `compare`, `history` og `changes` er fjernet og viser den kontrollerede side **Siden findes ikke**. Data-deeplinks med `accounts`, `quality`, `locations` og `backup` mappes til de nye områder.
 
-Den tidligere `view=hall-of-fame` viderestiller til `/managers`. Managers og Kalender er globale sider og starter ingen hentning. Kalenderen kan filtreres på manager, managerspil, gruppe/turnering og dato.
+Den tidligere `view=hall-of-fame` viderestiller til `/managers`. Managers og Kalender er globale sider og starter ingen hentning. Kalenderen kan filtreres på manager, managerspil, gruppe/turnering og dato; de fulde filtre ligger i et panel, og aktive filtre vises som chips i en sticky handlingslinje.
 
 Managers viser Hall of Fame-point og Elo side om side. Identiteter kan samles og ophæves manuelt, H2H har officielle kampe og fælles grupperunder som separate spor, og sæsoner sammensættes af eksisterende konkurrencer.
 
@@ -45,7 +45,7 @@ Et managerspil åbner på **Rundecenter** og har ni lazy-loadede faner:
 - Administration
 - Indstillinger
 
-Rundecenter viser aktiv runde, næste deadline, seneste spiller- og holddata, seneste manuelle refresh, manglende snapshots med holdnavne, skader, karantæner og væsentlige rangbevægelser. Links fører direkte til den relevante spiller-, hold-, gruppe- eller datavisning. Opdateringsknappen er eksplicit; oversigten foretager ikke selv netværkskald.
+Rundecenter viser aktiv runde, næste deadline, seneste spiller- og holddata, seneste manuelle refresh, manglende snapshots med holdnavne, skader, karantæner og væsentlige rangbevægelser. Statuskortene fører direkte til den relevante spiller-, hold-, gruppe-, kalender- eller datavisning. Opdateringsknappen er en nedtonet sekundær handling; oversigten foretager ikke selv netværkskald.
 
 Analyse har query-parametret segmentvalg mellem Beslutninger, Gruppe, Idealhold og Eksperimentel. Kun det aktive segment beregnes. Standardhold gemmes pr. spil, mens et midlertidigt valg ikke ændrer standarden. Eksperimentelle fixtures og Monte Carlo kræver et gemt opt-in og viser en synlig modeladvarsel.
 

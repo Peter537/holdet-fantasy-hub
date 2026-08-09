@@ -7,6 +7,8 @@ from urllib.parse import urlsplit
 
 import streamlit as st
 
+from website.presentation import dataframe
+
 from holdet_lib.backup import create_backup
 from holdet_lib.errors import PayloadError
 from holdet_lib.groups import GroupStore, HubConfiguration
@@ -123,7 +125,7 @@ def render_overview(
     st.caption("Læsestatus, datakilder og lagerforbrug. Der ændres ingen filer fra dette område.")
     data_quality_panel(configuration.games, configuration.groups, index, paths)
     st.subheader("Lokale stores")
-    st.dataframe(
+    dataframe(
         _local_store_health(group_store, configuration, paths),
         hide_index=True,
         width="stretch",
@@ -134,7 +136,7 @@ def render_overview(
     if not inventory.rows:
         st.info("Der er endnu ingen lokale data eller afledte filer at opgøre.")
         return
-    st.dataframe(
+    dataframe(
         [
             {"Spil": row.game_scope, "Kategori": row.category, "Filer": row.files, "Størrelse": row.bytes}
             for row in inventory.rows
@@ -286,7 +288,7 @@ def _show_import_preview(preview: ImportPreview) -> None:
     for error in preview.errors:
         st.error(error)
     if preview.operations:
-        st.dataframe(
+        dataframe(
             [
                 {
                     "Kilde": item.source_name,
@@ -451,7 +453,7 @@ def _integrity_panel(paths: AppPaths) -> None:
         else:
             st.warning(f"Hurtig kontrol fandt {len(quick.issues)} afvigelser.")
         if quick.issues:
-            st.dataframe(
+            dataframe(
                 [
                     {"Niveau": item.severity, "Type": item.code, "Fil": item.path, "Detalje": item.message}
                     for item in quick.issues
@@ -468,7 +470,7 @@ def _integrity_panel(paths: AppPaths) -> None:
                 st.success(f"Fuld kontrol gennemførte {len(full.entries)} filer uden fejl.")
             else:
                 st.warning(f"Fuld kontrol fandt {len(full.issues)} afvigelser. Kanoniske filer er ikke ændret.")
-                st.dataframe(
+                dataframe(
                     [
                         {"Niveau": item.severity, "Type": item.code, "Fil": item.path, "Detalje": item.message}
                         for item in full.issues
@@ -522,7 +524,7 @@ def _retention_panel(paths: AppPaths) -> None:
         if not plan.candidates:
             st.info("Der er ingen gyldige mellemversioner at arkivere. Nyeste snapshot pr. runde bevares.")
             return
-        st.dataframe(
+        dataframe(
             [
                 {
                     "Fil": item.relative_path,
@@ -567,7 +569,7 @@ def _cleanup_panel(paths: AppPaths) -> None:
         if not cleanup:
             st.info("Der er ingen afledte eksporter, backups eller mellemversionsarkiver at slette.")
             return
-        st.dataframe(
+        dataframe(
             [
                 {"Fil": item.path.name, "Kategori": item.category, "Størrelse": item.size, "Ændret": item.modified_at}
                 for item in cleanup
@@ -625,7 +627,7 @@ def render_api() -> None:
         language=None,
     )
     catalog = dataset_catalog()
-    st.dataframe(
+    dataframe(
         [
             {
                 "Datasæt": item["name"],

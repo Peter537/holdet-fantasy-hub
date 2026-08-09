@@ -14,6 +14,15 @@ import pandas as pd
 import streamlit as st
 
 from website.navigation import PageId, page_link
+from website.presentation import (
+    data_status_badges,
+    data_status_label,
+    dataframe,
+    format_elo,
+    format_precise_time,
+    format_relative_precise,
+    render_status_badges,
+)
 
 from holdet_lib import (
     AppPaths,
@@ -70,22 +79,33 @@ from holdet_lib import (
 from holdet_lib.hub_settings import effective_manager_profiles
 from holdet_lib import resolve_manager_identity
 def _time(value: datetime | None) -> str:
-    if value is None:
-        return "-"
-    return value.astimezone().strftime("%d.%m.%Y %H:%M")
+    return format_precise_time(value)
 
 
 def _age(value: datetime | None) -> str:
-    if value is None:
-        return "Ingen data"
-    seconds = max(0, int((datetime.now().astimezone() - value.astimezone()).total_seconds()))
-    if seconds < 60:
-        return "under ét minut"
-    if seconds < 3600:
-        return f"{seconds // 60} min."
-    if seconds < 86400:
-        return f"{seconds // 3600} t."
-    return f"{seconds // 86400} dage"
+    return format_relative_precise(value)
+
+
+def _round_center_link_card(
+    *,
+    key: str,
+    label: str,
+    value: str,
+    icon: str,
+    page_id: PageId,
+    badges=(),
+    **parameters: object,
+) -> None:
+    with st.container(border=True, key=f"round-status-{key}", width=260):
+        page_link(
+            page_id,
+            f"**{label}**  \n{value}",
+            icon=icon,
+            width="stretch",
+            **parameters,
+        )
+        if badges:
+            render_status_badges(tuple(badges))
 
 
 def _game_label(game: ManagerGame) -> str:
@@ -117,25 +137,30 @@ def manager_round_center(
 ) -> None:
     """Render one manager game's cache-only round status."""
 
-    players = _player_index(paths)
-    metadata = GameMetadataStore(paths.game_metadata_dir).load(manager_game.game)
-    game_groups = tuple(
-        group for group in groups if (
-            group.game.locale.casefold(), group.game.slug
-        ) == manager_game.identity
-    )
-    team_labels: dict[int, str] = {}
-    for group in game_groups:
-        for member in group.teams:
-            team_labels.setdefault(member.team_id, member.name)
-    report = build_data_quality_report(
-        (manager_game,),
-        game_groups,
-        teams,
-        players,
-        manifest_dir=paths.manifest_dir,
-        include_archived=True,
-    )
+    round_status_slot = st.container()
+    with round_status_slot:
+        with st.skeleton(height=140):
+            players = _player_index(paths)
+            metadata = GameMetadataStore(paths.game_metadata_dir).load(
+                manager_game.game
+            )
+            game_groups = tuple(
+                group for group in groups if (
+                    group.game.locale.casefold(), group.game.slug
+                ) == manager_game.identity
+            )
+            team_labels: dict[int, str] = {}
+            for group in game_groups:
+                for member in group.teams:
+                    team_labels.setdefault(member.team_id, member.name)
+            report = build_data_quality_report(
+                (manager_game,),
+                game_groups,
+                teams,
+                players,
+                manifest_dir=paths.manifest_dir,
+                include_archived=True,
+            )
     latest = report.rounds[0] if report.rounds else None
     active_round = (
         metadata.active_round
@@ -143,27 +168,84 @@ def manager_round_center(
         else latest.round_number if latest is not None else None
     )
     deadline = metadata.next_deadline if metadata is not None else None
-    with st.container(horizontal=True):
-        st.metric("Aktiv runde", active_round or "Mangler", border=True)
-        st.metric(
-            "Næste deadline",
-            _time(deadline) if deadline is not None else "Mangler metadata",
-            border=True,
+    team_round_status = None
+    if latest is not None:
+        if latest.in_progress:
+            team_round_status = "in_progress"
+        elif latest.unknown:
+            team_round_status = "unknown"
+        else:
+            team_round_status = "complete"
+    team_badges = data_status_badges(
+        generated_at=None if latest is None else latest.newest_team_data,
+        round_number=None if latest is None else latest.round_number,
+        round_status=team_round_status,
+        metadata=metadata,
+        missing=latest is None or bool(latest.missing_team_ids),
+        last_success=None if latest is None else latest.last_success,
+        last_error=None if latest is None else latest.last_error,
+    )
+    player_badges = data_status_badges(
+        generated_at=None if latest is None else latest.newest_player_data,
+        round_number=None if latest is None else latest.round_number,
+        round_status=None if latest is None else latest.player_round_status,
+        metadata=metadata,
+        missing=latest is None or not latest.player_snapshot,
+        last_success=None if latest is None else latest.last_success,
+        last_error=None if latest is None else latest.last_error,
+    )
+    missing_count = (
+        len(latest.missing_team_ids) if latest is not None else len(team_labels)
+    )
+    with st.container(horizontal=True, gap="small"):
+        _round_center_link_card(
+            key="active-round",
+            label="Aktiv runde",
+            value=str(active_round or "Mangler"),
+            icon=":material/event:",
+            page_id=PageId.GAME,
+            locale=manager_game.game.locale,
+            game=manager_game.game.slug,
+            section="groups",
         )
-        st.metric(
-            "Holddata",
-            _age(None if latest is None else latest.newest_team_data),
-            border=True,
+        _round_center_link_card(
+            key="deadline",
+            label="Næste deadline",
+            value=_time(deadline) if deadline is not None else "Mangler metadata",
+            icon=":material/calendar_month:",
+            page_id=PageId.CALENDAR,
+            locale=manager_game.game.locale,
+            game=manager_game.game.slug,
         )
-        st.metric(
-            "Spillerdata",
-            _age(None if latest is None else latest.newest_player_data),
-            border=True,
+        _round_center_link_card(
+            key="team-data",
+            label="Holddata",
+            value=_age(None if latest is None else latest.newest_team_data),
+            icon=":material/groups:",
+            page_id=PageId.GAME,
+            badges=team_badges,
+            locale=manager_game.game.locale,
+            game=manager_game.game.slug,
+            section="teams",
         )
-        st.metric(
-            "Manglende snapshots",
-            len(latest.missing_team_ids) if latest is not None else len(team_labels),
-            border=True,
+        _round_center_link_card(
+            key="player-data",
+            label="Spillerdata",
+            value=_age(None if latest is None else latest.newest_player_data),
+            icon=":material/query_stats:",
+            page_id=PageId.GAME,
+            badges=player_badges,
+            locale=manager_game.game.locale,
+            game=manager_game.game.slug,
+            section="players",
+        )
+        _round_center_link_card(
+            key="missing-data",
+            label="Manglende snapshots",
+            value=str(missing_count),
+            icon=":material/data_alert:",
+            page_id=PageId.DATA,
+            section="quality",
         )
 
     if metadata is None:
@@ -174,14 +256,6 @@ def manager_round_center(
     if latest is None:
         st.info("Der er endnu ingen cachede rundedata for managerspillet.")
     else:
-        labels = {
-            "ready": ("Klar", "green"),
-            "preliminary": ("Foreløbig", "orange"),
-            "missing": ("Mangler data", "red"),
-            "error": ("Seneste opdatering fejlede", "red"),
-        }
-        label, color = labels[latest.readiness]
-        st.badge(label, color=color, icon=":material/data_check:")
         if latest.reasons:
             st.caption(" · ".join(latest.reasons))
         if latest.last_error_message:
@@ -249,7 +323,7 @@ def manager_round_center(
         with st.container(border=True):
             st.markdown("**Rangbevægelser**")
             if rank_rows:
-                st.dataframe(
+                dataframe(
                     rank_rows,
                     hide_index=True,
                     key=(
@@ -263,7 +337,7 @@ def manager_round_center(
         with st.container(border=True):
             st.markdown("**Skader og karantæner**")
             if injury_rows:
-                st.dataframe(
+                dataframe(
                     injury_rows,
                     hide_index=True,
                     key=(
@@ -273,31 +347,6 @@ def manager_round_center(
                 )
             else:
                 st.caption("Ingen markeringer i det valgte spillersnapshot.")
-
-    with st.container(horizontal=True):
-        page_link(
-            PageId.GAME,
-            "Åbn spillerstatistik",
-            icon=":material/query_stats:",
-            locale=manager_game.game.locale,
-            game=manager_game.game.slug,
-            section="players",
-        )
-        page_link(
-            PageId.GAME,
-            "Åbn holdstatistik",
-            icon=":material/groups:",
-            locale=manager_game.game.locale,
-            game=manager_game.game.slug,
-            section="teams",
-        )
-        page_link(
-            PageId.DATA,
-            "Åbn Datastatus",
-            icon=":material/data_check:",
-            section="quality",
-        )
-
 
 def transfer_lab_panel(
     team_snapshot: TeamSnapshot,
@@ -482,7 +531,7 @@ def transfer_lab_panel(
             st.error(error)
     for warning in result.warnings:
         st.warning(warning)
-    st.dataframe(
+    dataframe(
         [
             {
                 "Spiller": item.name,
@@ -573,7 +622,7 @@ def player_compare_panel(
     if len(selected) < 2:
         st.info("Vælg mindst to spillere for at sammenligne dem.")
         return
-    st.dataframe(
+    dataframe(
         [
             {
                 "Spiller": keyed[key].name,
@@ -669,7 +718,7 @@ def player_changes_panel(
         if expander.open:
             with expander:
                 if items:
-                    st.dataframe(
+                    dataframe(
                         rows(items),
                         hide_index=True,
                         key=(
@@ -899,10 +948,14 @@ def data_quality_panel(
         st.info("Der er ingen managerspil at analysere.")
         return
     status_labels = {
-        "ready": ("Klar", "green", ":material/check_circle:"),
-        "preliminary": ("Foreløbig", "orange", ":material/schedule:"),
-        "missing": ("Mangler data", "red", ":material/warning:"),
-        "error": ("Fejl", "red", ":material/error:"),
+        "ready": (data_status_label("ready"), "green", ":material/check_circle:"),
+        "preliminary": (
+            data_status_label("preliminary"),
+            "orange",
+            ":material/schedule:",
+        ),
+        "missing": (data_status_label("missing"), "red", ":material/warning:"),
+        "error": (data_status_label("error"), "red", ":material/error:"),
     }
     for manager_game in selected_games:
         rows = tuple(
@@ -932,7 +985,7 @@ def data_quality_panel(
                     )
                     st.metric(
                         "Spillere",
-                        "Klar" if latest.player_snapshot else "Mangler",
+                        data_status_label("ready" if latest.player_snapshot else "missing"),
                     )
                     st.metric("Holdcache", _age(latest.newest_team_data))
                     st.metric("Spillercache", _age(latest.newest_player_data))
@@ -963,7 +1016,7 @@ def data_quality_panel(
                 )
                 if expander.open:
                     with expander:
-                        st.dataframe(
+                        dataframe(
                             [
                                 {
                                     "Runde": row.round_number,
@@ -973,10 +1026,12 @@ def data_quality_panel(
                                         f"{row.expected_teams}"
                                     ),
                                     "Spillere": (
-                                        "Ja" if row.player_snapshot else "Mangler"
+                                        data_status_label(
+                                            "ready" if row.player_snapshot else "missing"
+                                        )
                                     ),
                                     "Mangler": (
-                                        ", ".join(row.missing_team_names) or "-"
+                                        ", ".join(row.missing_team_names) or "–"
                                     ),
                                 }
                                 for row in rows[1:]
@@ -1042,7 +1097,7 @@ def legacy_manager_view(
             border=True,
         )
     if board.rows:
-        st.dataframe(
+        dataframe(
             [
                 {
                     "Rang": row.rank,
@@ -1074,7 +1129,7 @@ def legacy_manager_view(
     with st.expander("Foreløbig visning", on_change="rerun") as exp:
         if exp.open:
             if preview.rows:
-                st.dataframe(
+                dataframe(
                     [
                         {
                             "Manager": row.manager_name,
@@ -1087,13 +1142,15 @@ def legacy_manager_view(
                     hide_index=True,
                     key="legacy-managers:preview-ranking",
                 )
-            st.dataframe(
+            dataframe(
                 [
                     {
                         "Konkurrence": item.competition_name,
                         "Type": item.kind,
                         "Runde": item.round_number,
-                        "Status": "Komplet" if item.complete else "Afventer data",
+                        "Status": data_status_label(
+                            "complete" if item.complete else "preliminary"
+                        ),
                     }
                     for item in live
                 ],
@@ -1206,7 +1263,7 @@ def backup_view(paths: AppPaths) -> None:
             st.error(error)
         return
     st.success("Hele arkivet er valideret: stier, skemaer, størrelser og kontrolsummer.")
-    st.dataframe(
+    dataframe(
         [
             {"Fil": item.path, "Bytes": item.size, "SHA-256": item.sha256}
             for item in validation.manifest.files
@@ -1261,7 +1318,7 @@ def render_tournament_bracket(
             )
             for seed, team_id in enumerate(group.tournament.seed_order, 1)
         }
-        st.dataframe(
+        dataframe(
             [
                 {
                     "Kamp": item.match_id,
@@ -1504,19 +1561,28 @@ def managers_view(
     """Render the consolidated manager center."""
 
     st.title("Managers", anchor="managers")
-    settings_store, settings = _manager_settings(paths)
-    settings = build_effective_manager_settings(settings, groups, teams)
-    metadata, metadata_warnings = GameMetadataStore(paths.game_metadata_dir).scan()
-    final_rounds = {
-        item.identity: item.final_round
-        for item in metadata
-        if item.final_round is not None
-    }
-    live = _cached_manager_live_events(groups, teams, settings, final_rounds)
-    frozen, ledger_warnings = HallOfFameStore(paths.hall_of_fame_dir).scan()
-    frozen = remap_manager_events(frozen, settings)
-    round_results = _cached_manager_round_results(groups, teams, settings)
-    profiles = effective_manager_profiles(settings)
+    manager_slot = st.container()
+    with manager_slot:
+        with st.skeleton(height=140):
+            settings_store, settings = _manager_settings(paths)
+            settings = build_effective_manager_settings(settings, groups, teams)
+            metadata, metadata_warnings = GameMetadataStore(
+                paths.game_metadata_dir
+            ).scan()
+            final_rounds = {
+                item.identity: item.final_round
+                for item in metadata
+                if item.final_round is not None
+            }
+            live = _cached_manager_live_events(
+                groups, teams, settings, final_rounds
+            )
+            frozen, ledger_warnings = HallOfFameStore(
+                paths.hall_of_fame_dir
+            ).scan()
+            frozen = remap_manager_events(frozen, settings)
+            round_results = _cached_manager_round_results(groups, teams, settings)
+            profiles = effective_manager_profiles(settings)
 
     with st.container(horizontal=True):
         st.metric("Managerprofiler", len(profiles), border=True)
@@ -1561,10 +1627,10 @@ def managers_view(
                 rating = rating_by_id.get(row.manager_id)
                 rows.append(
                     {
-                        "Rang": row.rank,
+                        "Rang": str(row.rank),
                         "Manager": row.manager_name,
                         "Point": row.points,
-                        "Elo": None if rating is None else rating.rating,
+                        "Elo": format_elo(None if rating is None else rating.rating),
                         "Status": (
                             "Ingen rating"
                             if rating is None
@@ -1578,10 +1644,10 @@ def managers_view(
             known = {row.manager_id for row in board.rows}
             rows.extend(
                 {
-                    "Rang": None,
+                    "Rang": "–",
                     "Manager": rating.manager_name,
                     "Point": 0,
-                    "Elo": rating.rating,
+                    "Elo": format_elo(rating.rating),
                     "Status": "Forel\u00f8big" if rating.provisional else "Etableret",
                     "Perioder": rating.periods,
                     "Titler": 0,
@@ -1591,22 +1657,34 @@ def managers_view(
                 if rating.manager_id not in known
             )
             if rows:
-                st.dataframe(
+                dataframe(
                     rows,
                     hide_index=True,
                     width="stretch",
+                    column_config={
+                        "Rang": st.column_config.TextColumn(
+                            "Rang",
+                            help="Placering i Hall of Fame; – betyder endnu ikke placeret.",
+                        ),
+                        "Elo": st.column_config.TextColumn(
+                            "Elo",
+                            help="Managerens Elo-rating afrundet til nærmeste heltal.",
+                        ),
+                    },
                     key="managers:ranking",
                 )
             else:
                 st.info("Ingen komplette managerresultater endnu.")
             with st.expander("Foreløbig visning", on_change="rerun") as preview:
                 if preview.open:
-                    st.dataframe(
+                    dataframe(
                         [
                             {
                                 "Konkurrence": item.competition_name,
                                 "Runde": item.round_number,
-                                "Status": "Komplet" if item.complete else "Forel\u00f8big",
+                                "Status": data_status_label(
+                                    "complete" if item.complete else "preliminary"
+                                ),
                             }
                             for item in live
                         ],
@@ -1652,7 +1730,7 @@ def managers_view(
         with medal_tab:
             careers = _cached_manager_careers(frozen, round_results)
             if careers:
-                st.dataframe(
+                dataframe(
                     [
                         {
                             "Manager": item.manager_name,
@@ -1841,7 +1919,7 @@ def managers_view(
                         f"i {closest.competition_id}."
                     )
                 meetings = (*h2h.official, *h2h.shared_rounds)
-                st.dataframe(
+                dataframe(
                     [
                         {
                             "Spor": "Officiel kamp" if item.track == "official" else "F\u00e6lles grupperunde",
@@ -1892,7 +1970,7 @@ def managers_view(
                     frozen,
                     settings.hall_of_fame_score,
                 )
-                st.dataframe(
+                dataframe(
                     [
                         {
                             "Rang": item.rank,
@@ -1994,7 +2072,7 @@ def managers_view(
                 for key in profile.identity_keys
             }
             if profiles:
-                st.dataframe(
+                dataframe(
                     [
                         {
                             "Manager": item.display_name,
@@ -2260,6 +2338,42 @@ def managers_view(
         st.warning(warning)
 
 
+def _reset_calendar_filters() -> None:
+    for key in tuple(st.session_state):
+        if str(key).startswith("calendar:"):
+            st.session_state.pop(key, None)
+    for parameter in ("locale", "game"):
+        if parameter in st.query_params:
+            del st.query_params[parameter]
+
+
+def _calendar_filter_chips(
+    values,
+    *,
+    slug_counts,
+    group_names,
+    manager_names,
+) -> tuple[str, ...]:
+    game_filter, group_filter, manager_filter, date_filter, include_past = values
+    chips: list[str] = []
+    if game_filter is not None:
+        label = (
+            game_filter[1]
+            if slug_counts.get(game_filter[1], 0) == 1
+            else f"{game_filter[1]} ({game_filter[0]})"
+        )
+        chips.append(f"Spil: {label}")
+    if group_filter is not None:
+        chips.append(f"Gruppe: {group_names.get(group_filter, group_filter)}")
+    if manager_filter is not None:
+        chips.append(f"Manager: {manager_names.get(manager_filter, manager_filter)}")
+    if isinstance(date_filter, date):
+        chips.append(f"Dato: {date_filter.strftime('%d.%m.%Y')}")
+    if include_past:
+        chips.append("Viser tidligere begivenheder")
+    return tuple(chips)
+
+
 def _calendar_filter_controls(
     game_identities,
     slug_counts,
@@ -2267,64 +2381,122 @@ def _calendar_filter_controls(
     group_names,
     manager_names,
 ):
-    with st.form("calendar-filters", border=False):
-        game_filter = st.selectbox(
-            "Managerspil",
-            (None, *game_identities),
-            format_func=lambda identity: (
-                "Alle managerspil"
-                if identity is None
-                else (
-                    identity[1]
-                    if slug_counts[identity[1]] == 1
-                    else f"{identity[1]} ({identity[0]})"
-                )
-            ),
-            key="calendar:game",
-            persist_state="session",
-        )
-        group_filter = st.selectbox(
-            "Gruppe eller turnering",
-            (None, *event_group_ids),
-            format_func=lambda key: (
-                "Alle grupper" if key is None else group_names.get(key, key)
-            ),
-            key="calendar:group",
-            persist_state="session",
-        )
-        manager_filter = st.selectbox(
-            "Manager",
-            (
-                None,
-                *sorted(
-                    manager_names,
-                    key=lambda key: (manager_names[key].casefold(), key),
-                ),
-            ),
-            format_func=lambda key: (
-                "Alle managers" if key is None else manager_names.get(key, key)
-            ),
-            key="calendar:manager",
-            persist_state="session",
-        )
-        date_filter = st.date_input(
-            "Dato",
-            value=None,
-            key="calendar:date",
-            persist_state="session",
-        )
-        include_past = st.toggle(
-            "Vis tidligere begivenheder",
-            value=False,
-            key="calendar:include-past",
-            persist_state="session",
-        )
-        st.form_submit_button(
-            "Anvend filtre",
+    requested_locale = str(st.query_params.get("locale", "")).casefold()
+    requested_slug = str(st.query_params.get("game", ""))
+    requested = (requested_locale, requested_slug)
+    requested = requested if requested in game_identities else None
+    if requested is not None and st.session_state.get("calendar:query-game") != requested:
+        st.session_state["calendar:game"] = requested
+        st.session_state["calendar:applied"] = (requested, None, None, None, False)
+        st.session_state["calendar:query-game"] = requested
+    applied = st.session_state.get(
+        "calendar:applied",
+        (requested, None, None, None, False),
+    )
+    chips = _calendar_filter_chips(
+        applied,
+        slug_counts=slug_counts,
+        group_names=group_names,
+        manager_names=manager_names,
+    )
+    with st.container(
+        key="sticky-action-bar-calendar",
+        horizontal=True,
+        vertical_alignment="center",
+        gap="small",
+    ):
+        with st.popover(
+            f"Filtre · {len(chips)}",
             icon=":material/filter_alt:",
-            type="primary",
+            key="calendar:filter-panel",
+        ):
+            with st.form("calendar-filters", border=False):
+                game_filter = st.selectbox(
+                    "Managerspil",
+                    (None, *game_identities),
+                    format_func=lambda identity: (
+                        "Alle managerspil"
+                        if identity is None
+                        else (
+                            identity[1]
+                            if slug_counts[identity[1]] == 1
+                            else f"{identity[1]} ({identity[0]})"
+                        )
+                    ),
+                    key="calendar:game",
+                    persist_state="session",
+                )
+                group_filter = st.selectbox(
+                    "Gruppe eller turnering",
+                    (None, *event_group_ids),
+                    format_func=lambda key: (
+                        "Alle grupper" if key is None else group_names.get(key, key)
+                    ),
+                    key="calendar:group",
+                    persist_state="session",
+                )
+                manager_filter = st.selectbox(
+                    "Manager",
+                    (
+                        None,
+                        *sorted(
+                            manager_names,
+                            key=lambda key: (manager_names[key].casefold(), key),
+                        ),
+                    ),
+                    format_func=lambda key: (
+                        "Alle managers"
+                        if key is None
+                        else manager_names.get(key, key)
+                    ),
+                    key="calendar:manager",
+                    persist_state="session",
+                )
+                date_filter = st.date_input(
+                    "Dato",
+                    value=None,
+                    key="calendar:date",
+                    persist_state="session",
+                )
+                include_past = st.toggle(
+                    "Vis tidligere begivenheder",
+                    value=False,
+                    key="calendar:include-past",
+                    persist_state="session",
+                )
+                submitted = st.form_submit_button(
+                    "Anvend filtre",
+                    icon=":material/filter_alt:",
+                    type="primary",
+                )
+        for chip in chips[:5]:
+            st.badge(chip, color="gray")
+        st.button(
+            "Nulstil",
+            icon=":material/filter_alt_off:",
+            key="calendar:reset-filters",
+            on_click=_reset_calendar_filters,
+            disabled=not chips,
         )
-    return game_filter, group_filter, manager_filter, date_filter, include_past
+    if submitted:
+        applied = (
+            game_filter,
+            group_filter,
+            manager_filter,
+            date_filter,
+            include_past,
+        )
+        st.session_state["calendar:applied"] = applied
+        st.session_state["calendar:query-game"] = game_filter
+        if game_filter is None:
+            for parameter in ("locale", "game"):
+                if parameter in st.query_params:
+                    del st.query_params[parameter]
+        else:
+            st.query_params["locale"] = game_filter[0]
+            st.query_params["game"] = game_filter[1]
+        st.rerun()
+    return applied
 
 
 @st.fragment
@@ -2336,35 +2508,38 @@ def calendar_view(
     """Render the global cache-only schedule."""
 
     st.title("Kalender", anchor="kalender")
-    metadata, warnings = GameMetadataStore(paths.game_metadata_dir).scan()
-    events = build_calendar_events(groups, metadata)
-    _, settings = _manager_settings(paths)
-    settings = build_effective_manager_settings(settings, groups, teams)
-    manager_names: dict[str, str] = {}
-    managers_by_event: dict[str, frozenset[str]] = {}
-    for event in events:
-        event_managers: set[str] = set()
-        for team_id in event.participant_ids:
-            snapshot = teams.newest(
-                (event.game_locale, event.game_slug),
-                team_id,
-            )
-            if snapshot is None:
-                continue
-            team = snapshot.team
-            manager_id, manager_name = resolve_manager_identity(
-                settings,
-                owner_user_id=team.owner_user_id,
-                account_user_id=team.reference.account_user_id,
-                account_key=team.reference.account_key,
-                owner_name=team.owner_name,
-                fallback_key=(
-                    f"{event.game_locale}:{event.game_slug}:team:{team_id}"
-                ),
-            )
-            manager_names[manager_id] = manager_name
-            event_managers.add(manager_id)
-        managers_by_event[event.event_id] = frozenset(event_managers)
+    calendar_slot = st.container()
+    with calendar_slot:
+        with st.skeleton(height=140):
+            metadata, warnings = GameMetadataStore(paths.game_metadata_dir).scan()
+            events = build_calendar_events(groups, metadata)
+            _, settings = _manager_settings(paths)
+            settings = build_effective_manager_settings(settings, groups, teams)
+            manager_names: dict[str, str] = {}
+            managers_by_event: dict[str, frozenset[str]] = {}
+            for event in events:
+                event_managers: set[str] = set()
+                for team_id in event.participant_ids:
+                    snapshot = teams.newest(
+                        (event.game_locale, event.game_slug),
+                        team_id,
+                    )
+                    if snapshot is None:
+                        continue
+                    team = snapshot.team
+                    manager_id, manager_name = resolve_manager_identity(
+                        settings,
+                        owner_user_id=team.owner_user_id,
+                        account_user_id=team.reference.account_user_id,
+                        account_key=team.reference.account_key,
+                        owner_name=team.owner_name,
+                        fallback_key=(
+                            f"{event.game_locale}:{event.game_slug}:team:{team_id}"
+                        ),
+                    )
+                    manager_names[manager_id] = manager_name
+                    event_managers.add(manager_id)
+                managers_by_event[event.event_id] = frozenset(event_managers)
 
     game_identities = tuple(
         sorted(
@@ -2428,8 +2603,9 @@ def calendar_view(
     )
     timed = tuple(item for item in selected if not item.missing_time)
     missing = tuple(item for item in selected if item.missing_time)
+    st.caption(f"{len(selected)} kalenderbegivenheder matcher de anvendte filtre.")
     if timed:
-        st.dataframe(
+        dataframe(
             [
                 {
                     "Start": item.start,

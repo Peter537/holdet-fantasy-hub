@@ -6,6 +6,8 @@ from pathlib import Path
 
 import streamlit as st
 
+from website.presentation import dataframe
+
 from holdet_lib._formatting import count_label
 from holdet_lib.accounts import AccountStore, rename_account_and_groups
 from holdet_lib.errors import PayloadError
@@ -316,7 +318,7 @@ def _saved_accounts_tab(
             accounts, key=lambda item: (item.label.casefold(), item.user_id)
         )
     ]
-    event = st.dataframe(
+    event = dataframe(
         rows,
         hide_index=True,
         width="stretch",
