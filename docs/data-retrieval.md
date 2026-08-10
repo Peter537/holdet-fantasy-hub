@@ -23,7 +23,7 @@ sequenceDiagram
     Store-->>Web: Publiceret atomisk
 ```
 
-Navigation, Rundecenter, Managers, H2H, sæsoner, Kalender, Datastatus, Analyse, spillerdetaljer, managerspillets alarmfane, historik, watchlist, sammenligning, ændringer og Transferlaboratorium stopper før første netværkspil. De bruger kun eksisterende snapshots, publicerede parringer og metadata. Manglende metadata vises som en datamangel og udløser aldrig automatisk kontakt til Holdet.
+Navigation, Rundecenter, Managers, H2H, sæsoner, Kalender, Datastatus, Analyse, spillerdetaljer, managerspillets alarmfane, historik, watchlist, sammenligning, ændringer og Transferlaboratorium stopper før første netværkspil. De bruger kun eksisterende snapshots, publicerede parringer, metadata og refresh-manifester. Også Rundecenterets opdaterings-preview og time machine er cache-only; manglende metadata vises som en datamangel og udløser aldrig automatisk kontakt til Holdet. Se [Rundecenter og daglig arbejdsgang](round-center.md).
 
 ## URL, variant og spilpolitik
 
@@ -59,7 +59,7 @@ For pengebaserede spil kontrolleres opstillingens værdi mod historikkens total 
 
 ## Manuelle opdateringer og eventrevisioner
 
-Kun eksplicitte manager-, spiller-, hold-, gruppe- og turneringshandlinger skriver nye snapshots eller metadata. **Opdater managerspil** henter metadata og den seneste komplette spillerliste én gang og derefter hvert relevante hold højst én gang. Spillerfejl og holdfejl rapporteres separat, og hver side bruger den seneste kompatible cache som fallback. En komplet slutrunde-refresh, arkivering eller **Genopbyg historik fra cache** kan desuden publicere manager-events.
+Kun eksplicitte manager-, spiller-, hold-, gruppe- og turneringshandlinger skriver nye snapshots eller metadata. **Opdater managerspil** udfører en bekræftet `RefreshPlan`: alt, kun manglende/forældede data eller kun retrybare fejl fra et tidligere manifest. Hold deduplikeres på tværs af grupper, fremdrift rapporteres pr. datakilde, og gyldig kompatibel cache kan genbruges efter en kildefejl. En komplet slutrunde-refresh, arkivering eller **Genopbyg historik fra cache** kan desuden publicere manager-events.
 
 Et komplet resultat er append-only. Hvis kildedata rettes, gemmes en højere eventrevision med reference til den supersedede revision; den gamle payload overskrives ikke. Schema-1 Hall of Fame-events læses som legacy-revisioner og remappes gennem de aktuelle managerprofiler.
 

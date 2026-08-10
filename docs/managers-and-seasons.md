@@ -52,7 +52,7 @@ Runde-awards er:
 - **Højeste vækst**: højeste `RoundSummary.change`;
 - **Tætteste duel**: mindste absolutte forskel i et publiceret fixture, ellers blandt fælles managerpar i gruppen.
 
-`RoundStory` genereres lokalt fra de samme facts. Teksten er deterministisk og kan omtale rundevinder, føringsskifte, comeback, nærmeste duel og streak. Ufuldstændige runder vises som foreløbig preview og fryses ikke.
+`RoundStory` genereres lokalt fra de samme facts. Teksten er deterministisk og kan omtale rundevinder, føringsskifte, comeback, nærmeste duel og streak. Ufuldstændige runder vises som foreløbig preview og fryses ikke. De typed, forklarlige fakta og den delbare HTML-kontrakt er beskrevet i [Rundecenter og daglig arbejdsgang](round-center.md).
 
 ## H2H
 

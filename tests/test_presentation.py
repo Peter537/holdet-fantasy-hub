@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 import tomllib
+from zoneinfo import ZoneInfo
 
 from website.presentation import (
     data_status_badges,
@@ -45,6 +46,16 @@ def test_relative_freshness_includes_relative_and_precise_time() -> None:
     assert format_precise_time(generated) == "04.08 kl. 22.11"
     assert format_relative_precise(generated, now=now) == (
         "4 dage siden · 04.08 kl. 22.11"
+    )
+
+
+def test_relative_time_counts_elapsed_time_across_dst() -> None:
+    copenhagen = ZoneInfo("Europe/Copenhagen")
+    now = datetime(2026, 3, 29, 1, 45, tzinfo=copenhagen)
+    deadline = datetime(2026, 3, 29, 3, 30, tzinfo=copenhagen)
+
+    assert format_relative_precise(deadline, now=now) == (
+        "om 45 minutter · 29.03 kl. 03.30"
     )
 
 

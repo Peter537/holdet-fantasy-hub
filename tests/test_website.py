@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
@@ -90,6 +90,19 @@ def navigate(app: AppTest, view: str, **parameters: object) -> AppTest:
 def select_game_tab(app: AppTest, game: holdet.GameContext, label: str) -> AppTest:
     app.session_state[f"game-tabs-{game.locale}-{game.slug}"] = label
     return app.run(timeout=15)
+
+
+def _refresh_dialog_test_app(manager_game, groups) -> None:
+    """Render the real dialog on every AppTest full rerun.
+
+    AppTest does not emulate fragment-only dialog reruns, so this harness keeps
+    the production dialog mounted while its Start button is exercised.
+    """
+
+    from website import ui as app_ui
+
+    app_ui._configure_paths()
+    app_ui._manager_game_refresh_dialog(manager_game, groups)
 
 
 
@@ -1350,7 +1363,11 @@ class DashboardTests(unittest.TestCase):
             snapshot_store = holdet.SnapshotStore(output)
             snapshot_store.save_team_json(first)
             snapshot_store.save_team_json(second)
-            group = holdet.GroupStore(config / "groups.json").create(
+            group_store = holdet.GroupStore(config / "groups.json")
+            manager_game = group_store.create_manager_game(
+                first.reference.game, "Tourspillet"
+            )
+            group = group_store.create(
                 "Tour venner",
                 first.reference.game,
                 (
@@ -1359,18 +1376,119 @@ class DashboardTests(unittest.TestCase):
                 ),
                 group_id="tour-venner",
             )
+            refresh_milestone = datetime.now().astimezone()
 
             class FakeClient:
+                def __init__(self):
+                    self.calls: list[tuple[str, int | None]] = []
+
+                def fetch_game_info(self, game):
+                    self.calls.append(("metadata", None))
+                    return holdet.GameContext(
+                        game,
+                        "cycling",
+                        "classic",
+                        7,
+                        None,
+                        None,
+                        50_000_000,
+                        3,
+                        "Tourspillet",
+                        (
+                            holdet.ScheduleRound(
+                                3,
+                                refresh_milestone - timedelta(hours=2),
+                                refresh_milestone - timedelta(hours=1),
+                                refresh_milestone,
+                            ),
+                        ),
+                    )
+
+                def fetch_players(self, _game):
+                    self.calls.append(("players", None))
+                    return replace(
+                        sample_statistics(3), round_status="complete"
+                    )
+
                 def fetch_team(self, reference):
+                    self.calls.append(("team", reference.team_id))
                     if reference.team_id == 2:
                         raise holdet.FetchError("testfejl")
                     return first
 
-            with patch("holdet_lib.HoldetClient", return_value=FakeClient()):
+            client = FakeClient()
+            with patch("holdet_lib.HoldetClient", return_value=client):
                 app = AppTest.from_file(APP_PATH).run(timeout=15)
                 navigate(app, "game", locale=first.reference.game.locale, game=first.reference.game.slug)
                 button(app, "Opdater managerspil").click().run(timeout=20)
-                self.assertTrue(any("bruger cache" in item.value for item in app.success))
+                self.assertEqual(len(app.get("dialog")), 1)
+                self.assertEqual(client.calls, [])
+                self.assertFalse(
+                    list((output.parent / "manifests").rglob("refresh-round*.json"))
+                )
+                preview = next(
+                    item.value
+                    for item in app.dataframe
+                    if "Datakilde" in item.value.columns
+                )
+                self.assertEqual(
+                    preview["Datakilde"].tolist(),
+                    [
+                        "Spilinfo, regler og tidsplan",
+                        "Spillere",
+                        "Hold: Alpha",
+                        "Hold: Beta",
+                        "Efterbehandling",
+                    ],
+                )
+                self.assertFalse(button(app, "Start opdatering").disabled)
+
+                # AppTest.from_function materializes a temporary script. Keep
+                # that harness inside the test-owned HOLDET_DATA_DIR as well.
+                with patch(
+                    "streamlit.testing.v1.app_test.TMP_DIR",
+                    SimpleNamespace(name=str(config.parent / "temp")),
+                ):
+                    dialog = AppTest.from_function(
+                        _refresh_dialog_test_app,
+                        args=(manager_game, (group,)),
+                        default_timeout=30,
+                    ).run(timeout=20)
+                button(dialog, "Start opdatering").click().run(timeout=30)
+                self.assertFalse(dialog.exception)
+                self.assertEqual(
+                    client.calls,
+                    [
+                        ("metadata", None),
+                        ("players", None),
+                        ("team", 1),
+                        ("team", 2),
+                    ],
+                )
+                manifests = list(
+                    (
+                        output.parent
+                        / "manifests"
+                        / f"{first.reference.game.locale}--{first.reference.game.slug}"
+                        / "game"
+                    ).glob("refresh-round*.json")
+                )
+                self.assertEqual(len(manifests), 1)
+                manifest = holdet.ManifestStore(
+                    output.parent / "manifests"
+                ).load(manifests[0])
+                self.assertEqual(manifest.schema_version, 2)
+                self.assertEqual(
+                    [(item.step_id, item.status) for item in manifest.steps],
+                    [
+                        ("metadata", "fetched"),
+                        ("players", "fetched"),
+                        ("team:1", "fetched"),
+                        ("team:2", "reused_after_error"),
+                        ("postprocess", "fetched"),
+                    ],
+                )
+
                 navigate(app, "group", group=group.group_id)
                 self.assertFalse(app.exception)
                 self.assertTrue(any(item.value == group.name for item in app.title))
@@ -1409,15 +1527,212 @@ class DashboardTests(unittest.TestCase):
                         for item in app.warning
                     )
                 )
-                manifests = list(
+
+    def test_round_center_refresh_preview_is_cache_only_and_noop_when_current(
+        self,
+    ) -> None:
+        with website_environment() as (config, output):
+            current = datetime.now().astimezone()
+            team = sample_team(41, name="Aktuelt hold", current_round=3)
+            group_store = holdet.GroupStore(config / "groups.json")
+            manager_game = group_store.create_manager_game(
+                team.reference.game, "Aktuelt spil"
+            )
+            group_store.create(
+                "Aktuel gruppe",
+                team.reference.game,
+                (
+                    holdet.GroupTeam(
+                        team.reference.team_id,
+                        team.team_name,
+                        team.reference.source_url,
+                    ),
+                ),
+                group_id="aktuel-gruppe",
+            )
+            holdet.SnapshotStore(output).save_team_json(team, now=current)
+            holdet.PlayerStatisticsStore(output).save(
+                replace(sample_statistics(3), round_status="complete"),
+                now=current,
+            )
+            holdet.GameMetadataStore(output.parent / "game-metadata").save(
+                holdet.GameContext(
+                    manager_game.game,
+                    "cycling",
+                    "classic",
+                    7,
+                    None,
+                    None,
+                    50_000_000,
+                    4,
+                    "Aktuelt spil",
                     (
-                        output.parent
-                        / "manifests"
-                        / first.reference.game.slug
-                        / "game"
-                    ).glob("refresh-round*.json")
+                        holdet.ScheduleRound(
+                            3,
+                            current - timedelta(days=3),
+                            current - timedelta(days=2),
+                            current - timedelta(days=1),
+                        ),
+                        holdet.ScheduleRound(
+                            4,
+                            current + timedelta(days=1),
+                            current + timedelta(days=2),
+                            current + timedelta(days=3),
+                        ),
+                    ),
+                ),
+                fetched_at=current,
+            )
+            manifest_dir = output.parent / "manifests"
+
+            with patch("holdet_lib.HoldetClient") as client_type:
+                app = AppTest.from_file(APP_PATH).run(timeout=15)
+                navigate(
+                    app,
+                    "game",
+                    locale=manager_game.game.locale,
+                    game=manager_game.game.slug,
                 )
-                self.assertEqual(len(manifests), 1)
+                button(app, "Opdater managerspil").click().run(timeout=20)
+
+                self.assertFalse(app.exception)
+                self.assertEqual(len(app.get("dialog")), 1)
+                preview = next(
+                    item.value
+                    for item in app.dataframe
+                    if "Datakilde" in item.value.columns
+                )
+                self.assertEqual(
+                    preview[["Datakilde", "Handling"]].to_dict("records"),
+                    [
+                        {
+                            "Datakilde": "Spilinfo, regler og tidsplan",
+                            "Handling": "Cache genbruges",
+                        },
+                        {
+                            "Datakilde": "Spillere",
+                            "Handling": "Cache genbruges",
+                        },
+                        {
+                            "Datakilde": "Hold: Aktuelt hold",
+                            "Handling": "Cache genbruges",
+                        },
+                        {
+                            "Datakilde": "Efterbehandling",
+                            "Handling": "Ikke nødvendig",
+                        },
+                    ],
+                )
+                self.assertTrue(button(app, "Start opdatering").disabled)
+                self.assertTrue(
+                    any(
+                        "Der oprettes ikke et manifest" in item.value
+                        for item in app.info
+                    )
+                )
+                self.assertEqual(client_type.mock_calls, [])
+                self.assertFalse(manifest_dir.exists())
+
+                button(app, "Luk").click().run(timeout=15)
+                self.assertEqual(client_type.mock_calls, [])
+                self.assertFalse(manifest_dir.exists())
+
+    def test_round_center_time_machine_is_read_only_and_network_free(self) -> None:
+        with website_environment() as (config, output):
+            first = sample_team(
+                51,
+                name="Historisk Alpha",
+                current_round=3,
+                history_rounds=(3, 2),
+            )
+            second = sample_team(
+                52,
+                name="Historisk Beta",
+                current_round=3,
+                history_rounds=(3, 2),
+            )
+            group_store = holdet.GroupStore(config / "groups.json")
+            manager_game = group_store.create_manager_game(
+                first.reference.game, "Historisk spil"
+            )
+            group_store.create(
+                "Historisk gruppe",
+                manager_game.game,
+                (
+                    holdet.GroupTeam(
+                        first.reference.team_id,
+                        first.team_name,
+                        first.reference.source_url,
+                    ),
+                    holdet.GroupTeam(
+                        second.reference.team_id,
+                        second.team_name,
+                        second.reference.source_url,
+                    ),
+                ),
+                group_id="historisk-gruppe",
+            )
+            snapshots = holdet.SnapshotStore(output)
+            snapshots.save_team_json(first)
+            snapshots.save_team_json(second)
+            players = holdet.PlayerStatisticsStore(output)
+            players.save(replace(sample_statistics(2), round_status="complete"))
+            players.save(replace(sample_statistics(3), round_status="complete"))
+
+            with patch("holdet_lib.HoldetClient") as client_type:
+                app = AppTest.from_file(APP_PATH).run(timeout=15)
+                navigate(
+                    app,
+                    "game",
+                    locale=manager_game.game.locale,
+                    game=manager_game.game.slug,
+                )
+                selector = widget(app, "selectbox", "Vis Rundecenter")
+                self.assertIn("Runde 2 · senest korrigeret", selector.options)
+                root = config.parent
+                before = {
+                    path.relative_to(root): path.read_bytes()
+                    for path in root.rglob("*")
+                    if path.is_file()
+                }
+
+                selector.set_value(2).run(timeout=20)
+
+                self.assertFalse(app.exception)
+                self.assertEqual(
+                    widget(app, "selectbox", "Vis Rundecenter").value, 2
+                )
+                self.assertEqual(app.query_params["round"], ["2"])
+                self.assertTrue(
+                    any(
+                        "Runde 2 er rekonstrueret med seneste rettelser"
+                        in item.value
+                        for item in app.info
+                    )
+                )
+                self.assertTrue(
+                    any(
+                        item.label == "Runde" and item.value == "2"
+                        for item in app.metric
+                    )
+                )
+                self.assertFalse(
+                    any(
+                        item.label in {
+                            "Opdater managerspil",
+                            "Hent spilinfo og data",
+                            "Start opdatering",
+                        }
+                        for item in app.button
+                    )
+                )
+                after = {
+                    path.relative_to(root): path.read_bytes()
+                    for path in root.rglob("*")
+                    if path.is_file()
+                }
+                self.assertEqual(after, before)
+                self.assertEqual(client_type.mock_calls, [])
 
     def test_player_statistics_rows_use_dynamic_labels_status_and_numeric_values(self) -> None:
         cycling = sample_statistics()

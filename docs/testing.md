@@ -52,10 +52,12 @@ Uden flaget skippes canary-testene, og standardsuiten er helt offline. Canarien 
 | Beslutningsanalyse | Formhuller, stabilitet, nul/negativ vækst, kaptajnmismatch, 0/0,5/1 % rente og gebyr, afrunding, transferhuller, kontrafaktisk sum og bankhitrater |
 | Idealhold og model | Brute-force-paritet, tie-break, infeasible, timeout/bound, cirka 400 kandidater, deterministisk seed, fælles-spiller-annullering, intervaller, dækning og walk-forward-backtest |
 | Gruppe og alarmer | Ledersammenligning, eksponeringsnævnere, manglende hold, alarmtransitioner, deduplikering, læst/afvist og separat spillerfallback |
+| Rundecenter | Næste handling, handelsvindue, `completed_needs_refresh`, afvigelser, sessionfiltre, nærmeste tidligere runde, latest-corrected time machine og fuld gruppematrix |
+| Refresh og manifest | Cache-only preview, alt/forældet/retry-planer, holddeduplikering, fremdrift pr. kilde, cachefallback, manifest schema 2 og dual-read af schema 1 |
 | Historik | Huller, seneste snapshot pr. runde og omvendte rangakser på spil-, gruppe- og holdniveau |
 | Managers og sæsoner | Identitetsgraf, stabilt ID ved merge/rename/unmerge, legacy-remapping uden writes, bedste hold, locale- og puljeisoleret Elo, awards, streaks, historier, H2H-aggregater, sæsonredigering og pointprofil |
 | Eventledger og kalender | Revisioner, legacy-events, manglende metadata, cache-only events og nul navigation-writes |
-| Dataportabilitet | DataPackage, Unicode, rå taltyper, CSV-injection, XLSX-ark, valgfri Parquet, rapportescaping og anonymiseringsprofiler |
+| Dataportabilitet | DataPackage, Unicode, rå taltyper, CSV-injection, XLSX-ark, valgfri Parquet, rapportescaping, forklarlige historiefakta, sikre dual links og anonymiseringsprofiler |
 | Lagring og backup | AppData, atomiske writes, HubSettings 1/2 → 3 og GameMetadata 1 → 2 uden startup-write, integritetsindeks, importklassifikation, arkivgrænser, SHA-256, path traversal, preview, staging og rollback |
 | Lokalt API | Catalog, filtre, pagination, CSV/JSON-paritet, ETag/304, Host/loopback, sikre headere, nul writes og nul netværk |
 | Turnering | Liga, Swiss, gruppespil + knockout, double elimination, fuld Swiss-afslutning, custom byepoint, Buchholz, seedning, tie-breakers, bronzekamp, kontekstvalidering og konflikter for frosne parringer |
@@ -66,7 +68,7 @@ Uden flaget skippes canary-testene, og standardsuiten er helt offline. Canarien 
 
 ## Streamlit AppTest
 
-AppTest åbner hovedroutes og query-parametre uden en virkelig server. Tests beviser blandt andet, at Statusalarmer ikke er en global sidebardestination, at hvert managerspil har en spilfiltreret alarmfane med unread-badges, at legacy Hall of Fame-routen viderestiller, og at Data og lager bruger én URL-bundet områdevælger med kompatible gamle deeplinks, previews og bekræftelser. Analyse-, spiller-, alarm-, manager-, kalender- og almindelig navigation samt transfersimulation må hverken kalde netværk eller skrive persistent data.
+AppTest åbner hovedroutes og query-parametre uden en virkelig server. Tests beviser blandt andet, at Statusalarmer ikke er en global sidebardestination, at hvert managerspil har en spilfiltreret alarmfane med unread-badges, at legacy Hall of Fame-routen viderestiller, og at Data og lager bruger én URL-bundet områdevælger med kompatible gamle deeplinks, previews og bekræftelser. Rundecenterets preview, time machine og sessionfiltre samt Analyse-, spiller-, alarm-, manager-, kalender- og almindelig navigation og transfersimulation må hverken kalde netværk eller skrive persistent data. Den kanoniske funktionskontrakt står i [Rundecenter og daglig arbejdsgang](round-center.md).
 
 ## Lokal UI-regression og accessibility
 

@@ -45,6 +45,7 @@ class ManagerRoundResult:
     ended_at: datetime
     used_time_fallback: bool = False
     complete: bool = True
+    snapshot_generated_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,6 +159,43 @@ class RoundAward:
 
 
 @dataclass(frozen=True, slots=True)
+class RoundStoryTeamRef:
+    """Stable team context attached to one explainable story fact."""
+
+    team_id: int
+    team_name: str
+    manager_id: str
+    manager_name: str
+    group_ids: tuple[str, ...] = ()
+    holdet_url: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RoundStoryFact:
+    """One typed, human-readable fact behind a round story paragraph."""
+
+    kind: Literal[
+        "data_unavailable",
+        "round_winner",
+        "lead_change",
+        "growth_record",
+        "lead_streak",
+        "comeback",
+        "closest_duel",
+    ]
+    label: str
+    explanation: str
+    value: int | None
+    unit: Literal["growth", "places", "rounds", "difference"] | None
+    teams: tuple[RoundStoryTeamRef, ...]
+    preliminary: bool = False
+    fact_id: str = ""
+    source_rounds: tuple[int, ...] = ()
+    status: Literal["final", "preliminary", "unavailable"] = "final"
+    generated_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class RoundStory:
     game_slug: str
     round_number: int
@@ -166,6 +204,7 @@ class RoundStory:
     awards: tuple[RoundAward, ...]
     preliminary: bool = False
     game_locale: str = "da"
+    facts: tuple[RoundStoryFact, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -179,6 +218,7 @@ class _Candidate:
     ended_at: datetime
     fallback: bool
     complete: bool
+    snapshot_generated_at: datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -298,6 +338,7 @@ def _build_periods(
                         ended_at,
                         summary.round_end_at is None,
                         complete,
+                        snapshot.generated_at,
                     )
                     previous = candidates[period_key].get(manager_id)
                     if previous is None or (
@@ -347,6 +388,7 @@ def _build_periods(
                     item.ended_at,
                     item.fallback,
                     item.complete,
+                    item.snapshot_generated_at,
                 )
             )
             previous_total = item.total
@@ -864,6 +906,74 @@ def build_round_awards(
     return tuple(awards)
 
 
+def _round_story_team_ref(
+    result: ManagerRoundResult,
+    groups: tuple[GroupDefinition, ...],
+) -> RoundStoryTeamRef:
+    source_url = next(
+        (
+            member.source_url
+            for group_id in result.group_ids
+            for group in groups
+            if group.group_id == group_id
+            for member in group.teams
+            if member.team_id == result.team_id
+        ),
+        None,
+    )
+    return RoundStoryTeamRef(
+        result.team_id,
+        result.team_name,
+        result.manager_id,
+        result.manager_name,
+        result.group_ids,
+        source_url,
+    )
+
+
+def _round_story_fact(
+    *,
+    game_locale: str,
+    game_slug: str,
+    round_number: int,
+    kind: Literal[
+        "data_unavailable",
+        "round_winner",
+        "lead_change",
+        "growth_record",
+        "lead_streak",
+        "comeback",
+        "closest_duel",
+    ],
+    label: str,
+    explanation: str,
+    value: int | None,
+    unit: Literal["growth", "places", "rounds", "difference"] | None,
+    teams: tuple[RoundStoryTeamRef, ...],
+    sources: tuple[ManagerRoundResult, ...],
+    status: Literal["final", "preliminary", "unavailable"],
+) -> RoundStoryFact:
+    return RoundStoryFact(
+        kind,
+        label,
+        explanation,
+        value,
+        unit,
+        teams,
+        status != "final",
+        f"{game_locale.casefold()}:{game_slug}:round:{round_number}:{kind}",
+        tuple(sorted({item.round_number for item in sources})),
+        status,
+        max(
+            (
+                item.snapshot_generated_at or item.ended_at
+                for item in sources
+            ),
+            default=None,
+        ),
+    )
+
+
 def build_round_story(
     groups: Iterable[GroupDefinition],
     snapshots: SnapshotIndex,
@@ -908,17 +1018,53 @@ def build_round_story(
         selected_groups, snapshots, round_number
     )
     if not results:
+        detail = "Der er endnu ikke cached data nok til at skrive historien."
+        fact = _round_story_fact(
+            game_locale=resolved_locale,
+            game_slug=game_slug,
+            round_number=round_number,
+            kind="data_unavailable",
+            label="Datagrundlag mangler",
+            explanation=detail,
+            value=None,
+            unit=None,
+            teams=(),
+            sources=(),
+            status="unavailable",
+        )
         return RoundStory(
             game_slug,
             round_number,
             f"Runde {round_number} mangler data",
-            ("Der er endnu ikke cached data nok til at skrive historien.",),
+            (detail,),
             (),
             True,
             resolved_locale,
+            (fact,),
         )
+    current_by_manager = {item.manager_id: item for item in results}
     winner = min(results, key=lambda item: (-item.change, item.manager_id))
-    paragraphs = [f"{winner.manager_name} satte rundens h\u00f8jeste v\u00e6kst med {winner.change:+d}."]
+    winner_detail = (
+        f"{winner.manager_name} satte rundens h\u00f8jeste v\u00e6kst med "
+        f"{winner.change:+d}."
+    )
+    fact_status = "preliminary" if preliminary else "final"
+    paragraphs = [winner_detail]
+    facts = [
+        _round_story_fact(
+            game_locale=resolved_locale,
+            game_slug=game_slug,
+            round_number=round_number,
+            kind="round_winner",
+            label="Rundens h\u00f8jeste v\u00e6kst",
+            explanation=winner_detail,
+            value=winner.change,
+            unit="growth",
+            teams=(_round_story_team_ref(winner, selected_groups),),
+            sources=(winner,),
+            status=fact_status,
+        )
+    ]
     leader = min(results, key=lambda item: (item.rank, item.manager_id))
     previous_leaders = [
         item
@@ -928,16 +1074,52 @@ def build_round_story(
     if previous_leaders:
         previous_leader = min(previous_leaders, key=lambda item: item.manager_id)
         if previous_leader.manager_id != leader.manager_id:
-            paragraphs.append(
+            detail = (
                 f"Føringen skiftede fra {previous_leader.manager_name} "
                 f"til {leader.manager_name}."
+            )
+            paragraphs.append(detail)
+            facts.append(
+                _round_story_fact(
+                    game_locale=resolved_locale,
+                    game_slug=game_slug,
+                    round_number=round_number,
+                    kind="lead_change",
+                    label="Føringsskifte",
+                    explanation=detail,
+                    value=None,
+                    unit=None,
+                    teams=(
+                        _round_story_team_ref(previous_leader, selected_groups),
+                        _round_story_team_ref(leader, selected_groups),
+                    ),
+                    sources=(previous_leader, leader),
+                    status=fact_status,
+                )
             )
     historical_growth = [
         item.change for item in all_results if item.round_number < round_number
     ]
     if historical_growth and winner.change > max(historical_growth):
-        paragraphs.append(
-            f"{winner.manager_name} satte samtidig ny vækstrekord."
+        detail = f"{winner.manager_name} satte samtidig ny vækstrekord."
+        paragraphs.append(detail)
+        record_sources = tuple(
+            item for item in all_results if item.round_number <= round_number
+        )
+        facts.append(
+            _round_story_fact(
+                game_locale=resolved_locale,
+                game_slug=game_slug,
+                round_number=round_number,
+                kind="growth_record",
+                label="Ny vækstrekord",
+                explanation=detail,
+                value=winner.change,
+                unit="growth",
+                teams=(_round_story_team_ref(winner, selected_groups),),
+                sources=record_sources,
+                status=fact_status,
+            )
         )
     leading_rounds = sorted({
         item.round_number
@@ -954,10 +1136,69 @@ def build_round_story(
         streak += 1
         expected -= 1
     if streak >= 2:
-        paragraphs.append(
-            f"{leader.manager_name} har nu ført i {streak} runder i træk."
+        detail = f"{leader.manager_name} har nu ført i {streak} runder i træk."
+        paragraphs.append(detail)
+        streak_rounds = frozenset(
+            range(round_number - streak + 1, round_number + 1)
         )
-    paragraphs.extend(item.detail for item in awards if item.kind != "growth")
+        streak_sources = tuple(
+            item
+            for item in all_results
+            if item.manager_id == leader.manager_id
+            and item.round_number in streak_rounds
+        )
+        facts.append(
+            _round_story_fact(
+                game_locale=resolved_locale,
+                game_slug=game_slug,
+                round_number=round_number,
+                kind="lead_streak",
+                label="Føringsstreak",
+                explanation=detail,
+                value=streak,
+                unit="rounds",
+                teams=(_round_story_team_ref(leader, selected_groups),),
+                sources=streak_sources,
+                status=fact_status,
+            )
+        )
+    for award in awards:
+        if award.kind == "growth":
+            continue
+        paragraphs.append(award.detail)
+        teams = tuple(
+            _round_story_team_ref(current_by_manager[manager_id], selected_groups)
+            for manager_id in award.manager_ids
+            if manager_id in current_by_manager
+        )
+        source_rounds = (
+            {round_number - 1, round_number}
+            if award.kind == "comeback"
+            else {round_number}
+        )
+        sources = tuple(
+            item
+            for item in all_results
+            if item.manager_id in award.manager_ids
+            and item.round_number in source_rounds
+        )
+        facts.append(
+            _round_story_fact(
+                game_locale=resolved_locale,
+                game_slug=game_slug,
+                round_number=round_number,
+                kind=(
+                    "comeback" if award.kind == "comeback" else "closest_duel"
+                ),
+                label=award.title,
+                explanation=award.detail,
+                value=award.value,
+                unit="places" if award.kind == "comeback" else "difference",
+                teams=teams,
+                sources=sources,
+                status="preliminary" if award.preliminary else "final",
+            )
+        )
     prefix = "Forel\u00f8big: " if preliminary else ""
     return RoundStory(
         game_slug,
@@ -967,4 +1208,5 @@ def build_round_story(
         awards,
         preliminary,
         resolved_locale,
+        tuple(facts),
     )

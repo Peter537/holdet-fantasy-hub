@@ -30,7 +30,6 @@ from website.hub_pages import (
     game_history_panel,
     group_history_panel,
     history_panel,
-    manager_round_center,
     player_changes_panel,
     player_compare_panel,
     render_tournament_bracket,
@@ -43,6 +42,7 @@ from website.hub_pages import (
     managers_view,
 )
 from website.navigation import PageId, go_to, page_link, relative_url
+from website.round_center_page import render_round_center
 from website.presentation import (
     data_status_label,
     dataframe,
@@ -122,6 +122,13 @@ from holdet_lib import (
     refresh_group,
     resolve_paths,
 )
+from holdet_lib.refresh import (
+    RefreshMode,
+    RefreshPlan,
+    RefreshProgressEvent,
+    build_refresh_plan,
+)
+from holdet_lib.storage import RefreshManifest
 
 
 def _configure_paths() -> None:
@@ -422,20 +429,20 @@ def _sorted_manager_games(
     return tuple(sorted(games, key=_manager_game_sort_key))
 
 
-def _unread_alert_counts() -> dict[tuple[str, str], int]:
-    """Return unread alert counts by game without mutating the inbox."""
+def _unread_alert_state() -> tuple[dict[tuple[str, str], int], str | None]:
+    """Return unread counts plus a visible verification error, without writes."""
 
     try:
         alerts = AnalysisInboxStore(APP_PATHS.analysis_inbox_file).load()
-    except (OSError, PayloadError, ValueError):
-        return {}
+    except (OSError, PayloadError, ValueError) as exc:
+        return {}, str(exc)
     counts: dict[tuple[str, str], int] = {}
     for alert in alerts:
         if not alert.is_unread:
             continue
         identity = (alert.game_locale, alert.game_slug)
         counts[identity] = counts.get(identity, 0) + 1
-    return counts
+    return counts, None
 
 
 def _active_alert_counts() -> dict[tuple[str, str], int]:
@@ -452,6 +459,12 @@ def _active_alert_counts() -> dict[tuple[str, str], int]:
         identity = (alert.game_locale, alert.game_slug)
         counts[identity] = counts.get(identity, 0) + 1
     return counts
+
+
+def _unread_alert_counts() -> dict[tuple[str, str], int]:
+    """Compatibility projection for callers that only render a count."""
+
+    return _unread_alert_state()[0]
 
 
 def _requested_game_from_query() -> GameUrl | None:
@@ -639,29 +652,37 @@ def _latest_by_identity(index: SnapshotIndex) -> dict[tuple[str, str, int], Team
 
 
 def _manifest_statuses(group: GroupDefinition) -> frozenset[int]:
-    folders = (
-        MANIFEST_DIR / group.game.slug / "game",
-        MANIFEST_DIR / group.game.slug / "groups" / group.group_id,
+    store = ManifestStore(MANIFEST_DIR)
+    game_manifests, _ = store.scan(
+        group.game.slug,
+        game_locale=group.game.locale,
+        scope="game",
     )
-    for folder in folders:
-        candidates = sorted(folder.glob("refresh-round*.json"), reverse=True)
-        for path in candidates:
-            try:
-                payload = json.loads(path.read_text(encoding="utf-8"))
-                teams = payload.get("teams") if isinstance(payload, dict) else None
-                if not isinstance(teams, list):
-                    continue
-                member_ids = {member.team_id for member in group.teams}
-                return frozenset(
-                    item["team_id"]
-                    for item in teams
-                    if isinstance(item, dict)
-                    and isinstance(item.get("team_id"), int)
-                    and item["team_id"] in member_ids
-                    and item.get("status") != "success"
-                )
-            except (OSError, json.JSONDecodeError):
-                continue
+    group_manifests, _ = store.scan(
+        group.game.slug,
+        game_locale=group.game.locale,
+        scope="group",
+        group_id=group.group_id,
+    )
+    manifests = sorted(
+        (*game_manifests, *group_manifests),
+        key=lambda item: (item.completed_at, item.run_id),
+        reverse=True,
+    )
+    member_ids = {member.team_id for member in group.teams}
+    for manifest in manifests:
+        relevant = tuple(
+            step
+            for step in manifest.steps
+            if step.source == "team" and step.team_id in member_ids
+        )
+        if relevant:
+            return frozenset(
+                int(step.team_id)
+                for step in relevant
+                if step.team_id is not None
+                and step.status in {"reused_after_error", "failed_no_cache"}
+            )
     return frozenset()
 
 
@@ -2373,6 +2394,419 @@ def _confirm_archive_manager_game(
             _navigate("archive")
 
 
+def _refresh_preview_rows(plan: RefreshPlan) -> list[dict[str, object]]:
+    """Project a refresh plan for display without touching external state."""
+
+    rows: list[dict[str, object]] = []
+    metadata_revalidation = (
+        plan.mode == RefreshMode.STALE_ONLY
+        and any(
+            step.step_id == "metadata" and step.selected
+            for step in plan.steps
+        )
+    )
+    for step in plan.steps:
+        if step.selected:
+            action = "Køres" if step.source == "postprocess" else "Hentes"
+        elif (
+            metadata_revalidation
+            and step.source in {"players", "team"}
+            and step.available
+        ):
+            action = "Genvalideres efter spilinfo"
+        elif not step.available:
+            action = "Ikke tilgængelig"
+        elif step.current_generated_at is not None:
+            action = "Cache genbruges"
+        else:
+            action = "Ikke nødvendig"
+        rows.append(
+            {
+                "Datakilde": step.label,
+                "Handling": action,
+                "Begrundelse": step.reason,
+                "Cache fra": step.current_generated_at,
+            }
+        )
+    return rows
+
+
+def _refresh_event_label(event: RefreshProgressEvent) -> str:
+    labels = {
+        "running": "arbejder",
+        "fetched": "hentet",
+        "reused_current": "aktuel cache genbrugt",
+        "reused_after_error": "cache genbrugt efter fejl",
+        "failed_no_cache": "fejlet uden cache",
+        "skipped_unavailable": "ikke tilgængelig",
+    }
+    return labels[event.status]
+
+
+@st.dialog("Forhåndsvis opdatering", width="large")
+def _manager_game_refresh_dialog(
+    manager_game: ManagerGame,
+    game_groups: tuple[GroupDefinition, ...],
+    retry_manifest: RefreshManifest | None = None,
+) -> None:
+    """Preview and run the only network-writing Rundecenter interaction."""
+
+    retry = retry_manifest is not None
+    identity = f"{manager_game.game.locale}:{manager_game.game.slug}"
+    if retry:
+        mode = RefreshMode.RETRY_FAILED
+        st.caption(
+            f"Kun fejlede trin fra kørsel {retry_manifest.run_id} forsøges igen. "
+            "Tidligere succeser bæres med som genbrugt cache."
+        )
+    else:
+        scope = st.segmented_control(
+            "Omfang",
+            ("Kun forældede data", "Alle data"),
+            default="Kun forældede data",
+            key=f"refresh-scope:{identity}",
+        )
+        mode = (
+            RefreshMode.ALL
+            if scope == "Alle data"
+            else RefreshMode.STALE_ONLY
+        )
+
+    snapshot_store = SnapshotStore(OUTPUT_DIR)
+    player_store = PlayerStatisticsStore(OUTPUT_DIR)
+    manifest_store = ManifestStore(MANIFEST_DIR)
+    metadata_store = GameMetadataStore(APP_PATHS.game_metadata_dir)
+    pending_manifest_key = f"pending-refresh-manifest:{identity}"
+    pending_manifest = st.session_state.get(pending_manifest_key)
+    if isinstance(pending_manifest, RefreshManifest):
+        st.error(
+            "Datakilderne blev behandlet, men manifestet kunne ikke gemmes. "
+            "Genprøv kun den lokale manifestskrivning; der bruges ikke netværk."
+        )
+        with st.container(horizontal=True, horizontal_alignment="right"):
+            if st.button(
+                "Luk",
+                key=f"pending-manifest-close:{pending_manifest.run_id}",
+            ):
+                st.rerun()
+            retry_manifest_write = st.button(
+                "Prøv manifest igen",
+                type="primary",
+                icon=":material/save:",
+                key=f"pending-manifest-retry:{pending_manifest.run_id}",
+            )
+        if retry_manifest_write:
+            try:
+                manifest_path = manifest_store.write(pending_manifest)
+            except Exception as exc:
+                st.error(f"Manifestet kunne stadig ikke gemmes: {exc}")
+            else:
+                st.session_state.pop(pending_manifest_key, None)
+                st.session_state["game_refresh_notice"] = {
+                    "severity": (
+                        "warning" if pending_manifest.failures else "success"
+                    ),
+                    "message": (
+                        "Manifestet blev gemt uden nye netværkskald: "
+                        f"{manifest_path.name}."
+                    ),
+                }
+                st.rerun()
+        return
+    latest_manifest = manifest_store.load_latest(
+        manager_game.game.slug,
+        game_locale=manager_game.game.locale,
+        scope="game",
+    )
+    teams = snapshot_store.scan()
+    players = player_store.scan(manager_game.game)
+    try:
+        metadata = metadata_store.load(manager_game.game)
+    except (OSError, PayloadError, ValueError) as exc:
+        metadata = None
+        st.warning(
+            "Spilinfo kan ikke verificeres lokalt og planlægges derfor hentet: "
+            f"{exc}"
+        )
+    plan = build_refresh_plan(
+        manager_game,
+        game_groups,
+        teams,
+        players,
+        metadata=metadata,
+        mode=mode,
+        previous_manifest=(retry_manifest if retry else latest_manifest),
+        include_metadata=True,
+        include_postprocess=True,
+    )
+    configured_team_count = sum(
+        step.source == "team" and step.available for step in plan.steps
+    )
+    st.write(
+        f"Planen behandler spilinfo, spillere og hold. "
+        f"**{plan.selected_team_count} af {configured_team_count} unikke hold** "
+        f"er planlagt hentet; i alt behandles "
+        f"{plan.selected_source_count} trin i denne kørsel."
+    )
+    if (
+        mode == RefreshMode.STALE_ONLY
+        and any(
+            step.step_id == "metadata" and step.selected
+            for step in plan.steps
+        )
+        and plan.selected_team_count < configured_team_count
+    ):
+        st.caption(
+            "Ny spilinfo kan gøre flere caches forældede. Derfor kan op til "
+            f"{configured_team_count} hold blive hentet efter genvalideringen."
+        )
+    dataframe(
+        _refresh_preview_rows(plan),
+        hide_index=True,
+        key=(
+            f"refresh-preview:{identity}:{mode.value}:"
+            f"{plan.retry_of or 'normal'}"
+        ),
+    )
+    if not plan.selected_steps:
+        st.info(
+            "Alle lokale data er aktuelle. Der oprettes ikke et manifest, "
+            "før en opdatering faktisk startes."
+        )
+
+    actions = st.container(horizontal=True, horizontal_alignment="right")
+    with actions:
+        close_requested = st.button(
+            "Luk",
+            key=f"refresh-close:{identity}:{plan.retry_of or mode.value}",
+        )
+        start_requested = st.button(
+            "Start opdatering",
+            type="primary",
+            icon=":material/sync:",
+            disabled=not plan.selected_steps,
+            key=f"refresh-start:{identity}:{plan.retry_of or mode.value}",
+        )
+    if close_requested:
+        st.rerun()
+    if not start_requested:
+        return
+
+    settings_error: str | None = None
+    try:
+        settings = HubSettingsStore(APP_PATHS.hub_settings_file).load()
+    except (OSError, PayloadError, ValueError) as exc:
+        settings = None
+        settings_error = str(exc)
+        st.warning(
+            "Statusalarmer kan ikke beregnes i denne kørsel, fordi de lokale "
+            f"indstillinger ikke kunne læses: {exc}"
+        )
+    inbox_store = AnalysisInboxStore(APP_PATHS.analysis_inbox_file)
+    completed_teams = 0
+    after_errors: set[str] = set()
+    after_warnings: set[str] = set()
+    published_count = 0
+    if settings_error is not None:
+        after_errors.add(
+            "Statusalarmer: kunne ikke beregnes: " + settings_error
+        )
+
+    def collect_pairing_messages(messages: Iterable[str]) -> None:
+        for message in messages:
+            if "afviger fra de korrigerede resultater" in message:
+                after_warnings.add(message)
+            else:
+                after_errors.add(message)
+
+    def run_postprocess() -> None:
+        nonlocal published_count
+        _invalidate_snapshot_index()
+        refreshed_index = _scan_snapshots(str(OUTPUT_DIR.resolve()))
+        resolved_groups, pairing_errors = _with_published_tournament_pairings(
+            game_groups, refreshed_index
+        )
+        collect_pairing_messages(pairing_errors)
+        for game_group in resolved_groups:
+            try:
+                published = _publish_next_swiss_round(
+                    game_group, refreshed_index
+                )
+            except (OSError, PayloadError, ValueError) as exc:
+                after_errors.add(f"{game_group.name}: {exc}")
+            else:
+                published_count += published is not None
+        resolved_groups, pairing_errors = _with_published_tournament_pairings(
+            game_groups, refreshed_index
+        )
+        collect_pairing_messages(pairing_errors)
+        st.session_state.pop("hall_of_fame_freeze_warning", None)
+        _freeze_complete_hall_of_fame(
+            resolved_groups,
+            include_round_wins=True,
+        )
+        if warning := st.session_state.pop(
+            "hall_of_fame_freeze_warning", None
+        ):
+            after_errors.add(f"Hall of Fame: {warning}")
+        if after_errors:
+            raise PayloadError(" | ".join(sorted(after_errors)))
+
+    with st.status(
+        "Opdatering kører",
+        expanded=True,
+        state="running",
+    ) as operation:
+        progress_bar = st.progress(0.0, text="Forbereder datakilder")
+        current_step = st.empty()
+
+        def on_progress(event: RefreshProgressEvent) -> None:
+            nonlocal completed_teams
+            if event.step.source == "team" and event.status != "running":
+                completed_teams += 1
+            if event.step.source == "team" and configured_team_count:
+                detail = (
+                    f"Hold {completed_teams}/op til {configured_team_count} "
+                    f"· {event.step.label}"
+                )
+            else:
+                detail = event.step.label
+            current_step.write(f"**{detail}** · {_refresh_event_label(event)}")
+            if event.status != "running":
+                icon = "⚠️" if event.error else "✅"
+                operation.write(
+                    f"{icon} {event.step.label}: {_refresh_event_label(event)}"
+                    + (f" · {event.error}" if event.error else "")
+                )
+                if event.completed_steps == event.total_steps:
+                    current_step.write("**Manifest** · gemmes lokalt")
+            fraction = (
+                event.completed_steps / (event.total_steps + 1)
+                if event.total_steps
+                else 0.0
+            )
+            progress_bar.progress(
+                min(1.0, max(0.0, fraction)),
+                text=f"Datakilder {event.completed_steps}/{event.total_steps}",
+            )
+
+        try:
+            result = refresh_manager_game(
+                manager_game,
+                game_groups,
+                _client(),
+                snapshot_store,
+                player_store,
+                manifest_store,
+                settings=settings,
+                inbox_store=inbox_store,
+                metadata_store=metadata_store,
+                plan=plan,
+                progress=on_progress,
+                postprocess=run_postprocess,
+            )
+        except holdet.ManifestWriteError as exc:
+            st.session_state[pending_manifest_key] = exc.manifest
+            operation.update(
+                label="Data gemt, men manifest mangler",
+                state="error",
+                expanded=True,
+            )
+            st.error(
+                "Datakilder kan allerede være gemt. Genprøv manifestet uden "
+                "netværk via knappen i denne dialog."
+            )
+            if st.button(
+                "Prøv manifest igen",
+                type="primary",
+                icon=":material/save:",
+                key=f"manifest-write-retry-now:{exc.manifest.run_id}",
+            ):
+                try:
+                    manifest_path = manifest_store.write(exc.manifest)
+                except Exception as retry_exc:
+                    st.error(
+                        f"Manifestet kunne stadig ikke gemmes: {retry_exc}"
+                    )
+                else:
+                    st.session_state.pop(pending_manifest_key, None)
+                    st.session_state["game_refresh_notice"] = {
+                        "severity": (
+                            "warning" if exc.manifest.failures else "success"
+                        ),
+                        "message": (
+                            "Manifestet blev gemt uden nye netværkskald: "
+                            f"{manifest_path.name}."
+                        ),
+                    }
+                    st.rerun()
+            return
+        except Exception as exc:
+            operation.update(
+                label="Opdateringen kunne ikke gennemføres",
+                state="error",
+                expanded=True,
+            )
+            st.error(str(exc))
+            return
+        finally:
+            _invalidate_snapshot_index()
+
+        progress_bar.progress(1.0, text="Alle planlagte trin behandlet")
+        operation.write(f"✅ Manifest gemt: {result.manifest_path.name}")
+
+        failed_steps = (
+            () if result.manifest is None else result.manifest.failures
+        )
+        partial = bool(failed_steps)
+        operation.update(
+            label=(
+                "Opdatering delvist gennemført"
+                if partial
+                else "Opdatering gennemført"
+            ),
+            state="error" if partial else "complete",
+            expanded=partial,
+        )
+        fetched = sum(
+            step.status == "fetched"
+            for step in (() if result.manifest is None else result.manifest.steps)
+        )
+        reused = sum(
+            step.reused_cache
+            for step in (() if result.manifest is None else result.manifest.steps)
+        )
+        notice = (
+            f"{fetched} datakilder hentet · {reused} cachede kilder genbrugt. "
+            f"Manifest: {result.manifest_path.name}."
+        )
+        if published_count:
+            notice += f" {published_count} Swiss-runder publiceret."
+        if failed_steps:
+            notice += (
+                f" {len(failed_steps)} trin fejlede og kan forsøges igen "
+                "fra manifestpanelet."
+            )
+        if after_errors:
+            notice += " Efterbehandling: " + " | ".join(sorted(after_errors))
+        if after_warnings:
+            notice += " Turneringsadvarsel: " + " | ".join(
+                sorted(after_warnings)
+            )
+        severity = (
+            "error"
+            if failed_steps and fetched == 0 and reused == 0
+            else "warning"
+            if partial or after_warnings
+            else "success"
+        )
+        st.session_state["game_refresh_notice"] = {
+            "severity": severity,
+            "message": notice,
+        }
+    st.rerun()
+
+
 
 def _game_round_center_tab(
     manager_game: ManagerGame,
@@ -2386,130 +2820,49 @@ def _game_round_center_tab(
         for group in groups
         if _game_identity(group.game) == manager_game.identity
     )
-    with st.container(
-        key="round-center-actions",
-        horizontal=True,
-        horizontal_alignment="distribute",
-        vertical_alignment="center",
-    ):
-        st.header("Rundecenter", anchor="rundecenter")
-        refresh_requested = st.button(
-            "Opdater managerspil",
-            type="secondary",
-            icon=":material/refresh:",
-            width="content",
-            disabled=read_only,
-            help=(
-                "Gendan managerspillet for at opdatere data."
-                if read_only
-                else "Hent nye spil-, spiller- og holddata eksplicit."
-            ),
-            key=f"refresh-game:{manager_game.game.locale}:{manager_game.game.slug}",
-        )
-    if refresh_requested:
-        if not game_groups:
-            st.warning("Managerspillet har ingen grupper at opdatere.")
-        else:
-            with st.spinner("Henter hvert aktivt hold højst én gang …"):
-                _save_game_metadata_if_available(manager_game.game)
-                result = refresh_manager_game(
-                    manager_game,
-                    game_groups,
-                    _client(),
-                    SnapshotStore(OUTPUT_DIR),
-                    PlayerStatisticsStore(OUTPUT_DIR),
-                    ManifestStore(MANIFEST_DIR),
-                    settings=HubSettingsStore(
-                        APP_PATHS.hub_settings_file
-                    ).load(),
-                    inbox_store=AnalysisInboxStore(
-                        APP_PATHS.analysis_inbox_file
-                    ),
-                )
-            _invalidate_snapshot_index()
-            refreshed_index = _scan_snapshots(str(OUTPUT_DIR.resolve()))
-            published_count = 0
-            pairing_errors: list[str] = []
-            for game_group in game_groups:
-                try:
-                    published = _publish_next_swiss_round(
-                        game_group,
-                        refreshed_index,
-                    )
-                except (OSError, PayloadError, ValueError) as exc:
-                    pairing_errors.append(f"{game_group.name}: {exc}")
-                else:
-                    published_count += published is not None
-            resolved_game_groups, pairing_warnings = (
-                _with_published_tournament_pairings(
-                    game_groups,
-                    refreshed_index,
-                )
-            )
-            pairing_errors.extend(pairing_warnings)
-            _freeze_complete_hall_of_fame(
-                resolved_game_groups,
-                include_round_wins=True,
-            )
-            successes = sum(
-                item.status == "success" for item in result.teams
-            )
-            fallbacks = sum(
-                item.status == "cached_fallback" for item in result.teams
-            )
-            pairing_detail = (
-                f" {published_count} Swiss-runder publiceret."
-                if published_count
-                else ""
-            )
-            if pairing_errors:
-                pairing_detail += " " + " | ".join(pairing_errors)
-            player_detail = ""
-            if result.player is not None:
-                if result.player.status == "success":
-                    player_detail = (
-                        f" Spillerlisten er opdateret for runde "
-                        f"{result.player.round_number}."
-                    )
-                elif result.player.status == "cached_fallback":
-                    player_detail = (
-                        " Spillerlisten kunne ikke opdateres; den seneste cache "
-                        "vises."
-                    )
-                else:
-                    player_detail = " Spillerlisten kunne ikke hentes."
-                if result.player.alert_count:
-                    player_detail += (
-                        f" {result.player.alert_count} nye statusalarmer."
-                    )
-                if result.player.error:
-                    player_detail += f" Spillerfejl: {result.player.error}"
-            st.session_state["game_refresh_notice"] = (
-                f"{successes} hold opdateret. {fallbacks} bruger cache. "
-                f"Manifest: {result.manifest_path.name}.{player_detail}"
-                f"{pairing_detail}"
-            )
-            st.rerun()
     if notice := st.session_state.pop("game_refresh_notice", None):
-        st.success(notice)
-        try:
-            inbox = AnalysisInboxStore(APP_PATHS.analysis_inbox_file).load()
-        except (OSError, PayloadError, ValueError):
-            inbox = ()
-        if any(
-            alert.is_unread
-            and (alert.game_locale, alert.game_slug) == manager_game.identity
-            for alert in inbox
-        ):
-            page_link(
-                PageId.GAME,
-                "Se statusalarmer",
-                icon=":material/notifications:",
-                locale=manager_game.game.locale,
-                game=manager_game.game.slug,
-                section="alerts",
-            )
-    manager_round_center(manager_game, groups, index, APP_PATHS)
+        if isinstance(notice, dict):
+            message = str(notice.get("message", "Opdateringen er afsluttet."))
+            severity = str(notice.get("severity", "success"))
+            if severity == "error":
+                st.error(message)
+            elif severity == "warning":
+                st.warning(message)
+            else:
+                st.success(message)
+        else:
+            st.success(str(notice))
+    resolved_groups, pairing_warnings = _with_published_tournament_pairings(
+        game_groups, index
+    )
+    for warning in pairing_warnings:
+        st.warning(warning, icon=":material/warning:")
+    unread_counts, alert_error = _unread_alert_state()
+    if alert_error is not None:
+        st.warning(
+            "Statusalarmer kunne ikke verificeres: " + alert_error,
+            icon=":material/notification_important:",
+        )
+    intent = render_round_center(
+        manager_game,
+        resolved_groups,
+        index,
+        APP_PATHS,
+        unread_alerts=(
+            None
+            if alert_error is not None
+            else unread_counts.get(manager_game.identity, 0)
+        ),
+        read_only=read_only,
+    )
+    if read_only or intent.historical:
+        return
+    if intent.retry_manifest is not None:
+        _manager_game_refresh_dialog(
+            manager_game, resolved_groups, intent.retry_manifest
+        )
+    elif intent.refresh_requested:
+        _manager_game_refresh_dialog(manager_game, resolved_groups)
 
 
 def _game_groups_tab(

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-import json
 from pathlib import Path
 from typing import Iterable, Literal
 
@@ -13,6 +12,7 @@ from .hub_settings import player_identity
 from .models import GameUrl, PlayerEntry, RoundStatus
 from .standings import build_standings
 from .storage import (
+    ManifestStore,
     PlayerStatisticsIndex,
     PlayerStatisticsSnapshot,
     SnapshotIndex,
@@ -526,40 +526,48 @@ def build_player_history(
     return tuple(result)
 
 
-def _manifest_status(directory: Path) -> tuple[datetime | None, datetime | None, str | None, tuple[str, ...]]:
+def _manifest_status(
+    store: ManifestStore,
+    game_slug: str,
+    *,
+    game_locale: str | None = None,
+) -> tuple[datetime | None, datetime | None, str | None, tuple[str, ...]]:
+    """Read schema-1/2 refresh health through the canonical manifest store."""
+
     success: datetime | None = None
     failure: datetime | None = None
     failure_message: str | None = None
-    warnings: list[str] = []
-    if not directory.exists():
-        return success, failure, failure_message, ()
-    for path in directory.rglob("refresh-round*.json"):
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-            generated = datetime.fromisoformat(str(payload["generated_at"]))
-            if generated.tzinfo is None:
-                generated = generated.astimezone()
-            teams = payload.get("teams", [])
-            if not isinstance(teams, list):
-                raise ValueError("teams er ikke en liste")
-            errors = [
-                str(item.get("error"))
-                for item in teams
-                if isinstance(item, dict)
-                and item.get("status") != "success"
-                and item.get("error")
-            ]
-            if any(
-                isinstance(item, dict) and item.get("status") == "success"
-                for item in teams
-            ) and (success is None or generated > success):
-                success = generated
-            if errors and (failure is None or generated > failure):
-                failure = generated
-                failure_message = errors[0]
-        except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
-            warnings.append(f"{path}: {exc}")
-    return success, failure, failure_message, tuple(warnings)
+    manifests, raw_warnings = store.scan(
+        game_slug,
+        game_locale=game_locale,
+        scope="game",
+    )
+    for manifest in manifests:
+        generated = manifest.completed_at
+        if any(
+            step.status in {"fetched", "reused_current"}
+            for step in manifest.steps
+        ) and (success is None or generated > success):
+            success = generated
+        errors = tuple(
+            step.error
+            for step in manifest.steps
+            if step.status in {"reused_after_error", "failed_no_cache"}
+            and step.error
+        )
+        if errors and (failure is None or generated > failure):
+            failure = generated
+            failure_message = errors[0]
+    warnings = tuple(
+        (
+            f"{Path(source).name}: {detail.replace(source, Path(source).name)}"
+            if separator
+            else "Et refresh-manifest kunne ikke læses"
+        )
+        for warning in raw_warnings
+        for source, separator, detail in (warning.rpartition(": "),)
+    )
+    return success, failure, failure_message, warnings
 
 
 def build_data_quality_report(
@@ -578,8 +586,11 @@ def build_data_quality_report(
         game for game in games if include_archived or not game.is_archived
     )
     rows: list[DataQualityRound] = []
-    manifest_root = Path(manifest_dir)
+    manifest_store = ManifestStore(manifest_dir)
     manifest_warnings: list[str] = []
+    game_health: list[
+        tuple[datetime | None, datetime | None, str | None]
+    ] = []
     for manager_game in selected_games:
         game_groups = tuple(
             group
@@ -595,9 +606,12 @@ def build_data_quality_report(
         rounds = set(teams.rounds_for(manager_game.game, team_ids))
         rounds.update(players.rounds_for(manager_game.game))
         game_success, game_failure, game_error, game_warnings = _manifest_status(
-            manifest_root / manager_game.game.slug
+            manifest_store,
+            manager_game.game.slug,
+            game_locale=manager_game.game.locale,
         )
         manifest_warnings.extend(game_warnings)
+        game_health.append((game_success, game_failure, game_error))
         for round_number in sorted(rounds, reverse=True):
             located = [
                 teams.summary_for(manager_game.game, team_id, round_number)
@@ -681,7 +695,16 @@ def build_data_quality_report(
                     last_error_message=game_error,
                 )
             )
-    success, failure, error, root_warnings = _manifest_status(manifest_root)
+    success = max(
+        (item[0] for item in game_health if item[0] is not None),
+        default=None,
+    )
+    failure_row = max(
+        (item for item in game_health if item[1] is not None),
+        key=lambda item: item[1],
+        default=(None, None, None),
+    )
+    failure, error = failure_row[1], failure_row[2]
     return DataQualityReport(
         now or datetime.now().astimezone(),
         tuple(rows),
@@ -695,7 +718,6 @@ def build_data_quality_report(
                 *teams.warnings,
                 *players.warnings,
                 *manifest_warnings,
-                *root_warnings,
             )
         ),
     )

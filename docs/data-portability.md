@@ -17,7 +17,7 @@ Tekst der kan starte en regnearksformel (`=`, `+`, `-`, `@`, tab eller carriage 
 
 ## Rapporter og anonymisering
 
-Managerspilrapporten indeholder dataproveniens, rundestatus, hold, grupper/turneringer, stillinger og rundehistorik. Sæsonrapporten indeholder konkurrencer, samlet managerstilling, pointsammensætning, medaljer og provenance. HTML er autoritativ: én escaped fil med indlejret CSS, skærm- og A4-printlayout, ingen JavaScript og ingen eksterne assets. Brug browserens **Udskriv → Gem som PDF** for PDF.
+Managerspilrapporten indeholder dataproveniens, rundestatus, hold, grupper/turneringer, stillinger og rundehistorik. Sæsonrapporten indeholder konkurrencer, samlet managerstilling, pointsammensætning, medaljer og provenance. Rundens historie kan desuden eksporteres som forklarlig standalone HTML med validerede Holdet-links og valgfri, på forhånd byggede loopback-links; **Åbn i lokal Hub** virker kun, mens Hubben kører. HTML er autoritativ: én escaped fil med indlejret CSS, skærm- og A4-printlayout, ingen JavaScript og ingen eksterne assets. Brug browserens **Udskriv → Gem som PDF** for PDF. Se [Rundecenter og daglig arbejdsgang](round-center.md) for fakta- og linkkontrakten.
 
 Supportpakker har `support-manifest.json`, SHA-256 for indholdet, `restorable: false` og ingen pseudonymmapping:
 

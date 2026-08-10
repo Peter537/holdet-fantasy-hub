@@ -285,7 +285,7 @@ def known_schema_error(path: str, data: bytes) -> str | None:
         return f"{path}: ukendt spillersnapshotschema"
     if "/teams/" in path and "team-round" in path and version not in {1, 2}:
         return f"{path}: ukendt teamsnapshotschema"
-    if path.startswith("data/manifests/") and version != 1:
+    if path.startswith("data/manifests/") and version not in {1, 2}:
         return f"{path}: ukendt manifestschema"
     if path.startswith("data/group-revisions/") and version != 1:
         return f"{path}: ukendt revisionsschema"

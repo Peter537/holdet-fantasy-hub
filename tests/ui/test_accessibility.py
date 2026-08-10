@@ -9,6 +9,9 @@ from .conftest import UiServer
 
 
 GAME_ROUTE = "/game?locale=da&game=tour-de-france-2026&section=players"
+ROUND_CENTER_ROUTE = (
+    "/game?locale=da&game=tour-de-france-2026&section=round-center"
+)
 
 
 def _open_players(page: Page, server: UiServer, width: int = 1280) -> None:
@@ -109,3 +112,43 @@ def test_player_sort_and_dataframe_scroll_survive_fragment_rerun(
         }"""
     )
     assert after == before
+
+
+@pytest.mark.ui
+@pytest.mark.parametrize("width", (375, 1280))
+def test_round_center_is_responsive_and_keyboard_named(
+    page: Page,
+    ui_server: UiServer,
+    width: int,
+) -> None:
+    page.set_viewport_size({"width": width, "height": 900})
+    page.goto(ui_server.base_url + ROUND_CENTER_ROUTE, wait_until="domcontentloaded")
+    expect(
+        page.get_by_role("heading", name="Rundecenter", exact=True).first
+    ).to_be_visible(timeout=20_000)
+    page.locator("[data-testid='stStatusWidget']").wait_for(
+        state="detached",
+        timeout=20_000,
+    )
+
+    headings = page.locator("h1,h2,h3,h4,h5,h6").evaluate_all(
+        "nodes => nodes.map(node => Number(node.tagName.slice(1)))"
+    )
+    assert headings and all(
+        current <= previous + 1
+        for previous, current in zip(headings, headings[1:])
+    )
+    unnamed = page.get_by_role("button").evaluate_all(
+        "nodes => nodes.filter(node => !(node.getAttribute('aria-label') || node.innerText.trim())).length"
+    )
+    assert unnamed == 0
+    assert page.evaluate(
+        "document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1"
+    )
+
+    if width == 1280:
+        page.evaluate("document.body.style.zoom = '2'")
+        page.wait_for_timeout(100)
+        assert page.evaluate(
+            "document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1"
+        )

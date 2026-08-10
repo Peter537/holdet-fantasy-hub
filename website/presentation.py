@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Literal, Mapping
 
@@ -132,6 +132,10 @@ def _local(value: datetime) -> datetime:
         return value
 
 
+def _instant(value: datetime) -> datetime:
+    return _local(value).astimezone(timezone.utc)
+
+
 def format_precise_time(value: datetime | None) -> str:
     if value is None:
         return "–"
@@ -159,7 +163,12 @@ def format_relative_precise(
         return "Mangler"
     current = _local(now or datetime.now().astimezone())
     local_value = _local(value)
-    seconds = int((current - local_value).total_seconds())
+    seconds = int(
+        (
+            current.astimezone(timezone.utc)
+            - local_value.astimezone(timezone.utc)
+        ).total_seconds()
+    )
     if seconds < 0:
         return f"om {_duration_label(abs(seconds))} · {format_precise_time(local_value)}"
     return f"{_duration_label(seconds)} siden · {format_precise_time(local_value)}"
@@ -179,7 +188,7 @@ def latest_passed_milestone(
             ("end", round_item.end),
         ):
             local_timestamp = _local(timestamp)
-            if local_timestamp <= current:
+            if _instant(local_timestamp) <= _instant(current):
                 candidates.append(
                     ScheduleMilestone(
                         round_number=round_item.round_number,
@@ -187,7 +196,16 @@ def latest_passed_milestone(
                         timestamp=local_timestamp,
                     )
                 )
-    return max(candidates, key=lambda item: item.timestamp, default=None)
+    kind_order = {"start": 0, "deadline": 1, "end": 2}
+    return max(
+        candidates,
+        key=lambda item: (
+            _instant(item.timestamp),
+            item.round_number,
+            kind_order[item.kind],
+        ),
+        default=None,
+    )
 
 
 def freshness_status(
@@ -203,7 +221,7 @@ def freshness_status(
     if milestone is None:
         return "Ikke verificeret"
     if (
-        _local(generated_at) < milestone.timestamp
+        _instant(generated_at) < _instant(milestone.timestamp)
         or round_number is None
         or round_number < milestone.round_number
     ):
@@ -224,7 +242,7 @@ def data_status_badges(
 ) -> tuple[StatusBadge, ...]:
     labels: list[DataStatus] = []
     if last_error is not None and (
-        last_success is None or _local(last_error) > _local(last_success)
+        last_success is None or _instant(last_error) > _instant(last_success)
     ):
         labels.append("Fejlet")
     if missing or generated_at is None:
@@ -279,18 +297,23 @@ def next_schedule_action(
     open_rounds = tuple(
         round_item
         for round_item in metadata.rounds
-        if _local(round_item.start) <= current < _local(round_item.close)
+        if _instant(round_item.start)
+        <= _instant(current)
+        < _instant(round_item.close)
     )
     if open_rounds:
-        deadline = min(_local(item.close) for item in open_rounds)
+        deadline = min(
+            (_local(item.close) for item in open_rounds),
+            key=_instant,
+        )
         return f"Deadline {format_relative_precise(deadline, now=current)}"
     future_starts = tuple(
         _local(item.start)
         for item in metadata.rounds
-        if _local(item.start) > current
+        if _instant(item.start) > _instant(current)
     )
     if future_starts:
-        start = min(future_starts)
+        start = min(future_starts, key=_instant)
         return f"Handel åbner {format_relative_precise(start, now=current)}"
     return None
 

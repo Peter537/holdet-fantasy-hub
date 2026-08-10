@@ -10,7 +10,7 @@ Holdet Fantasy Hub er et uofficielt, lokalt Windows-værktøj til offentlige fan
 
 ## Funktioner
 
-- Rundecenter med deadline, datastatus, rangbevægelser, runde-awards og en deterministisk Rundens historie.
+- Rundecenter med næste bedste handling, handelsvindue, cache-preview, målrettet refresh/retry, rundeafvigelser, sammenligning, time machine, gruppematrix og forklarlig Rundens historie i delbar HTML.
 - Spiller- og holdstatistik, watchlist, noter/tags, gemte filtre, spillerdetaljer, sammenligning, historik, ændringer, transferlaboratorium og eksport i TXT, JSON, Markdown, CSV, XLSX og valgfri Parquet.
 - Cachebaseret analyse- og beslutningscenter med form, stabilitet, kaptajn, bank, transferregnskab, gruppeswing, eksponering og regelverificeret idealhold.
 - Opt-in-modeller for fixturecache og Monte Carlo, tydeligt mærket som eksperimentelle og aldrig som facit.
@@ -52,10 +52,13 @@ Streamlit ejer routingen via `st.navigation`/`st.Page`, mens den dynamiske sideb
 
 Managers har fanerne Rangliste, Medaljer og rekorder, Sammenlign, Sæsoner og Identiteter. Kalenderen kan filtreres på managerspil og gruppe eller turnering. Gruppe-, hold- og managerkort viser officielle links, når de findes i cache eller konfiguration.
 
+Et managerspil åbner i det cachebaserede Rundecenter. Se [Rundecenter og daglig arbejdsgang](docs/round-center.md) for opdaterings-preview, datastatus, afvigelser og historiske visninger.
+
 ## Dokumentation
 
 | Emne | Dokument |
 | --- | --- |
+| Rundecenter, refresh, afvigelser og Rundens historie | [Rundecenter og daglig arbejdsgang](docs/round-center.md) |
 | Arkitektur, dataflow og offentlige API'er | [Arkitektur](docs/architecture.md) |
 | Dashboard, deeplinks og CLI | [Klienter](docs/clients.md) |
 | Canonical routes og legacy-kompatibilitet | [Navigation](docs/navigation.md) |

@@ -6,12 +6,14 @@ from dataclasses import dataclass
 from datetime import datetime
 from html import escape
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Mapping
+from urllib.parse import unquote, urlsplit, urlunsplit
 
 from .data_packages import DataPackage, DataTable
 from .groups import GroupDefinition, ManagerGame
 from .hall_of_fame import HallOfFameEvent
 from .hub_settings import HallOfFameScoreProfile
+from .manager_features import RoundStory
 from .output import sanitize_path_component
 from .persistence import aware_local, publish_immutable
 from .seasons import SeasonDefinition, build_season_standings
@@ -422,6 +424,181 @@ th{{background:var(--wash);font-size:.83rem}} tr:last-child td{{border-bottom:0}
 </style></head><body><main><header><h1>{escape(title)}</h1><p class="lede">Lokal cache-rapport · schema {REPORT_SCHEMA_VERSION}</p></header>
 <section aria-labelledby="proveniens"><h2 id="proveniens">Dataproveniens</h2><dl>{provenance}</dl></section>
 {"".join(sections)}<footer>Rapporten indeholder ingen JavaScript eller eksterne assets. Brug browserens Udskriv-funktion for PDF.</footer>
+</main></body></html>"""
+
+
+def round_story_html_filename(story: RoundStory) -> str:
+    """Return the stable portable filename for one game's round story."""
+
+    game = sanitize_path_component(story.game_slug, fallback="game")
+    return f"rundens-historie-{game}-runde-{story.round_number}.html"
+
+
+def _url_without_fragment(value: str):
+    candidate = value.strip()
+    if not candidate or any(ord(character) < 32 for character in candidate):
+        return None
+    try:
+        parsed = urlsplit(candidate)
+        _ = parsed.port
+    except ValueError:
+        return None
+    if parsed.username is not None or parsed.password is not None:
+        return None
+    return parsed
+
+
+def _validated_holdet_url(
+    value: str | None,
+    story: RoundStory,
+) -> str | None:
+    if value is None:
+        return None
+    parsed = _url_without_fragment(value)
+    if parsed is None:
+        return None
+    if (
+        parsed.scheme.casefold() != "https"
+        or (parsed.hostname or "").casefold() not in {"holdet.dk", "www.holdet.dk"}
+        or parsed.port not in {None, 443}
+    ):
+        return None
+    segments = tuple(
+        unquote(segment).casefold()
+        for segment in parsed.path.split("/")
+        if segment
+    )
+    if len(segments) < 3 or segments[:3] != (
+        story.game_locale.casefold(),
+        "fantasy",
+        story.game_slug.casefold(),
+    ):
+        return None
+    return urlunsplit(
+        (parsed.scheme, parsed.netloc, parsed.path, parsed.query, "")
+    )
+
+
+def _validated_hub_url(value: str | None) -> str | None:
+    if value is None:
+        return None
+    parsed = _url_without_fragment(value)
+    if parsed is None:
+        return None
+    if (
+        parsed.scheme.casefold() not in {"http", "https"}
+        or (parsed.hostname or "").casefold() not in {"localhost", "127.0.0.1"}
+    ):
+        return None
+    return urlunsplit(
+        (parsed.scheme, parsed.netloc, parsed.path or "/", parsed.query, "")
+    )
+
+
+def _story_link(href: str, label: str) -> str:
+    return (
+        f'<a href="{escape(href, quote=True)}" target="_blank" '
+        f'rel="noopener noreferrer">{escape(label)}</a>'
+    )
+
+
+def render_round_story_html(
+    story: RoundStory,
+    *,
+    title: str | None = None,
+    hub_team_urls: Mapping[int, str] | None = None,
+) -> str:
+    """Render an escaped standalone story with fail-closed team links."""
+
+    document_title = title or f"Rundens historie · Runde {story.round_number}"
+    local_urls = hub_team_urls or {}
+    sections: list[str] = []
+    for fact in story.facts:
+        team_items: list[str] = []
+        for team in fact.teams:
+            links: list[str] = []
+            holdet_url = _validated_holdet_url(team.holdet_url, story)
+            if holdet_url is not None:
+                links.append(_story_link(holdet_url, "Holdet.dk"))
+            hub_url = _validated_hub_url(local_urls.get(team.team_id))
+            if hub_url is not None:
+                links.append(_story_link(hub_url, "Åbn i lokal Hub"))
+            link_markup = (
+                f'<span class="links">{" · ".join(links)}</span>'
+                if links
+                else ""
+            )
+            team_items.append(
+                "<li>"
+                f"<strong>{escape(team.manager_name)}</strong> · "
+                f"{escape(team.team_name)}{link_markup}</li>"
+            )
+        teams_markup = (
+            f'<ul class="teams">{"".join(team_items)}</ul>'
+            if team_items
+            else ""
+        )
+        value_markup = ""
+        if fact.value is not None:
+            unit_labels = {
+                "growth": "vækst",
+                "places": "placeringer",
+                "rounds": "runder",
+                "difference": "forskel",
+            }
+            unit = unit_labels.get(fact.unit, "")
+            displayed_value = (
+                f"{fact.value:+d}" if fact.unit == "growth" else str(fact.value)
+            )
+            value_markup = (
+                f'<p class="metric"><span>{escape(displayed_value)}</span>'
+                f"{(' ' + escape(unit)) if unit else ''}</p>"
+            )
+        status_labels = {
+            "final": "Endelig",
+            "preliminary": "Foreløbig",
+            "unavailable": "Datagrundlag mangler",
+        }
+        source_rounds = ", ".join(str(item) for item in fact.source_rounds) or "–"
+        generated = fact.generated_at.isoformat() if fact.generated_at else "–"
+        fact_meta = (
+            f"{status_labels.get(fact.status, 'Ukendt')} · Kilderunder: {source_rounds} · "
+            f"Datatid: {generated}"
+        )
+        id_attribute = (
+            f' id="{escape(fact.fact_id, quote=True)}"' if fact.fact_id else ""
+        )
+        sections.append(
+            f'<article class="fact"{id_attribute}>'
+            f"<h2>{escape(fact.label)}</h2>"
+            f'<p class="fact-meta">{escape(fact_meta)}</p>'
+            f"<p>{escape(fact.explanation)}</p>{value_markup}{teams_markup}"
+            "</article>"
+        )
+    if not sections:
+        sections.extend(
+            f'<article class="fact"><p>{escape(paragraph)}</p></article>'
+            for paragraph in story.paragraphs
+        )
+    state = "Foreløbig" if story.preliminary else "Afsluttet"
+    return f"""<!doctype html>
+<html lang="da"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'">
+<title>{escape(document_title)}</title>
+<style>
+:root{{--ink:#14213d;--muted:#5b6474;--line:#d8dee9;--wash:#f5f7fa;--accent:#b52d2a}}
+*{{box-sizing:border-box}} body{{margin:0;color:var(--ink);font:16px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif}}
+main{{max-width:820px;margin:auto;padding:32px}} header{{border-bottom:1px solid var(--line);margin-bottom:24px;padding-bottom:18px}}
+h1{{font-size:2rem;margin:0 0 6px}} h2{{font-size:1.15rem;margin:0 0 8px}} .meta{{color:var(--muted);margin:0}}
+.fact{{background:var(--wash);border:1px solid var(--line);border-radius:10px;margin:14px 0;padding:18px}}
+.fact p{{margin:6px 0}} .fact-meta{{color:var(--muted);font-size:.85rem}} .metric{{color:var(--accent);font-weight:650}} .teams{{margin:12px 0 0;padding-left:20px}}
+.teams li{{margin:7px 0}} .links{{display:inline-flex;gap:6px;margin-left:8px}} a{{color:#8f2422}}
+footer{{color:var(--muted);font-size:.85rem;margin-top:28px}} @page{{size:A4;margin:16mm}}
+@media print{{main{{max-width:none;padding:0}} .fact{{break-inside:avoid}} a{{color:inherit;text-decoration:none}}}}
+@media (max-width:600px){{main{{padding:20px 14px}} .links{{display:flex;margin:3px 0 0}}}}
+</style></head><body><main><header><h1>{escape(story.headline)}</h1>
+<p class="meta">Runde {story.round_number} · {escape(state)} · {escape(story.game_slug)}</p></header>
+{"".join(sections)}<footer>Genereret fra lokal cache. Lokale Hub-links virker kun, mens Hubben kører. Dokumentet indeholder ingen JavaScript eller eksterne assets.</footer>
 </main></body></html>"""
 
 

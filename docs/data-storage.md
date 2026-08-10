@@ -43,7 +43,7 @@ Der findes ikke implicitte `cache`- eller `logs`-mapper i `AppPaths`.
 | `config/hub-settings.json` | Watchlists, managerprofiler, spillerannotationer, filterprofiler, standardhold, model-opt-in og global Hall of Fame-pointprofil |
 | `config/seasons.json` | Manuelle sæsondefinitioner og arkivstatus |
 | `data/snapshots` | Komplette kanoniske spiller- og teamsnapshots |
-| `data/manifests` | Resultater fra eksplicitte gruppe- og managerspilopdateringer |
+| `data/manifests` | Uforanderlige `RefreshManifest`-resultater pr. datakilde fra eksplicitte gruppe- og managerspilopdateringer |
 | `data/group-revisions` | Uforanderlige arkiverede turneringsrevisioner |
 | `data/game-metadata` | Schedule, deadlines, format og hentetid pr. spil |
 | `data/fixtures` | Eksplicit cachede, offentligt verificerede fixtures og kildeprovenance |
@@ -100,9 +100,11 @@ Produktversion `0.1.0` er uafhængig af lokale dataformater. Aktuelle formater e
 - `seasons.json` schema 1;
 - turneringsparringer schema 1;
 - `GameMetadata` schema 2 og fixturecache schema 1;
-- refresh-manifester og turneringsrevisioner, `integrity-index.json` schema 1 samt `backup-manifest.json` schema 2. Restore læser fortsat backup schema 1.
+- `RefreshManifest` schema 2, turneringsrevisioner og `integrity-index.json` schema 1 samt `backup-manifest.json` schema 2. Manifest-store læser fortsat refresh-manifest schema 1, og restore læser fortsat backup schema 1.
 
 Ældre kompatible snapshots indlæses uden omskrivning. Manglende rundestatus bliver `unknown` og giver foreløbige beregninger, indtil en manuel genhentning bekræfter `complete`. Defekte eller inkompatible snapshots ignoreres med en synlig advarsel.
+
+Refresh-manifest schema 2 forklarer udfald, cachegenbrug, fejl og retryrelation pr. trin. Schema 1 og 2 dual-reades uden implicit migration; schema 1 får `not_recorded` for datakilder, det gamle format ikke registrerede. Se den brugerrettede statusordbog i [Rundecenter og daglig arbejdsgang](round-center.md).
 
 ## Backup og gendannelse
 

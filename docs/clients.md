@@ -45,7 +45,7 @@ Et managerspil åbner på **Rundecenter** og har ni lazy-loadede faner:
 - Administration
 - Indstillinger
 
-Rundecenter viser aktiv runde, næste deadline, seneste spiller- og holddata, seneste manuelle refresh, manglende snapshots med holdnavne, skader, karantæner og væsentlige rangbevægelser. Statuskortene fører direkte til den relevante spiller-, hold-, gruppe-, kalender- eller datavisning. Opdateringsknappen er en nedtonet sekundær handling; oversigten foretager ikke selv netværkskald.
+Rundecenter samler næste handling, handelsvindue, cache-only opdaterings-preview, datakildestatus, afvigelser, rundesammenligning, time machine, gruppematrix og Rundens historie. Statuskort og berørte hold linker til den relevante visning; intet hentes, før brugeren bekræfter en opdatering. Den fulde kontrakt findes i [Rundecenter og daglig arbejdsgang](round-center.md).
 
 Analyse har query-parametret segmentvalg mellem Beslutninger, Gruppe, Idealhold og Eksperimentel. Kun det aktive segment beregnes. Standardhold gemmes pr. spil, mens et midlertidigt valg ikke ændrer standarden. Eksperimentelle fixtures og Monte Carlo kræver et gemt opt-in og viser en synlig modeladvarsel.
 
@@ -72,7 +72,7 @@ Eksempel: `/game?locale=da&game=tour-de-france-2026&section=players`. Valg i Str
 
 ### Offline-first
 
-Navigation, faneskift, rundeskift, grafer, Analyse, spillerdetaljer, spilafgrænset alarmfiltrering, sammenligning, ændringsvisning og transfersimulation læser kun kompatible snapshots. Netværk bruges kun af tydeligt navngivne handlinger som **Hent**, **Find hold**, **Opdater** eller **Prøv igen**. Alarmer skriver kun ved **Markér som læst**, **Afvis** eller **Ryd afviste alarmer**. Simuleringer lever i `st.session_state`; kun eksplicit gem af noter, filtre, standardhold eller opt-in skriver konfiguration.
+Navigation, faneskift, rundeskift, grafer, Analyse, spillerdetaljer, spilafgrænset alarmfiltrering, sammenligning, ændringsvisning, transfersimulation og Rundecenterets time machine læser kun kompatible snapshots. Netværk bruges kun af tydeligt navngivne og bekræftede handlinger som **Hent**, **Find hold**, **Opdater** eller **Prøv igen**. Alarmer skriver kun ved **Markér som læst**, **Afvis** eller **Ryd afviste alarmer**. Simuleringer og Rundecenterets afvigelsesfiltre lever i `st.session_state`; kun eksplicit gem af noter, filtre, standardhold eller opt-in skriver konfiguration.
 
 Den kanoniske alarmroute er `/game?locale=…&game=…&section=alerts`. `/alerts?locale=…&game=…` er den skjulte, spilfiltrerede kompatibilitetsside for watchlists fra den selvstændige Spillerstatistik. Hvis spillet er gemt som managerspil, viderestilles den til den kanoniske fane.
 

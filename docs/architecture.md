@@ -19,7 +19,7 @@ flowchart TB
         Fetch["HoldetClient og parsere"]
         Domain["Frosne dataclasses og DataPackage"]
         Adapters["Interne sportsadaptere"]
-        Manager["Manager-, sæson- og kalenderbuilders"]
+        Manager["Rundecenter-, manager-, sæson- og kalenderbuilders"]
         Analysis["Beslutningsanalyse, regler og modeller"]
         Tournament["Generisk turneringsmotor"]
         Stores["Versionsstyrede stores og backup"]
@@ -42,7 +42,7 @@ flowchart TB
     Fetch --> Holdet["Offentlige Holdet.dk-endpoints"]
 ```
 
-Afhængigheden går ind mod biblioteket. `holdet_lib` importerer ikke Streamlit. Navigation, Elo, H2H, historier, sæsonstillinger, kalender og beslutningsanalyse kan derfor beregnes uden netværk og uden vedvarende writes.
+Afhængigheden går ind mod biblioteket. `holdet_lib` importerer ikke Streamlit. Rundecenter, refresh-preview, Elo, H2H, historier, sæsonstillinger, kalender og beslutningsanalyse kan derfor beregnes uden netværk og uden vedvarende writes.
 
 ## Lag og ansvar
 
@@ -53,7 +53,8 @@ Afhængigheden går ind mod biblioteket. `holdet_lib` importerer ikke Streamlit.
 - URL-normalisering, HTTP-klient, Flight-/JSON-parsere og Holdet-modeller;
 - snapshot-, metadata-, diff-, historik- og transferberegninger;
 - sæsonbundne `GameRuleProfile`-kontrakter, statusalarmer, spiller-/hold-/gruppeanalyse, idealhold og Monte Carlo;
-- managerprofiler, eventrevisioner, Elo, karrierestatistik, awards, historier og H2H;
+- Rundecenterets status-, afvigelses-, sammenlignings- og matrixbuilders samt cache-only refresh-planer;
+- managerprofiler, eventrevisioner, Elo, karrierestatistik, awards, forklarlige historier og H2H;
 - sæsondefinitioner og pointprofilbaserede sæsonstillinger;
 - liga-, Swiss-, gruppe+knockout- og double-elimination-definitioner;
 - pairing-, konfigurations-, snapshot-, metadata-, manifest- og backupstores.
@@ -64,7 +65,7 @@ Rene builders skriver ikke filer. Stores skriver kun efter eksplicitte handlinge
 
 `website/server.py` er den kanoniske `st.App`-wrapper og registrerer loopback-only API-ruter. `website/app.py` er en tynd entrypoint: den konfigurerer siden, registrerer filbaserede sider, bygger den typed `UiContext`, håndterer legacy-links, tegner den dynamiske sidebar og kører den valgte side. `website/navigation.py` er den eneste route-tabel og ejer `PageId`, `go_to`, `page_link` og legacy-mapping. De filbaserede moduler i `website/app_pages/` gør native routing og `AppTest.switch_page` ensartede.
 
-`website/ui.py` ejer den fælles kontekst og de eksisterende domænevisninger. `website/hub_pages.py` ejer Managers, Kalender, Rundens historie og relaterede paneler; `website/analysis_pages.py` ejer beslutningspaneler; `website/data_sections.py` ejer data-, import-, integritets- og oprydningsflows. Spillerfiltre/-tabel, analysepanel, kalender og managercenter er sekventielle `st.fragment`-grænser. Muterende handlinger afsluttes med fuld `st.rerun()`, mens filterændringer bliver i fragmentet. Query-parametre og semantiske session-state-nøgler fastholder kontekst. Almindelig navigation læser cache.
+`website/ui.py` ejer den fælles kontekst og de eksisterende domænevisninger. `website/round_center_page.py` sammensætter Rundecenterets rene builders og modtager fremdrift fra eksplicit refresh; `website/hub_pages.py` ejer Managers, Kalender, Rundens historie og relaterede paneler; `website/analysis_pages.py` ejer beslutningspaneler; `website/data_sections.py` ejer data-, import-, integritets- og oprydningsflows. Spillerfiltre/-tabel, analysepanel, kalender og managercenter er sekventielle `st.fragment`-grænser. Muterende handlinger afsluttes med fuld `st.rerun()`, mens filterændringer bliver i fragmentet. Query-parametre og semantiske session-state-nøgler fastholder kontekst. Almindelig navigation læser cache.
 
 ```mermaid
 flowchart LR
@@ -132,6 +133,7 @@ Seeds fryses ved oprettelse. Schema 8 bruger fortsat `TournamentConfig` som runt
 - pairing-store schema 1 ejer publicerede parringer pr. turneringsrevision.
 - eventledger schema 2 ejer rå managerresultater og revisioner.
 - `GameMetadata` schema 2 ejer schedule, deadlines og en fail-closed sæsonregelprojektion, som kalender og analyser læser uden fetch.
+- Uforanderlige metadatarevisioner ejer regel- og scheduleændringer, mens `RefreshManifest` schema 2 ejer udfald, cacheprovenance og retryrelationer for eksplicitte opdateringer. Manifest schema 1 og 2 læses side om side uden startup-write.
 - `DataPackage` schema 1 er den fælles, rene tabulære projektion for CSV, XLSX, Parquet og rapporter.
 - `integrity-index.json` schema 1 er et afledt checksumindeks, der kan genopbygges uden at ændre kanoniske filer.
 - Fixturecache schema 1 ejer kun offentligt verificerede, parsertestede kampe; difficulty kræver særskilt feltdokumentation.
@@ -143,8 +145,10 @@ Se [Datalagring](data-storage.md) for konkrete stier og kompatibilitetsregler.
 | Område | Interfaces |
 | --- | --- |
 | Hentning | `HoldetClient`, `GameUrl`, `ScrapedGame`, `ScrapedTeam`, `RoundStatus` |
+| Rundecenter | `RoundCenterReadiness`, `RoundDeviation`, `RoundComparison`, `GroupMatrix`, `build_round_center_readiness`, `build_round_deviations`, `build_round_comparison`, `build_group_matrix` |
+| Refresh | `RefreshPlan`, `RefreshProgressEvent`, `RefreshManifest`, `build_refresh_plan`, `refresh_manager_game` |
 | Identitet | `ManagerProfile`, `HubSettings`, `HubSettingsStore`, `build_effective_manager_settings`, `manager_identity_keys`, `resolve_manager_identity` |
-| Manageranalyse | `ManagerEvent`, `ManagerRating`, `ManagerCareer`, `ManagerHeadToHead`, `RoundAward`, `RoundStory`, `build_hall_of_fame` |
+| Manageranalyse | `ManagerEvent`, `ManagerRating`, `ManagerCareer`, `ManagerHeadToHead`, `RoundAward`, `RoundStory`, `RoundStoryFact`, `build_hall_of_fame`, `render_round_story_html` |
 | Sæson | `SeasonDefinition`, `SeasonStanding`, `SeasonStore`, `build_season_standings` |
 | Kalender | `CalendarEvent`, `build_calendar_events` |
 | Turnering | `TournamentDefinition`, `TournamentConfig`, `TournamentTemplateConfig`, templatekonfigurationer, `tournament_template_config`, `create_tournament_definition`, `build_tournament_state` |
@@ -166,10 +170,12 @@ Legacy-navnene `HallOfFameEvent`, `create_tournament_config` og `build_tournamen
 ## Designregler
 
 1. Import og `resolve_paths()` må ikke oprette mapper eller kontakte Holdet.
-2. Navigation, Managers, Kalender, H2H, grafer og simulation er cache-only.
+2. Navigation, Rundecenterets preview/time machine, Managers, Kalender, H2H, grafer og simulation er cache-only.
 3. Netværksfejl må ikke overskrive gyldig cache.
 4. Nye stores er additive; manglende filer er tomme, og startup omskriver ikke ældre data.
 5. Stable ID'er er sidste deterministiske fallback i builders.
 6. Produktversion `0.1.0` og lokale schema-versioner udvikles uafhængigt.
 
 Se [Analyse- og beslutningscenter](decision-analysis.md) for formelkontrakter, provenance, modelgates og evidensmatrix.
+
+Se [Rundecenter og daglig arbejdsgang](round-center.md) for den samlede workflow-, status- og latest-corrected-kontrakt.
