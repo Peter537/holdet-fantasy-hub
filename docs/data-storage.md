@@ -38,9 +38,9 @@ Der findes ikke implicitte `cache`- eller `logs`-mapper i `AppPaths`.
 | Placering | Indhold |
 | --- | --- |
 | `config/accounts.json` | Offentlige profiler til eksplicit kontoopdagelse |
-| `config/analysis-inbox.json` | Deduplikerede watchlist-statusalarmer med læst- og afvisttidspunkt |
+| `config/analysis-inbox.json` | Deduplikerede watchlistregel-hændelser med snapshotsovergang, læst- og afvisttidspunkt |
 | `config/groups.json` | Managerspil, grupper, officielle links og turneringsdefinitioner |
-| `config/hub-settings.json` | Watchlists, managerprofiler, spillerannotationer, filterprofiler, standardhold, model-opt-in og global Hall of Fame-pointprofil |
+| `config/hub-settings.json` | Watchlists med regler/begrundelser, beregnede spillerkolonner, managerprofiler, annotationer, filterprofiler, standardhold, model-opt-in og global pointprofil |
 | `config/seasons.json` | Manuelle sæsondefinitioner og arkivstatus |
 | `data/snapshots` | Komplette kanoniske spiller- og teamsnapshots |
 | `data/manifests` | Uforanderlige `RefreshManifest`-resultater pr. datakilde fra eksplicitte gruppe- og managerspilopdateringer |
@@ -74,9 +74,9 @@ En manglende `accounts.json` er en tom konfiguration. Konti vedligeholdes under 
 }
 ```
 
-`hub-settings.json` schema 3 opdateres atomisk. Watchlistposter identificerer spil og `entry_id` med legacy-fallback. `ManagerProfile` samler identitetsnøgler, manuel linkproveniens og profil-URL'er, mens pointprofilen er adskilt fra manager-eventledgeren. Schema 1 og 2 migreres kun i hukommelsen, indtil en eksplicit save.
+`hub-settings.json` schema 4 opdateres atomisk. Watchlistposter identificerer spil og `entry_id` med legacy-fallback og kan have flere standardbegrundelser, 280 tegn fritekst og højst otte regler. Op til 20 sikre `ComputedPlayerColumn`-definitioner gemmes pr. spil. `ManagerProfile` samler identitetsnøgler, manuel linkproveniens og profil-URL'er, mens pointprofilen er adskilt fra manager-eventledgeren. Schema 1–3 migreres kun i hukommelsen. Ældre watchlistposter får statusændring som standardregel; filen skrives først som schema 4 ved en eksplicit save.
 
-Spillerannotationer har højst 2.000 tegn og 12 normaliserede tags á 24 tegn. Gemte filterprofilnavne er unikke pr. spil og indeholder en versioneret `PlayerStatisticsQuery`. `analysis-inbox.json` schema 1 er et separat atomisk store, så alarmtilstand ikke blandes med brugerindstillinger.
+Spillerannotationer har højst 2.000 tegn og 12 normaliserede tags á 24 tegn. Gemte filterprofilnavne er unikke pr. spil og indeholder en versioneret `PlayerStatisticsQuery`, inklusive valgte beregnede kolonne-ID'er. `analysis-inbox.json` schema 2 er et separat atomisk store. Schema 1 dual-reades; nye hændelser fryser regel-ID, begge snapshottidspunkter og overgang i eventidentiteten.
 
 ## Filnavne og uforanderlighed
 
@@ -94,15 +94,19 @@ team-round<round>_<MMDD>_<HHmmss>[_N].<format>
 Produktversion `0.1.0` er uafhængig af lokale dataformater. Aktuelle formater er:
 
 - gruppekonfiguration schema 8;
-- `hub-settings.json` schema 3 og `analysis-inbox.json` schema 1;
+- `hub-settings.json` schema 4 og `analysis-inbox.json` schema 2;
 - manager-eventledger schema 2;
-- teamsnapshot schema 2 og spillersnapshot schema 3;
+- teamsnapshot schema 2 og spillersnapshot schema 4;
 - `seasons.json` schema 1;
 - turneringsparringer schema 1;
 - `GameMetadata` schema 2 og fixturecache schema 1;
 - `RefreshManifest` schema 2, turneringsrevisioner og `integrity-index.json` schema 1 samt `backup-manifest.json` schema 2. Manifest-store læser fortsat refresh-manifest schema 1, og restore læser fortsat backup schema 1.
 
-Ældre kompatible snapshots indlæses uden omskrivning. Manglende rundestatus bliver `unknown` og giver foreløbige beregninger, indtil en manuel genhentning bekræfter `complete`. Defekte eller inkompatible snapshots ignoreres med en synlig advarsel.
+Spillersnapshot schema 4 bevarer valgfrie popularitets-, trend-, indeks-, `stats`- og `total_stats`-felter. Schema 1–3 indlæses uden omskrivning. Manglende rundestatus bliver `unknown` og giver foreløbige beregninger, indtil en manuel genhentning bekræfter `complete`. Defekte eller inkompatible snapshots ignoreres med en synlig advarsel.
+
+Flere immutable snapshots med samme rundenummer bevares og sorteres kronologisk i `PlayerStatisticsIndex`. Historiske rundekurver vælger fortsat nyeste snapshot pr. runde, mens **Mellem hentninger**, watchregler og ændringsforklaring kan bruge hver intra-runde-observation.
+
+Spillereksport schema 3 fryser både de valgte beregnede kolonnedefinitioner, deres celleværdier og antal formelfejl. Eksporten er afledt og ændrer aldrig snapshots eller `hub-settings.json`.
 
 Refresh-manifest schema 2 forklarer udfald, cachegenbrug, fejl og retryrelation pr. trin. Schema 1 og 2 dual-reades uden implicit migration; schema 1 får `not_recorded` for datakilder, det gamle format ikke registrerede. Se den brugerrettede statusordbog i [Rundecenter og daglig arbejdsgang](round-center.md).
 

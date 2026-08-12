@@ -67,6 +67,14 @@ class SnapshotDiff:
 
 
 @dataclass(frozen=True, slots=True)
+class IntraRoundDiff:
+    """The two newest chronological player fetches, including within a round."""
+
+    diff: SnapshotDiff
+    same_round: bool
+
+
+@dataclass(frozen=True, slots=True)
 class TeamSnapshotDiff:
     game: GameUrl
     team_id: int
@@ -250,6 +258,22 @@ def compare_snapshots(
         current_round=current.statistics.round_number,
         previous_round_status=previous.statistics.round_status,
         current_round_status=current.statistics.round_status,
+    )
+
+
+def build_intra_round_diff(
+    players: PlayerStatisticsIndex, game: GameUrl
+) -> IntraRoundDiff | None:
+    """Compare the two newest fetches without collapsing equal round numbers."""
+
+    snapshots = players.for_game(game)
+    if len(snapshots) < 2:
+        return None
+    current, previous = snapshots[0], snapshots[1]
+    diff = compare_snapshots(current, previous)
+    return IntraRoundDiff(
+        diff,
+        current.statistics.round_number == previous.statistics.round_number,
     )
 
 

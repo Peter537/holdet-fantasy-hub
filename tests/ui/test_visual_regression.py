@@ -1,4 +1,4 @@
-"""Seven local-only responsive visual baselines for the Windows UI."""
+"""Local-only responsive visual baselines for the Windows UI."""
 
 from __future__ import annotations
 
@@ -32,6 +32,24 @@ CASES = (
         "/game?locale=da&game=tour-de-france-2026&section=players",
         "Tourspillet 2026",
     ),
+    (
+        "scouting-375",
+        375,
+        "/scouting?locale=da&game=tour-de-france-2026&view=watchlist",
+        "Scouting",
+    ),
+    (
+        "scouting-1280",
+        1280,
+        "/scouting?locale=da&game=tour-de-france-2026&view=smartlists",
+        "Scouting",
+    ),
+    (
+        "player-detail-1280",
+        1280,
+        "/player?locale=da&game=tour-de-france-2026&player=da%3Atour-de-france-2026%3Aentry%3A50000",
+        "Spiller 01",
+    ),
 )
 
 
@@ -51,6 +69,7 @@ def test_visual_baseline(
     expect(page.get_by_role("heading", name=heading, exact=True).first).to_be_visible(
         timeout=20_000
     )
+    expect(page.locator("[data-testid='stException']")).to_have_count(0)
     page.locator("[data-testid='stStatusWidget']").wait_for(
         state="detached",
         timeout=20_000,

@@ -47,6 +47,8 @@ http://127.0.0.1:8501/api/v1/data/players?game=super-manager-fall-2026&format=cs
 
 `players` kræver `game`. Tilføj `locale=da` og `round=7`, hvis flere scopes eller en bestemt runde skal vælges.
 
+Spillerrækkerne eksponerer de kanoniske identitets-, pris-, vækst- og statusfelter samt de valgfrie read-only-felter `popularity`, `popularity_change`, `trend` og `index`. Manglende valgfrie værdier er `null` i JSON og tomme celler i CSV; de omskrives ikke til nul. `stats` og `totalStats` forbliver i snapshotkontrakten til ændringsforklaring. Brugerens beregnede kolonner er UI-/eksportfunktionalitet og afvikles aldrig gennem API'et.
+
 ## Power BI / Power Query
 
 ```powerquery

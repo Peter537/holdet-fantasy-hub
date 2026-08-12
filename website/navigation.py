@@ -16,6 +16,7 @@ class PageId(StrEnum):
     MANAGE_GAMES = "manage-games"
     ARCHIVE = "archive"
     PLAYERS = "players"
+    SCOUTING = "scouting"
     TEAMS = "teams"
     MANAGERS = "managers"
     CALENDAR = "calendar"
@@ -44,6 +45,7 @@ PAGE_SPECS = (
     PageSpec(PageId.MANAGE_GAMES, "manage-games.py", "Administrér spil", ":material/add:", "manage-games"),
     PageSpec(PageId.ARCHIVE, "archive.py", "Arkiv", ":material/archive:", "archive"),
     PageSpec(PageId.PLAYERS, "players.py", "Spillerstatistik", ":material/query_stats:", "players"),
+    PageSpec(PageId.SCOUTING, "scouting.py", "Scouting", ":material/travel_explore:", "scouting"),
     PageSpec(PageId.TEAMS, "teams.py", "Holdstatistik", ":material/groups:", "teams"),
     PageSpec(PageId.MANAGERS, "managers.py", "Managers", ":material/military_tech:", "managers"),
     PageSpec(PageId.CALENDAR, "calendar.py", "Kalender", ":material/calendar_month:", "calendar"),
@@ -62,6 +64,7 @@ _LEGACY_VIEWS = {
     "manage-games": PageId.MANAGE_GAMES,
     "archive": PageId.ARCHIVE,
     "players": PageId.PLAYERS,
+    "scouting": PageId.SCOUTING,
     "teams": PageId.TEAMS,
     "managers": PageId.MANAGERS,
     "hall-of-fame": PageId.MANAGERS,
@@ -104,11 +107,13 @@ def page_id_for_legacy_view(view: str) -> PageId:
     return _LEGACY_VIEWS.get(view, PageId.NOT_FOUND)
 
 
-def normalized_query_params(parameters: dict[str, object]) -> dict[str, object]:
+def normalized_query_params(
+    parameters: dict[str, object], *, allow_view: bool = False
+) -> dict[str, object]:
     return {
         key: value if isinstance(value, (str, list, tuple)) else str(value)
         for key, value in parameters.items()
-        if value is not None and key != "view"
+        if value is not None and (allow_view or key != "view")
     }
 
 
@@ -120,7 +125,9 @@ def go_to(page_id: PageId | str, **parameters: object) -> None:
     )
     st.switch_page(
         page_source(target),
-        query_params=normalized_query_params(parameters),
+        query_params=normalized_query_params(
+            parameters, allow_view=target is PageId.SCOUTING
+        ),
     )
 
 
@@ -137,20 +144,33 @@ def page_link(
         label=label,
         icon=icon,
         width=width,
-        query_params=normalized_query_params(parameters),
+        query_params=normalized_query_params(
+            parameters, allow_view=page_id is PageId.SCOUTING
+        ),
     )
 
 
 def relative_url(page_id: PageId, **parameters: object) -> str:
     spec = _SPEC_BY_ID[page_id]
     path = "/" if spec.default else f"/{spec.url_path}"
-    query = urlencode(normalized_query_params(parameters), doseq=True)
+    query = urlencode(
+        normalized_query_params(
+            parameters, allow_view=page_id is PageId.SCOUTING
+        ),
+        doseq=True,
+    )
     return f"{path}?{query}" if query else path
 
 
-def redirect_legacy_query() -> None:
+def redirect_legacy_query(current_page: PageId | None = None) -> None:
     view = st.query_params.get("view")
     if view is None:
+        return
+    if current_page is PageId.SCOUTING and str(view) in {
+        "watchlist",
+        "smartlists",
+        "notes",
+    }:
         return
     parameters = st.query_params.to_dict()
     parameters.pop("view", None)

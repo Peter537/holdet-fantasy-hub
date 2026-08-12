@@ -67,12 +67,13 @@ def widget(app: AppTest, kind: str, label: str):
     return next(item for item in getattr(app, kind) if item.label == label)
 
 
-def navigate(app: AppTest, view: str, **parameters: object) -> AppTest:
+def navigate(app: AppTest, route: str, **parameters: object) -> AppTest:
     page_id = {
         "home": PageId.HOME,
         "manage-games": PageId.MANAGE_GAMES,
         "archive": PageId.ARCHIVE,
         "players": PageId.PLAYERS,
+        "scouting": PageId.SCOUTING,
         "teams": PageId.TEAMS,
         "managers": PageId.MANAGERS,
         "hall-of-fame": PageId.MANAGERS,
@@ -83,7 +84,7 @@ def navigate(app: AppTest, view: str, **parameters: object) -> AppTest:
         "team": PageId.TEAM,
         "player": PageId.PLAYER,
         "alerts": PageId.ALERTS,
-    }.get(view, PageId.NOT_FOUND)
+    }.get(route, PageId.NOT_FOUND)
     app.query_params = {key: str(value) for key, value in parameters.items()}
     relative_page = page_source(page_id).relative_to(APP_PATH.parent)
     return app.switch_page(str(relative_page)).run(timeout=15)
@@ -231,6 +232,7 @@ class DashboardTests(unittest.TestCase):
                 "Mine managerspil",
                 "Tilføj managerspil",
                 "Spillerstatistik",
+                "Scouting",
                 "Holdstatistik",
                 "Alpha",
                 "Menuspil",
@@ -293,9 +295,9 @@ class DashboardTests(unittest.TestCase):
             dashboard._home((), (), holdet.SnapshotIndex(()))
         self.assertEqual(
             [call.args[0] for call in add_button.call_args_list],
-            ["Spillerstatistik", "Holdstatistik", "Tilføj managerspil"],
+            ["Spillerstatistik", "Scouting", "Holdstatistik", "Tilføj managerspil"],
         )
-        add_call = add_button.call_args_list[2]
+        add_call = add_button.call_args_list[3]
         self.assertEqual(add_call.kwargs["key"], "add-manager-game-home")
         self.assertEqual(add_call.kwargs["icon"], ":material/add:")
         self.assertEqual(add_call.kwargs["type"], "primary")
@@ -2271,6 +2273,78 @@ class DashboardTests(unittest.TestCase):
                 self.assertTrue(
                     any(item.label == "Download TXT" for item in app.get("download_button"))
                 )
+
+    def test_scouting_route_is_cache_only_and_keeps_navigation_side_effect_free(self) -> None:
+        class OfflineClient:
+            def __init__(self):
+                self.calls = 0
+
+            def fetch_players(self, *_args, **_kwargs):
+                self.calls += 1
+                raise AssertionError("scouting-navigation må ikke kontakte Holdet")
+
+        with website_environment() as (config, output):
+            base = sample_statistics(variant="soccer")
+            players = tuple(
+                replace(
+                    base.entries[0],
+                    source_index=index,
+                    entry_id=10_000 + index,
+                    person_id=20_000 + index,
+                    name=f"Scout {index}",
+                    position="Angriber",
+                    value=4_000_000 + index * 250_000,
+                    popularity=float(index * 5),
+                    is_active=True,
+                    is_disabled=False,
+                    is_injured=False,
+                    has_suspension=False,
+                )
+                for index in range(6)
+            )
+            store = holdet.PlayerStatisticsStore(output)
+            for round_number in range(1, 6):
+                store.save(
+                    replace(
+                        base,
+                        round_number=round_number,
+                        entries=tuple(
+                            replace(
+                                item,
+                                round_growth=round_number * (item.source_index + 1),
+                            )
+                            for item in players
+                        ),
+                        round_status="complete",
+                    ),
+                    now=datetime(2026, 8, round_number, tzinfo=timezone.utc),
+                )
+            before = {
+                path.relative_to(config.parent): path.read_bytes()
+                for path in config.parent.rglob("*")
+                if path.is_file()
+            }
+            client = OfflineClient()
+            with patch("holdet_lib.HoldetClient", return_value=client):
+                app = AppTest.from_file(APP_PATH).run(timeout=15)
+                navigate(
+                    app,
+                    "scouting",
+                    locale=base.game.locale,
+                    game=base.game.slug,
+                    view="smartlists",
+                )
+            self.assertFalse(app.exception)
+            self.assertEqual([item.value for item in app.title], ["Scouting"])
+            self.assertTrue(any(item.value == "Smartlister" for item in app.segmented_control))
+            self.assertTrue(app.dataframe)
+            self.assertEqual(client.calls, 0)
+            after = {
+                path.relative_to(config.parent): path.read_bytes()
+                for path in config.parent.rglob("*")
+                if path.is_file()
+            }
+            self.assertEqual(after, before)
     def test_streamlit_config_and_readme_use_short_local_command(self) -> None:
         config = tomllib.loads(
             (PROJECT_ROOT / ".streamlit" / "config.toml").read_text(encoding="utf-8")

@@ -7,16 +7,21 @@ from datetime import datetime
 import hashlib
 import json
 from pathlib import Path
+from statistics import mean
 from typing import Literal
 
 from .errors import PayloadError
-from .hub_settings import WatchlistEntry, player_identity
+from .hub_settings import WatchRule, WatchlistEntry, player_identity
 from .persistence import aware_local, replace_text_atomically
 from .storage import PlayerStatisticsIndex, PlayerStatisticsSnapshot
 
 
-ANALYSIS_INBOX_SCHEMA_VERSION = 1
-AlertKind = Literal["injured", "disabled", "inactive", "suspended", "removed", "sold"]
+ANALYSIS_INBOX_SCHEMA_VERSION = 2
+AlertKind = Literal[
+    "injured", "disabled", "inactive", "suspended", "removed", "sold",
+    "activated", "recovered", "status_change", "value_drop", "value_rise",
+    "form3_above", "form3_below", "form5_above", "form5_below",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,6 +38,9 @@ class WatchlistAlert:
     snapshot_generated_at: datetime | None = None
     read_at: datetime | None = None
     dismissed_at: datetime | None = None
+    rule_id: str | None = None
+    previous_snapshot_generated_at: datetime | None = None
+    transition: str | None = None
 
     @property
     def is_unread(self) -> bool:
@@ -46,6 +54,15 @@ _STATUS_MESSAGES: dict[AlertKind, str] = {
     "suspended": "er blevet markeret med karantæne",
     "removed": "er fjernet fra spillerlisten; det kan være salg eller udtræden",
     "sold": "er blevet solgt",
+    "activated": "er blevet aktiveret",
+    "recovered": "har fået en forbedret status",
+    "status_change": "har ændret status",
+    "value_drop": "har krydset den valgte tærskel for prisfald",
+    "value_rise": "har krydset den valgte tærskel for prisstigning",
+    "form3_above": "har krydset Form 3-tærsklen opad",
+    "form3_below": "har krydset Form 3-tærsklen nedad",
+    "form5_above": "har krydset Form 5-tærsklen opad",
+    "form5_below": "har krydset Form 5-tærsklen nedad",
 }
 
 
@@ -68,9 +85,131 @@ def _alert_id(
     player_key: str,
     kind: AlertKind,
     round_number: int | None,
+    *,
+    rule_id: str | None = None,
+    previous_generated_at: datetime | None = None,
+    current_generated_at: datetime | None = None,
+    transition: str | None = None,
 ) -> str:
-    value = f"{game_locale.casefold()}|{game_slug}|{player_key}|{kind}|{round_number}"
+    value = "|".join(
+        (
+            game_locale.casefold(), game_slug, player_key, kind,
+            str(round_number), rule_id or "legacy",
+            previous_generated_at.isoformat() if previous_generated_at else "",
+            current_generated_at.isoformat() if current_generated_at else "",
+            transition or "",
+        )
+    )
     return hashlib.sha256(value.encode("utf-8")).hexdigest()[:24]
+
+
+def _status_label(entry) -> str:
+    values = sorted(_statuses(entry))
+    return ",".join(values) if values else "active"
+
+
+def _price_signal(rule: WatchRule, before, after) -> float | None:
+    if before is None or after is None:
+        return None
+    delta = float(after.value - before.value)
+    if rule.threshold_unit == "percent":
+        if before.value == 0:
+            return None
+        delta = delta / abs(before.value) * 100
+    return -delta if rule.kind == "value_drop" else delta
+
+
+def _form_value(
+    values: tuple[float | None, float | None] | None, kind: str
+) -> float | None:
+    if values is None:
+        return None
+    return values[0] if kind.startswith("form3") else values[1]
+
+
+def _watch_rule_transition(
+    rule: WatchRule,
+    earlier,
+    previous,
+    current,
+    earlier_forms: tuple[float | None, float | None] | None,
+    previous_forms: tuple[float | None, float | None] | None,
+    current_forms: tuple[float | None, float | None] | None,
+) -> tuple[AlertKind, str] | None:
+    if rule.kind == "status_change":
+        if previous is None:
+            return None
+        if current is None:
+            return "removed", f"{_status_label(previous)} → removed"
+        before, after = _status_label(previous), _status_label(current)
+        if before == after:
+            return None
+        added = _statuses(current) - _statuses(previous)
+        if added:
+            kind = sorted(added)[0]
+        elif after == "active":
+            kind = (
+                "activated"
+                if not previous.is_active or previous.is_disabled
+                else "recovered"
+            )
+        elif len(_statuses(current)) < len(_statuses(previous)):
+            kind = "recovered"
+        else:
+            kind = "status_change"
+        return kind, f"{before} → {after}"
+    assert rule.threshold is not None
+    if rule.kind in {"value_drop", "value_rise"}:
+        old_signal = _price_signal(rule, earlier, previous)
+        new_signal = _price_signal(rule, previous, current)
+        if old_signal is None or new_signal is None:
+            return None
+        if old_signal < rule.threshold <= new_signal:
+            suffix = "%" if rule.threshold_unit == "percent" else ""
+            return rule.kind, f"{old_signal:.2f}{suffix} → {new_signal:.2f}{suffix}"
+        return None
+    old_form = _form_value(previous_forms, rule.kind)
+    new_form = _form_value(current_forms, rule.kind)
+    if old_form is None or new_form is None:
+        return None
+    crossed = (
+        old_form <= rule.threshold < new_form
+        if rule.kind.endswith("above")
+        else old_form >= rule.threshold > new_form
+    )
+    return (
+        (rule.kind, f"{old_form:.2f} → {new_form:.2f}")
+        if crossed
+        else None
+    )
+
+
+def watch_form_signals(
+    index: PlayerStatisticsIndex,
+    target: PlayerStatisticsSnapshot,
+) -> dict[str, tuple[float | None, float | None]]:
+    """Return Form 3/5 as known at one immutable snapshot timestamp."""
+
+    game = target.statistics.game
+    completed: dict[str, dict[int, int]] = {}
+    for snapshot in sorted(index.for_game(game), key=lambda item: item.generated_at):
+        if snapshot.generated_at > target.generated_at:
+            break
+        if snapshot.statistics.round_status != "complete":
+            continue
+        for entry in snapshot.statistics.entries:
+            if entry.round_growth is not None:
+                completed.setdefault(player_identity(game, entry), {})[
+                    snapshot.statistics.round_number
+                ] = entry.round_growth
+    result: dict[str, tuple[float | None, float | None]] = {}
+    for key, rounds in completed.items():
+        values = [value for _, value in sorted(rounds.items())]
+        result[key] = (
+            mean(values[-3:]) if len(values) >= 3 else None,
+            mean(values[-5:]) if len(values) >= 5 else None,
+        )
+    return result
 
 
 def build_watchlist_alerts(
@@ -79,8 +218,12 @@ def build_watchlist_alerts(
     watchlist: tuple[WatchlistEntry, ...],
     *,
     now: datetime | None = None,
+    prior: PlayerStatisticsSnapshot | None = None,
+    previous_forms: dict[str, tuple[float | None, float | None]] | None = None,
+    current_forms: dict[str, tuple[float | None, float | None]] | None = None,
+    prior_forms: dict[str, tuple[float | None, float | None]] | None = None,
 ) -> tuple[WatchlistAlert, ...]:
-    """Return new adverse transitions for watched players without writing."""
+    """Return threshold crossings for watched players without writing."""
 
     game = current.statistics.game
     watched = {
@@ -98,6 +241,14 @@ def build_watchlist_alerts(
             for entry in previous.statistics.entries
         }
     )
+    prior_entries = (
+        {}
+        if prior is None
+        else {
+            player_identity(game, entry): entry
+            for entry in prior.statistics.entries
+        }
+    )
     new_entries = {
         player_identity(game, entry): entry
         for entry in current.statistics.entries
@@ -105,14 +256,25 @@ def build_watchlist_alerts(
     detected = aware_local(now)
     alerts: list[WatchlistAlert] = []
     for key, watched_entry in watched.items():
+        earlier = prior_entries.get(key)
         old = old_entries.get(key)
         new = new_entries.get(key)
-        kinds: set[AlertKind] = set()
-        if old is not None and new is None:
-            kinds.add("removed")
-        elif new is not None:
-            kinds.update(_statuses(new) - (_statuses(old) if old is not None else set()))
-        for kind in sorted(kinds):
+        rules = watched_entry.rules
+        transitions: list[tuple[WatchRule, AlertKind, str]] = []
+        for rule in rules:
+            transition = _watch_rule_transition(
+                rule,
+                earlier,
+                old,
+                new,
+                None if prior_forms is None else prior_forms.get(key),
+                None if previous_forms is None else previous_forms.get(key),
+                None if current_forms is None else current_forms.get(key),
+            )
+            if transition is not None:
+                transitions.append((rule, *transition))
+        for rule, kind, transition in transitions:
+            player_name = new.name if new is not None else watched_entry.name
             alerts.append(
                 WatchlistAlert(
                     _alert_id(
@@ -121,16 +283,27 @@ def build_watchlist_alerts(
                         key,
                         kind,
                         current.statistics.round_number,
+                        rule_id=rule.rule_id,
+                        previous_generated_at=(
+                            previous.generated_at if previous is not None else None
+                        ),
+                        current_generated_at=current.generated_at,
+                        transition=transition,
                     ),
                     game.locale.casefold(),
                     game.slug,
                     key,
-                    new.name if new is not None else watched_entry.name,
+                    player_name,
                     kind,
-                    f"{new.name if new is not None else watched_entry.name} {_STATUS_MESSAGES[kind]}.",
+                    f"{player_name} {_STATUS_MESSAGES[kind]} ({transition}).",
                     detected,
                     current.statistics.round_number,
                     current.generated_at,
+                    None,
+                    None,
+                    rule.rule_id,
+                    previous.generated_at if previous is not None else None,
+                    transition,
                 )
             )
     return tuple(alerts)
@@ -168,7 +341,9 @@ class AnalysisInboxStore:
             raise PayloadError(f"Alarmindbakken kunne ikke læses: {exc}") from exc
         except json.JSONDecodeError as exc:
             raise PayloadError("Alarmindbakken indeholder ugyldig JSON") from exc
-        if not isinstance(raw, dict) or raw.get("schema_version") != ANALYSIS_INBOX_SCHEMA_VERSION:
+        if not isinstance(raw, dict) or raw.get("schema_version") not in {
+            1, ANALYSIS_INBOX_SCHEMA_VERSION
+        }:
             raise PayloadError("Ukendt skema for alarmindbakken")
         items = raw.get("alerts", [])
         if not isinstance(items, list):
@@ -279,6 +454,13 @@ def _alert_from_dict(raw: object, index: int) -> WatchlistAlert:
         _timestamp(raw.get("snapshot_generated_at"), "snapshot_generated_at", optional=True),
         _timestamp(raw.get("read_at"), "read_at", optional=True),
         _timestamp(raw.get("dismissed_at"), "dismissed_at", optional=True),
+        str(raw["rule_id"]) if isinstance(raw.get("rule_id"), str) else None,
+        _timestamp(
+            raw.get("previous_snapshot_generated_at"),
+            "previous_snapshot_generated_at",
+            optional=True,
+        ),
+        str(raw["transition"]) if isinstance(raw.get("transition"), str) else None,
     )
 
 
@@ -296,4 +478,11 @@ def _alert_to_dict(item: WatchlistAlert) -> dict[str, object]:
         "snapshot_generated_at": item.snapshot_generated_at.isoformat() if item.snapshot_generated_at else None,
         "read_at": item.read_at.isoformat() if item.read_at else None,
         "dismissed_at": item.dismissed_at.isoformat() if item.dismissed_at else None,
+        "rule_id": item.rule_id,
+        "previous_snapshot_generated_at": (
+            item.previous_snapshot_generated_at.isoformat()
+            if item.previous_snapshot_generated_at
+            else None
+        ),
+        "transition": item.transition,
     }

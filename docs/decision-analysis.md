@@ -25,15 +25,27 @@ Provenance indeholder anvendte runder, stikprøvestørrelse, manglende input og 
 | Eksponering | `ejere / hold_med_dækkende_snapshot`. Dækkede hold, samlet gruppestørrelse og manglende hold vises altid. |
 | Pris-/pointkurve | Bruger `PlayerHistoryPoint.value`-semantikken og faktiske rundenumre. Ikke-afsluttede punkter mærkes `preliminary`; en tom numerisk serie giver en forklaring i stedet for en graf. |
 
+## Scoutingkontrakt
+
+Scoutingbuilders er rene og eksporteres fra `holdet_lib`. `average_rank_percentiles` bruger gennemsnitsrang ved ties; `build_scouting_metrics` håndhæver positionskohorten og minimum fem numeriske peers; `build_peer_comparison`, `find_similar_players` og `build_smart_lists` genbruger det samme normaliserede positionsbegreb.
+
+Potentiale 0–100 bruger Form 3-percentil 50 %, Form 5-percentil 20 % og værdieffektivitet 30 %. Form 3 samt én yderligere komponent kræves, og resterende vægte renormaliseres. Risiko 0–100 bruger 70 % omvendt stabilitetspercentil, 20 % statusrisiko og 10 % datarisiko. Statuskomponenten er maksimum af aktiv 0, inaktiv 60, skadet/karantæne 80 og deaktiveret 100. Datarisiko er 0 ved endeligt grundlag med mindst fem observationer, 40 ved 3–4, 70 ved foreløbige data og 100 ved utilstrækkeligt eller uverificeret grundlag.
+
+Popularitet påvirker ikke potentiale eller risiko. ≤ 10 % er **differential**, ≥ 25 % er **template**. Ownership-risiko for en spiller uden for eget valgte hold er `popularitet_i_procent * potentiale / 100`; manglende popularitet, score eller trupgrundlag er **Ikke tilgængelig**.
+
+`build_player_change_explanation` viser altid observerede deltaer. En `PerformanceRuleProfile` må kun opgradere præstationsfelter til kausale/additive bidrag, når profilen er verificeret, alle vægtede felter er numeriske, og summen afstemmer målændringen. Uden den afstemning kaldes felterne samtidige observationer.
+
+`ComputedPlayerColumn` validerer en lukket AST-grammatik. Kun tal, kendte metrikker, regneoperatorer, sammenligninger, boolesk logik og de dokumenterede funktioner fortolkes. Attributter, subscripts, strenge, imports, comprehensions, lambdaer, potens, ukendte navne og referencesøjler afvises. Der findes ingen sti til `eval`, `compile` eller vilkårlig Python.
+
 ## Regel- og datakontrakter
 
 `GameRuleProfile` er bundet til konkret locale og spil-/sæsonslug. En verificeret profil kræver en officiel kilde-URL og adgangsdato. Rente og transfergebyr gemmes som basispoint med en eksplicit `floor`, `ceil` eller `nearest`-afrunding. Budget, trupstørrelse, formation eller kategorier, klubgrænse, kontrakter og kaptajnregler er valgfrie, indtil de er dokumenteret.
 
 `GameMetadata` schema 2 kan indeholde profilens projektion. `TransferRuleProfile` er bevaret som bagudkompatibelt API, men dens generiske formatpresets verificerer ikke en ny sæsons beslutningsanalyse. Schema 1-metadata læses uden startup-write.
 
-Spillernoter og tags, gemte `PlayerStatisticsQuery`-profiler, standardhold og eksperimentelt opt-in ligger i `HubSettings` schema 3. En note er højst 2.000 tegn; en spiller kan have højst 12 normaliserede tags á 24 tegn. Standardtags er `overvej`, `undgå`, `kaptajn` og `langsigtet`, og egne tags er tilladt.
+Spillernoter og tags, watchlistregler og -begrundelser, højst 20 beregnede kolonner pr. spil, gemte `PlayerStatisticsQuery`-profiler, standardhold og eksperimentelt opt-in ligger i `HubSettings` schema 4. Schema 1–3 migreres i hukommelsen og skrives først som schema 4 ved en eksplicit gemmehandling. En note er højst 2.000 tegn; en spiller kan have højst 12 normaliserede tags á 24 tegn. Standardtags er `overvej`, `undgå`, `kaptajn` og `langsigtet`, og egne tags er tilladt.
 
-Statusalarmer ligger centralt i `config/analysis-inbox.json` schema 1, men vises filtreret i det relevante managerspil. De oprettes kun af en eksplicit spiller- eller managerspilopdatering, deduplikeres pr. tilstand og runde og kan markeres læst, afvises og ryddes. Rydning fra en managerspilsfane påvirker kun dette spil. Uden et eksplicit kildefelt bruges **fjernet fra spillerlisten**, aldrig **solgt**. Historisk backfill udløser ikke aktuelle alarmer.
+Statusalarmer ligger centralt i `config/analysis-inbox.json` schema 2, men vises filtreret i det relevante managerspil. Schema 1 læses fortsat. Nye event-ID'er indeholder regel, forrige/nuværende snapshottidspunkt og overgang. Tærskler udløses kun ved krydsning efter en baseline; statusreglen registrerer også bedring og aktivering. Alarmer oprettes kun af en eksplicit aktuel spiller- eller managerspilopdatering og kan markeres læst, afvises og ryddes. Historisk backfill udløser ikke aktuelle alarmer.
 
 ## Idealhold
 
@@ -60,13 +72,16 @@ flowchart LR
     Client --> Players["Spillersnapshots"]
     Client --> Teams["Teamsnapshots"]
     Players --> Alerts["Ren alarmgenerator"]
-    Settings["HubSettings schema 3"] --> Alerts
-    Alerts --> Inbox["analysis-inbox schema 1"]
+    Settings["HubSettings schema 4"] --> Alerts
+    Alerts --> Inbox["analysis-inbox schema 2"]
     Metadata --> Rules["GameRuleProfile"]
     Players --> Builders["Rene analysebuilders"]
     Teams --> Builders
     Rules --> Builders
     Settings --> Builders
+    Players --> Scouting["Percentiler, peers, scores og intra-runde-diff"]
+    Settings --> Scouting
+    Scouting --> UI
     Builders --> UI["Lazy Analyse-panel eller spillerdetalje"]
     Inbox --> AlarmUI["Spilfiltreret alarmfane"]
 ```
@@ -76,12 +91,14 @@ flowchart LR
 | Kontrakt | Implementering | Tests | Ekstern evidensstatus |
 | --- | --- | --- | --- |
 | Form, stabilitet og vækst pr. mio. | `holdet_lib/decision_analysis.py` | `tests/test_decision_analysis.py` | Snapshotfelter er observerede; ingen sæsonregel kræves. |
+| Scouting, percentiler og ownership | `holdet_lib/scouting.py` | `tests/test_scouting.py` | Popularitet er et valgfrit offentligt payloadfelt og holdes ude af potentiale/risiko. |
+| Sikker formelmotor | `holdet_lib/player_formulas.py` | Angrebstests for AST, dybde, størrelse, nuldivision og ikke-endelige tal | Lukket fortolker uden vilkårlig Python. |
 | Kaptajn, bank og transfer | `GameRuleProfile`, rene builders | Formel-, mismatch-, rente-, afrundings- og transferhultests | [Holdet.dk](https://www.holdet.dk/da), tilgået 2026-08-07, gav ikke direkte tilstrækkelige konkrete regelsider; registeret er derfor tomt og UI fail-closed. |
 | Idealhold | Eksakt DFS branch-and-bound | Brute force, tie-break, timeout, infeasible og cirka 400 kandidater | Aktiveres først efter en auditeret sæsonprofil. |
 | Alarmer | `analysis_inbox.py`, refresh-hooks | Transition, deduplikering, persistence, backup/restore og separat spillerfallback | Feltet **solgt** er ikke dokumenteret og produceres ikke. |
 | Fixtures | `fixtures.py` | Offentlig-/parsergate, schema og officiel difficulty | [Tourspillet 2026](https://www.holdet.dk/da/fantasy/tour-de-france-2026/landing), tilgået 2026-08-07, dokumenterer ikke et godkendt fixture-/difficultyfelt; ingen adapter er registreret. |
 | Monte Carlo | `simulate_transfer_scenario` | Seed, fælles-spiller-annullering, gates, intervaller, dækning og backtest | Intern eksperimentel model; ikke en officiel Holdet-prognose. |
-| Cache-only UI | `website/analysis_pages.py`, routing i `website/app.py` | Streamlit AppTest for Analyse-, spiller- og alarmruter | Navigation foretager ingen automatisk hentning eller persistente writes. |
+| Cache-only UI | `website/scouting_page.py`, `website/analysis_pages.py`, routing i `website/navigation.py` | AppTest og Playwright for `/scouting`, spiller-, alarm- og deeplinkruter | Navigation foretager ingen automatisk hentning eller persistente writes. |
 
 ## Begrænsninger
 

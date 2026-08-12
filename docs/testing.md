@@ -39,14 +39,15 @@ Den markerede canary-suite er opt-in og er den eneste test, som kontakter offent
 py -3.14 -m pytest tests/parser_canary -q --run-parser-canary
 ```
 
-Uden flaget skippes canary-testene, og standardsuiten er helt offline. Canarien kalder `HoldetClient.fetch_players` for aktuelle fodbold-, cykel-, Formel 1- og golfspil. Den validerer format, enhed, positiv runde, ikke-tomme entries og obligatoriske spillerfelter; den binder sig ikke til et eksakt spillerantal eller en bestemt aktiv runde.
+Uden flaget skippes canary-testene, og standardsuiten er helt offline. Canarien kalder `HoldetClient.fetch_players` for de fem aktuelle fodbold-, cykel-, Formel 1- og golfspil. Den validerer format, enhed, positiv runde, ikke-tomme entries, obligatoriske spillerfelter og kontrakten for `popularity`, `popularityChange`, `trend`, `index`, `stats` og `totalStats`. Rå `stats`/`totalStats` skal findes med en kendt mappe-/listeform; en legitim tom mappe er tilladt, mens ikke-tomme rå værdier skal overleve parseren. Drift i de valgfrie felter rapporteres som kildedrift; produktionsparseren forbliver fail-closed og kompatibel med de obligatoriske felter.
 
 ## Testområder
 
 | Område | Eksempler på dækning |
 | --- | --- |
 | URL, parsere og HTTP | Normalisering, Flight-dekodning, payloadvalidering, retries, proxy og redaction |
-| Spillere | Formater, enheder, filtre, watchlist-identitet, 2–5 sammenligninger og round-aware diffing |
+| Spillere og scouting | Schema 1–3 → 4, valgfrie payloadfelter, percentilties og kohortegates, potentiale/risiko/ownership, peers, similaritet, smartlister, intra-runde-diff og evidence-first decomposition |
+| Watchlist og formler | Absolutte/procentvise krydsninger, op/ned, Form 3/5, statusbedring, reset, samme-runde-event-ID'er, atomiske bulkhandlinger samt sikker AST-parser med angrebstests og synlige cellefejl |
 | Hold | Kontoopdagelse, roster, historik, rang, gruppeplacering og ændringer |
 | Transfer | Fire regelprofiler, gebyr, kontrakter, formation, klubgrænser, kaptajnregler og `final`/`preliminary`/`unverified` |
 | Beslutningsanalyse | Formhuller, stabilitet, nul/negativ vækst, kaptajnmismatch, 0/0,5/1 % rente og gebyr, afrunding, transferhuller, kontrafaktisk sum og bankhitrater |
@@ -58,17 +59,17 @@ Uden flaget skippes canary-testene, og standardsuiten er helt offline. Canarien 
 | Managers og sæsoner | Identitetsgraf, stabilt ID ved merge/rename/unmerge, legacy-remapping uden writes, bedste hold, locale- og puljeisoleret Elo, awards, streaks, historier, H2H-aggregater, sæsonredigering og pointprofil |
 | Eventledger og kalender | Revisioner, legacy-events, manglende metadata, cache-only events og nul navigation-writes |
 | Dataportabilitet | DataPackage, Unicode, rå taltyper, CSV-injection, XLSX-ark, valgfri Parquet, rapportescaping, forklarlige historiefakta, sikre dual links og anonymiseringsprofiler |
-| Lagring og backup | AppData, atomiske writes, HubSettings 1/2 → 3 og GameMetadata 1 → 2 uden startup-write, integritetsindeks, importklassifikation, arkivgrænser, SHA-256, path traversal, preview, staging og rollback |
+| Lagring og backup | AppData, atomiske writes, HubSettings 1–3 → 4, spiller-snapshot 1–3 → 4, inbox 1 → 2 og GameMetadata 1 → 2 uden startup-write, integritetsindeks, importklassifikation, arkivgrænser, SHA-256, path traversal, preview, staging og rollback |
 | Lokalt API | Catalog, filtre, pagination, CSV/JSON-paritet, ETag/304, Host/loopback, sikre headere, nul writes og nul netværk |
 | Turnering | Liga, Swiss, gruppespil + knockout, double elimination, fuld Swiss-afslutning, custom byepoint, Buchholz, seedning, tie-breakers, bronzekamp, kontekstvalidering og konflikter for frosne parringer |
-| Dashboard | Managers-navigation, Analyse-paneler, spilfiltrerede alarmfaner og badges, spiller- og kompatibilitetsruter, noter/tags, standardhold, filterprofiler, opt-in, historier, turneringsguide, deeplinks og nul netværk/writes |
+| Dashboard | `/scouting`, globale notesøgninger, atomiske bulkhandlinger, formler, fem spillerpaneler, statusprovenance, alarmfaner og badges, kompatibilitetsruter, deeplinks og nul netværk/writes ved navigation |
 | Native navigation | Canonical path-matrix, alle legacy-redirects, query-bevarelse, ugyldige entiteter, arkiveret read-only og filbaseret `AppTest.switch_page` |
 | Reruns og state | Inaktive faner med spies, fragmentgrænser, Apply/Reset, fulde reruns efter writes, stabile dataframe-keys og scroll/sortering gennem fragment-rerun |
 | Dokumentation og API | Links, Mermaid-hegn, kommandoer, AppData-stier, `holdet_lib.__all__` og evaluerbare type hints |
 
 ## Streamlit AppTest
 
-AppTest åbner hovedroutes og query-parametre uden en virkelig server. Tests beviser blandt andet, at Statusalarmer ikke er en global sidebardestination, at hvert managerspil har en spilfiltreret alarmfane med unread-badges, at legacy Hall of Fame-routen viderestiller, og at Data og lager bruger én URL-bundet områdevælger med kompatible gamle deeplinks, previews og bekræftelser. Rundecenterets preview, time machine og sessionfiltre samt Analyse-, spiller-, alarm-, manager-, kalender- og almindelig navigation og transfersimulation må hverken kalde netværk eller skrive persistent data. Den kanoniske funktionskontrakt står i [Rundecenter og daglig arbejdsgang](round-center.md).
+AppTest åbner hovedroutes og query-parametre uden en virkelig server. Tests beviser blandt andet, at `/scouting` og de fem spillerpaneler bevarer query-kontekst, at globale notesøgninger og formelvisning læser cache, at Statusalarmer ikke er en global sidebardestination, at hvert managerspil har en spilfiltreret alarmfane med unread-badges, og at legacy Hall of Fame-routen viderestiller. Rundecenterets preview, time machine og sessionfiltre samt Scouting-, Analyse-, spiller-, alarm-, manager-, kalender- og almindelig navigation og transfersimulation må hverken kalde netværk eller skrive persistent data. Den kanoniske funktionskontrakt står i [Rundecenter og daglig arbejdsgang](round-center.md).
 
 ## Lokal UI-regression og accessibility
 
@@ -93,7 +94,7 @@ Kør derefter den opt-in Windows/Chromium-suite:
 py -3.14 -m pytest tests/ui -q --run-ui --browser chromium
 ```
 
-En session-fixture starter `website/server.py` på en tilfældig fri loopback-port med et isoleret, deterministisk `HOLDET_DATA_DIR`. Suiten bruger reduceret bevægelse og indeholder syv baselines: forsiden ved 375, 768, 1280 og 1920 px, Rundecenter ved 375 og 1280 px samt en tæt spillerliste ved 1280 px.
+En session-fixture starter `website/server.py` på en tilfældig fri loopback-port med et isoleret, deterministisk `HOLDET_DATA_DIR`. Suiten bruger reduceret bevægelse og indeholder ti baselines: forsiden ved 375, 768, 1280 og 1920 px, Rundecenter ved 375 og 1280 px, en tæt spillerliste ved 1280 px, Scouting ved 375 og 1280 px samt spillerdetaljen ved 1280 px.
 
 Pillow-sammenligningen tillader højst 0,1 % ændrede pixels efter en per-kanal-tolerance på 10. Ved fejl gemmes `actual` og `diff` i den ignorerede mappe `tests/ui/artifacts/`. Manglende baselines fejler med bootstrap-kommandoen ovenfor, og eksisterende lokale baselines må kun erstattes eksplicit:
 
@@ -101,7 +102,7 @@ Pillow-sammenligningen tillader højst 0,1 % ændrede pixels efter en per-kanal-
 py -3.14 -m pytest tests/ui -q --run-ui --browser chromium --update-ui-snapshots
 ```
 
-Accessibility-smoken kontrollerer én H1, overskriftshierarki, navngivne knapper, tab/tabpanel-state, tastatur og synligt fokus, 200 % zoom/reflow og dokument-overflow. En browsertest kontrollerer desuden, at spillerlistens sorteringsvalg og faktiske dataframe-scrollposition bevares gennem et fragment-rerun.
+Accessibility-smoken kontrollerer én H1, overskriftshierarki, navngivne knapper, tab/tabpanel-state, tastatur og synligt fokus, 200 % zoom/reflow, dokument-overflow samt datatabeller ved hvert scoutingplot. En browsertest kontrollerer desuden, at spillerlistens sorteringsvalg og faktiske dataframe-scrollposition bevares gennem et fragment-rerun.
 
 ## Afsluttende accept
 

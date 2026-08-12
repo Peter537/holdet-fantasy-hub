@@ -135,7 +135,7 @@ class PlayerExportTests(unittest.TestCase):
                 )
 
             payload = json.loads(first[1].content)
-            self.assertEqual(payload["schema_version"], 2)
+            self.assertEqual(payload["schema_version"], 3)
             self.assertEqual(payload["game"]["format"], "soccer")
             self.assertEqual(payload["game"]["unit"], "money")
             self.assertEqual(payload["row_count"], 3)

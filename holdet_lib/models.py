@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from math import isfinite
 from typing import Literal
 from urllib.parse import quote
 
@@ -49,6 +50,30 @@ class GameUrl:
 
 
 @dataclass(frozen=True, slots=True)
+class PlayerPerformanceStat:
+    """One immutable, numeric performance field from the public player payload."""
+
+    name: str
+    value: float
+
+    def __post_init__(self) -> None:
+        name = self.name.strip()
+        if (
+            not name
+            or len(name) > 80
+            or any(ord(character) < 32 for character in name)
+        ):
+            raise ValueError("Et præstationsfeltnavn skal være 1-80 synlige tegn")
+        if not isinstance(self.value, (int, float)) or isinstance(self.value, bool):
+            raise ValueError("Et præstationsfelt skal have en numerisk værdi")
+        value = float(self.value)
+        if not isfinite(value):
+            raise ValueError("Et præstationsfelt skal have en endelig værdi")
+        object.__setattr__(self, "name", name)
+        object.__setattr__(self, "value", value)
+
+
+@dataclass(frozen=True, slots=True)
 class PlayerEntry:
     source_index: int
     name: str
@@ -63,6 +88,39 @@ class PlayerEntry:
     person_id: int | None = None
     total_growth: int | None = None
     round_growth: int | None = None
+    popularity: float | None = None
+    popularity_change: float | None = None
+    trend: float | None = None
+    index: float | None = None
+    stats: tuple[PlayerPerformanceStat, ...] = ()
+    total_stats: tuple[PlayerPerformanceStat, ...] = ()
+
+    def __post_init__(self) -> None:
+        for label, value in (
+            ("popularity", self.popularity),
+            ("popularity_change", self.popularity_change),
+            ("trend", self.trend),
+            ("index", self.index),
+        ):
+            if value is None:
+                continue
+            if (
+                not isinstance(value, (int, float))
+                or isinstance(value, bool)
+                or not isfinite(float(value))
+            ):
+                raise ValueError(f"Spillerfeltet {label} skal være et endeligt tal")
+            object.__setattr__(self, label, float(value))
+        for label, values in (("stats", self.stats), ("total_stats", self.total_stats)):
+            names = [item.name.casefold() for item in values]
+            if len(names) != len(set(names)):
+                raise ValueError(f"Spillerfeltet {label} må ikke have dublerede navne")
+
+    def stat_values(self, *, total: bool = False) -> dict[str, float]:
+        """Return a detached name/value map for formula and diff consumers."""
+
+        values = self.total_stats if total else self.stats
+        return {item.name: item.value for item in values}
 
 
 @dataclass(frozen=True, slots=True)

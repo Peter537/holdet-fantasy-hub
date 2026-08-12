@@ -56,7 +56,7 @@ _DEFINITIONS = (
     ),
     DatasetDefinition(
         "players",
-        ("locale", "game", "round", "source_index", "entry_id", "person_id", "name", "team", "position", "value", "total_growth", "round_growth", "statuses", "snapshot_at"),
+        ("locale", "game", "round", "source_index", "entry_id", "person_id", "name", "team", "position", "value", "total_growth", "round_growth", "popularity", "popularity_change", "trend", "index", "statuses", "snapshot_at"),
         ("locale", "game", "round"),
         ("game",),
     ),
@@ -290,6 +290,10 @@ class LocalDataApi:
                         "value": entry.value,
                         "total_growth": entry.total_growth,
                         "round_growth": entry.round_growth,
+                        "popularity": entry.popularity,
+                        "popularity_change": entry.popularity_change,
+                        "trend": entry.trend,
+                        "index": entry.index,
                         "statuses": ";".join(statuses),
                         "snapshot_at": snapshot.generated_at.isoformat(),  # type: ignore[attr-defined]
                     }

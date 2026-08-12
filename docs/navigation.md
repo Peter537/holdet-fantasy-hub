@@ -10,6 +10,7 @@ Streamlit ejer browserhistorik og paths via `st.navigation(..., position="hidden
 | Administrér spil | `/manage-games` |
 | Arkiv | `/archive` |
 | Spillere | `/players` |
+| Scouting | `/scouting?locale=…&game=…&view=watchlist|smartlists|notes` |
 | Hold | `/teams` |
 | Managers | `/managers` |
 | Kalender | `/calendar` |
@@ -31,6 +32,7 @@ Gamle links med `?view=…` genkendes kun i entrypointen og viderestilles én ga
 | `manage-games` | `/manage-games` |
 | `archive` | `/archive` |
 | `players` | `/players` |
+| `scouting` | `/scouting` |
 | `teams` | `/teams` |
 | `managers`, `hall-of-fame` | `/managers` |
 | `calendar` | `/calendar` |
@@ -45,3 +47,5 @@ Gamle links med `?view=…` genkendes kun i entrypointen og viderestilles én ga
 `alerts` viderestiller til `/game?...&section=alerts`, når et registreret managerspil kan bestemmes. For et ikke-registreret, men gyldigt spil viser `/alerts?locale=…&game=…` den selvstændige cachebaserede fallback. Uden tilstrækkelig kontekst vises en forklaring frem for en automatisk hentning.
 
 Arkiverede managerspil bruger de samme canonical paths. `UiContext.read_only` deaktiverer muterende handlinger på spil-, gruppe-, hold- og spillersider; kun den eksplicitte gendannelseshandling på spillet kan ophæve tilstanden.
+
+Spillerstatistikkens kontekstuelle paneler er `list`, `scouting`, `compare`, `watchlist` og `changes`. Eksisterende `panel=compare` bevares, mens tidligere watchlistlinks bruger `panel=watchlist`. Den globale Scouting-side anvender kun `view`; skift mellem views eller spil starter ikke netværk og skriver ikke indstillinger.

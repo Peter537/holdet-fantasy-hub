@@ -12,6 +12,9 @@ GAME_ROUTE = "/game?locale=da&game=tour-de-france-2026&section=players"
 ROUND_CENTER_ROUTE = (
     "/game?locale=da&game=tour-de-france-2026&section=round-center"
 )
+SCOUTING_ROUTE = (
+    "/game?locale=da&game=tour-de-france-2026&section=players&panel=scouting"
+)
 
 
 def _open_players(page: Page, server: UiServer, width: int = 1280) -> None:
@@ -152,3 +155,25 @@ def test_round_center_is_responsive_and_keyboard_named(
         assert page.evaluate(
             "document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1"
         )
+
+
+@pytest.mark.ui
+def test_scouting_charts_have_tables_keyboard_focus_and_zoom(
+    page: Page, ui_server: UiServer
+) -> None:
+    page.set_viewport_size({"width": 1280, "height": 900})
+    page.goto(ui_server.base_url + SCOUTING_ROUTE, wait_until="domcontentloaded")
+    expect(page.get_by_role("heading", name="Tourspillet 2026", exact=True)).to_be_visible(
+        timeout=20_000
+    )
+    expect(page.get_by_text("Pris mod Form 3", exact=True)).to_be_visible(timeout=20_000)
+    expect(page.locator("canvas").first).to_be_visible(timeout=20_000)
+    page.get_by_text("Datatabel · Pris mod Form 3", exact=True).click()
+    expect(page.locator("[data-testid='stDataFrame']").last).to_be_visible(timeout=20_000)
+    page.keyboard.press("Tab")
+    assert page.evaluate("document.activeElement !== document.body")
+    page.evaluate("document.body.style.zoom = '2'")
+    page.wait_for_timeout(100)
+    assert page.evaluate(
+        "document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1"
+    )

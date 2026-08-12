@@ -15,11 +15,12 @@ from .models import PlayerEntry, ScrapedGame
 from .output import sanitize_path_component
 from .players import format_integer
 from .persistence import publish_immutable
+from .player_formulas import ComputedPlayerColumn, evaluate_player_formula
 from .policies import GamePolicy, legacy_policy
 from .sport_adapters import get_sport_adapter
 
 
-PLAYER_EXPORT_SCHEMA_VERSION = 2
+PLAYER_EXPORT_SCHEMA_VERSION = 3
 PLAYER_COLUMNS = (
     "name",
     "team",
@@ -29,6 +30,13 @@ PLAYER_COLUMNS = (
     "round_growth",
     "status",
 )
+PLAYER_OPTIONAL_COLUMNS = (
+    "popularity",
+    "popularity_change",
+    "trend",
+    "index",
+)
+PLAYER_AVAILABLE_COLUMNS = PLAYER_COLUMNS + PLAYER_OPTIONAL_COLUMNS
 PLAYER_SORT_FIELDS = (
     "value",
     "name",
@@ -70,18 +78,26 @@ class PlayerStatisticsQuery:
     columns: tuple[str, ...] = PLAYER_COLUMNS
     sort_field: str = "value"
     sort_order: str = "desc"
+    computed_player_column_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if "name" not in self.columns:
             raise ValueError("Navnekolonnen er påkrævet")
         if len(set(self.columns)) != len(self.columns) or any(
-            value not in PLAYER_COLUMNS for value in self.columns
+            value not in PLAYER_AVAILABLE_COLUMNS for value in self.columns
         ):
             raise ValueError("Ikke-understøttet eller duplikeret spillerkolonne")
         if self.sort_field not in PLAYER_SORT_FIELDS:
             raise ValueError(f"Ikke-understøttet sorteringsfelt for spillere: {self.sort_field}")
         if self.sort_order not in {"asc", "desc"}:
             raise ValueError(f"Ikke-understøttet sorteringsrækkefølge for spillere: {self.sort_order}")
+        if len(self.computed_player_column_ids) != len(
+            set(self.computed_player_column_ids)
+        ) or any(
+            not value.strip() or len(value) > 64
+            for value in self.computed_player_column_ids
+        ):
+            raise ValueError("Beregnede spillerkolonne-ID'er er ugyldige")
         for mode in (self.missing_total_growth, self.missing_round_growth):
             if mode not in MISSING_VALUE_MODES:
                 raise ValueError(f"Ikke-understøttet tilstand for manglende værdier: {mode}")
@@ -110,6 +126,11 @@ class PlayerExportDocument:
     entries: tuple[PlayerEntry, ...]
     generated_at: datetime
     source_generated_at: datetime | None = None
+    computed_columns: tuple[ComputedPlayerColumn, ...] = ()
+    computed_values: tuple[
+        tuple[str, tuple[tuple[str, float | bool | None], ...]], ...
+    ] = ()
+    formula_error_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -253,6 +274,8 @@ def build_player_export(
     *,
     generated_at: datetime | None = None,
     source_generated_at: datetime | None = None,
+    computed_columns: tuple[ComputedPlayerColumn, ...] = (),
+    computed_contexts: dict[int, dict[str, float | int | bool | None]] | None = None,
 ) -> PlayerExportDocument:
     entries = filter_player_statistics(statistics, query)
     if not entries:
@@ -260,8 +283,53 @@ def build_player_export(
     timestamp = generated_at or datetime.now().astimezone()
     if timestamp.tzinfo is None:
         timestamp = timestamp.astimezone()
+    by_id = {column.column_id: column for column in computed_columns}
+    try:
+        selected_columns = tuple(
+            by_id[column_id] for column_id in query.computed_player_column_ids
+        )
+    except KeyError as exc:
+        raise PayloadError(f"Ukendt beregnet spillerkolonne: {exc.args[0]}") from exc
+    if any(
+        (column.game_locale, column.game_slug)
+        != (statistics.game.locale.casefold(), statistics.game.slug)
+        for column in selected_columns
+    ):
+        raise PayloadError("Beregnede kolonner skal tilhøre eksportens spil")
+    frozen_values: list[
+        tuple[str, tuple[tuple[str, float | bool | None], ...]]
+    ] = []
+    error_count = 0
+    for entry in entries:
+        context = {
+            "value": entry.value,
+            "total_growth": entry.total_growth,
+            "round_growth": entry.round_growth,
+            "popularity": entry.popularity,
+            "popularity_change": entry.popularity_change,
+            "trend": entry.trend,
+            "index": entry.index,
+            "is_active": entry.is_active,
+            "is_disabled": entry.is_disabled,
+            "is_injured": entry.is_injured,
+            "has_suspension": entry.has_suspension,
+            **((computed_contexts or {}).get(entry.source_index, {})),
+        }
+        row: list[tuple[str, float | bool | None]] = []
+        for column in selected_columns:
+            result = evaluate_player_formula(column.expression, context)
+            error_count += result.error is not None
+            row.append((column.column_id, result.value))
+        frozen_values.append((str(entry.source_index), tuple(row)))
     return PlayerExportDocument(
-        statistics, query, entries, timestamp, source_generated_at
+        statistics,
+        query,
+        entries,
+        timestamp,
+        source_generated_at,
+        selected_columns,
+        tuple(frozen_values),
+        error_count,
     )
 
 
@@ -275,6 +343,10 @@ def player_row(
         "value": entry.value,
         "total_growth": entry.total_growth,
         "round_growth": entry.round_growth,
+        "popularity": entry.popularity,
+        "popularity_change": entry.popularity_change,
+        "trend": entry.trend,
+        "index": entry.index,
         "status": list(entry_statuses(entry)) if json_values else format_player_status(entry),
     }
     return {column: values[column] for column in columns}
@@ -316,6 +388,7 @@ def player_query_to_dict(query: PlayerStatisticsQuery) -> dict[str, object]:
             status: query.status_rule(status) for status in PLAYER_STATUSES
         },
         "columns": list(query.columns),
+        "computed_player_column_ids": list(query.computed_player_column_ids),
         "sort": {"field": query.sort_field, "order": query.sort_order},
     }
 
@@ -373,6 +446,7 @@ def player_query_from_dict(raw: object) -> PlayerStatisticsQuery:
         columns=columns,
         sort_field=str(sort.get("field", "value")),
         sort_order=str(sort.get("order", "desc")),
+        computed_player_column_ids=string_list("computed_player_column_ids"),
     )
 
 
@@ -397,9 +471,25 @@ def player_export_to_dict(document: PlayerExportDocument) -> dict[str, object]:
         },
         "filters": player_query_to_dict(document.query),
         "row_count": len(document.entries),
-        "columns": list(document.query.columns),
+        "columns": [
+            *document.query.columns,
+            *(column.column_id for column in document.computed_columns),
+        ],
+        "computed_columns": [
+            {
+                "column_id": column.column_id,
+                "name": column.name,
+                "expression": column.expression,
+                "decimals": column.decimals,
+            }
+            for column in document.computed_columns
+        ],
+        "formula_error_count": document.formula_error_count,
         "rows": [
-            player_row(entry, document.query.columns, json_values=True)
+            {
+                **player_row(entry, document.query.columns, json_values=True),
+                **dict(dict(document.computed_values).get(str(entry.source_index), ())),
+            }
             for entry in document.entries
         ],
     }
@@ -431,9 +521,19 @@ def player_export_data_package(document: PlayerExportDocument) -> DataPackage:
         tables=(
             DataTable(
                 "players",
-                document.query.columns,
+                (
+                    *document.query.columns,
+                    *(column.column_id for column in document.computed_columns),
+                ),
                 tuple(
-                    player_row(entry, document.query.columns, json_values=False)
+                    {
+                        **player_row(entry, document.query.columns, json_values=False),
+                        **dict(
+                            dict(document.computed_values).get(
+                                str(entry.source_index), ()
+                            )
+                        ),
+                    }
                     for entry in document.entries
                 ),
             ),
@@ -459,6 +559,7 @@ def _metadata_lines(document: PlayerExportDocument) -> list[tuple[str, str]]:
         ("Snapshot gemt", source_time),
         ("Eksport oprettet", document.generated_at.astimezone().strftime("%d.%m.%Y %H:%M:%S")),
         ("Rækker", str(len(document.entries))),
+        ("Formelfejl", str(document.formula_error_count)),
         (
             "Filtre",
             json.dumps(player_query_to_dict(document.query), ensure_ascii=False, separators=(",", ":")),
@@ -476,11 +577,19 @@ def _cell_text(value: object) -> str:
 
 def player_export_to_txt(document: PlayerExportDocument) -> str:
     labels = player_column_labels(document.statistics)
+    labels.update({column.column_id: column.name for column in document.computed_columns})
+    columns = (
+        *document.query.columns,
+        *(column.column_id for column in document.computed_columns),
+    )
     lines = [f"{label}: {value}" for label, value in _metadata_lines(document)]
-    lines.extend(("", "\t".join(labels[key] for key in document.query.columns)))
+    lines.extend(("", "\t".join(labels[key] for key in columns)))
     for entry in document.entries:
-        row = player_row(entry, document.query.columns)
-        lines.append("\t".join(_cell_text(row[key]) for key in document.query.columns))
+        row = {
+            **player_row(entry, document.query.columns),
+            **dict(dict(document.computed_values).get(str(entry.source_index), ())),
+        }
+        lines.append("\t".join(_cell_text(row[key]) for key in columns))
     return "\n".join(lines) + "\n"
 
 
@@ -490,14 +599,22 @@ def _markdown_cell(value: object) -> str:
 
 def player_export_to_markdown(document: PlayerExportDocument) -> str:
     labels = player_column_labels(document.statistics)
+    labels.update({column.column_id: column.name for column in document.computed_columns})
+    columns = (
+        *document.query.columns,
+        *(column.column_id for column in document.computed_columns),
+    )
     lines = [f"# Spillerstatistik – {document.statistics.game.slug}", ""]
     lines.extend(f"- **{label}:** {value}" for label, value in _metadata_lines(document))
-    headers = [labels[key] for key in document.query.columns]
+    headers = [labels[key] for key in columns]
     lines.extend(("", "| " + " | ".join(headers) + " |", "| " + " | ".join("---" for _ in headers) + " |"))
     for entry in document.entries:
-        row = player_row(entry, document.query.columns)
+        row = {
+            **player_row(entry, document.query.columns),
+            **dict(dict(document.computed_values).get(str(entry.source_index), ())),
+        }
         lines.append(
-            "| " + " | ".join(_markdown_cell(row[key]) for key in document.query.columns) + " |"
+            "| " + " | ".join(_markdown_cell(row[key]) for key in columns) + " |"
         )
     return "\n".join(lines) + "\n"
 

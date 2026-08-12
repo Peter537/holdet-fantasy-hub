@@ -261,9 +261,9 @@ def known_schema_error(path: str, data: bytes) -> str | None:
         return f"{path}: ukendt gruppeschema"
     if path == "config/groups.json" and version == 8:
         return None
-    if path == "config/hub-settings.json" and version in {2, 3}:
+    if path == "config/hub-settings.json" and version in {2, 3, 4}:
         return None
-    if path == "config/analysis-inbox.json" and version == 1:
+    if path == "config/analysis-inbox.json" and version in {1, 2}:
         return None
     if path == "config/seasons.json" and version == 1:
         return None
@@ -281,7 +281,7 @@ def known_schema_error(path: str, data: bytes) -> str | None:
         return f"{path}: ukendt fixtureschema"
     if path.startswith("data/hall-of-fame/") and version != 1:
         return f"{path}: ukendt Hall of Fame-schema"
-    if "/players/" in path and "player-round" in path and version not in {1, 2, 3}:
+    if "/players/" in path and "player-round" in path and version not in {1, 2, 3, 4}:
         return f"{path}: ukendt spillersnapshotschema"
     if "/teams/" in path and "team-round" in path and version not in {1, 2}:
         return f"{path}: ukendt teamsnapshotschema"

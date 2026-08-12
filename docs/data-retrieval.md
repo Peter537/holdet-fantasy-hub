@@ -23,7 +23,7 @@ sequenceDiagram
     Store-->>Web: Publiceret atomisk
 ```
 
-Navigation, Rundecenter, Managers, H2H, sæsoner, Kalender, Datastatus, Analyse, spillerdetaljer, managerspillets alarmfane, historik, watchlist, sammenligning, ændringer og Transferlaboratorium stopper før første netværkspil. De bruger kun eksisterende snapshots, publicerede parringer, metadata og refresh-manifester. Også Rundecenterets opdaterings-preview og time machine er cache-only; manglende metadata vises som en datamangel og udløser aldrig automatisk kontakt til Holdet. Se [Rundecenter og daglig arbejdsgang](round-center.md).
+Navigation, `/scouting`, Rundecenter, Managers, H2H, sæsoner, Kalender, Datastatus, Analyse, spillerdetaljer, alarmfaner, smartlister, notesøgning, sammenligning, intra-runde-ændringer og Transferlaboratorium stopper før første netværkspil. De bruger kun eksisterende snapshots, publicerede parringer, metadata, HubSettings og refresh-manifester. Manglende data vises som en datamangel og udløser aldrig automatisk kontakt til Holdet. Se [Rundecenter og daglig arbejdsgang](round-center.md).
 
 ## URL, variant og spilpolitik
 
@@ -47,7 +47,11 @@ Statistiksiden hentes fra:
 
 Next.js Flight-strenge samles fra scripts, og parseren finder den gyldige `rows`-liste og runde. Hele serverpayloaden bruges uanset den virtualiserede tabels synlige rækker. Et eksplicit spiller-refresh gemmer både det komplette spillersnapshot og de tilgængelige spilmetadata.
 
-Round-aware ændringer sammenligner bagefter de seneste lokale hentninger i valgt og foregående tilgængelige runde; selve sammenligningen foretager ingen ny hentning. **Hent seneste** sammenligner desuden watchlistspillere med det forrige snapshot og skriver kun nye statusalarmer. Historisk backfill danner aldrig aktuelle alarmer.
+De obligatoriske identitets-, hold-, positions-, pris- og statusfelter valideres strengt. De offentlige felter `popularity`, `popularityChange`, `trend`, `index`, `stats` og `totalStats` er valgfrie. Endelige numeriske værdier og korte, entydige statnavne bevares i snapshot schema 4. Ukendt form, ikke-endelige tal eller kildedrift ignoreres fail-closed for det valgfrie felt, så den almindelige spillerparser fortsat kan levere de obligatoriske data. Parser-canaryen overvåger felterne separat på de fem aktuelle spil.
+
+**Mellem runder** sammenligner det nyeste lokale snapshot i valgt og foregående tilgængelige runde. **Mellem hentninger** sammenligner de to seneste kronologiske snapshots uden at kollapse samme rundenummer. Begge er rene cacheberegninger.
+
+Efter **Hent seneste** evalueres watchlistregler mod den umiddelbart foregående hentning og, for prisdeltaets resettilstand, den foregående baseline. Pris-, procent- og Form 3/5-regler kræver en krydsning; første observation uden baseline alarmerer ikke. Statusreglen registrerer enhver overgang. Historisk backfill danner aldrig aktuelle alarmer.
 
 ## Fantasyhold, historik og schedule
 
@@ -79,7 +83,7 @@ Ved fejl bevarer dashboardet en gyldig cache og tilbyder et eksplicit retry. Nav
 
 ## Fejlprincipper og begrænsninger
 
-Nødvendige felter valideres strengt. Tom spillerliste, manglende runde, ukendt format eller uforenelig historik giver en konkret fejl uden delvist snapshot. Valgfrie offentlige rangeringer kan være `None`.
+Nødvendige felter valideres strengt. Tom spillerliste, manglende runde, ukendt format eller uforenelig historik giver en konkret fejl uden delvist snapshot. Valgfrie offentlige scoutingfelter kan være `None`; UI og det lokale API viser manglen og substituerer aldrig nul.
 
 Der findes ingen baggrundspolling eller scheduler. Kalenderen er cache-only og opretter ikke ICS-filer eller påmindelser. Historiske opstillinger vises kun, hvis et kanonisk teamsnapshot blev gemt præcis i runden. Manglende værdier, top-procenter eller resultater estimeres aldrig.
 

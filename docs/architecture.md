@@ -20,7 +20,7 @@ flowchart TB
         Domain["Frosne dataclasses og DataPackage"]
         Adapters["Interne sportsadaptere"]
         Manager["Rundecenter-, manager-, sæson- og kalenderbuilders"]
-        Analysis["Beslutningsanalyse, regler og modeller"]
+        Analysis["Beslutningsanalyse, scouting, regler og modeller"]
         Tournament["Generisk turneringsmotor"]
         Stores["Versionsstyrede stores og backup"]
     end
@@ -65,7 +65,7 @@ Rene builders skriver ikke filer. Stores skriver kun efter eksplicitte handlinge
 
 `website/server.py` er den kanoniske `st.App`-wrapper og registrerer loopback-only API-ruter. `website/app.py` er en tynd entrypoint: den konfigurerer siden, registrerer filbaserede sider, bygger den typed `UiContext`, håndterer legacy-links, tegner den dynamiske sidebar og kører den valgte side. `website/navigation.py` er den eneste route-tabel og ejer `PageId`, `go_to`, `page_link` og legacy-mapping. De filbaserede moduler i `website/app_pages/` gør native routing og `AppTest.switch_page` ensartede.
 
-`website/ui.py` ejer den fælles kontekst og de eksisterende domænevisninger. `website/round_center_page.py` sammensætter Rundecenterets rene builders og modtager fremdrift fra eksplicit refresh; `website/hub_pages.py` ejer Managers, Kalender, Rundens historie og relaterede paneler; `website/analysis_pages.py` ejer beslutningspaneler; `website/data_sections.py` ejer data-, import-, integritets- og oprydningsflows. Spillerfiltre/-tabel, analysepanel, kalender og managercenter er sekventielle `st.fragment`-grænser. Muterende handlinger afsluttes med fuld `st.rerun()`, mens filterændringer bliver i fragmentet. Query-parametre og semantiske session-state-nøgler fastholder kontekst. Almindelig navigation læser cache.
+`website/ui.py` ejer den fælles kontekst og de eksisterende domænevisninger. `website/scouting_page.py` ejer den globale `/scouting`-side, kontekstuelle scoutingpaneler, plots, bulkhandlinger og spillerens peer-/similaritetsvisninger. `website/round_center_page.py` sammensætter Rundecenterets rene builders og modtager fremdrift fra eksplicit refresh; `website/hub_pages.py` ejer Managers, Kalender, Rundens historie og relaterede paneler; `website/analysis_pages.py` ejer beslutningspaneler og spillerens ændringsforklaring; `website/data_sections.py` ejer data-, import-, integritets- og oprydningsflows. Spillerfiltre/-tabel, analysepanel, kalender og managercenter er sekventielle `st.fragment`-grænser. Muterende handlinger afsluttes med fuld `st.rerun()`, mens filterændringer bliver i fragmentet. Query-parametre og semantiske session-state-nøgler fastholder kontekst. Almindelig navigation læser cache.
 
 ```mermaid
 flowchart LR
@@ -75,7 +75,9 @@ flowchart LR
     UiContext --> Sidebar["Dynamisk sidebar"]
     Page --> Fragments["Fragments og formularer"]
     Fragments --> Builders["Rene builders + cache_data"]
+    Builders --> Scouting["Percentiler, peers, scores,<br/>similaritet og sikre formler"]
     Builders --> Stores["Versionerede stores"]
+    Scouting --> Stores
 ```
 
 Se [Navigation](navigation.md) for canonical paths og den komplette legacy-matrix.
@@ -126,8 +128,9 @@ Seeds fryses ved oprettelse. Schema 8 bruger fortsat `TournamentConfig` som runt
 ## Dataejerskab
 
 - `SnapshotIndex` er læseindekset for uforanderlige snapshots.
-- `HubSettings` schema 3 ejer watchlist, `ManagerProfile`, spillerannotationer, gemte filterprofiler, standardhold, eksperimentelt opt-in og den globale pointprofil.
-- `analysis-inbox.json` schema 1 ejer deduplikerede statusalarmer og deres læst-/afvisttilstand.
+- `HubSettings` schema 4 ejer watchlistregler og -begrundelser, beregnede spillerkolonner, `ManagerProfile`, spillerannotationer, gemte filterprofiler, standardhold, eksperimentelt opt-in og den globale pointprofil. Schema 1–3 migreres kun i hukommelsen ved læsning.
+- `analysis-inbox.json` schema 2 ejer regel- og snapshottidsbaserede watchlistalarmer og deres læst-/afvisttilstand; schema 1 dual-reades.
+- Uforanderlige spillersnapshots schema 4 ejer de obligatoriske spillerfelter og valgfrie popularitets-, trend-, indeks- og præstationsfelter. Schema 1–3 dual-reades.
 - `groups.json` schema 8 ejer managerspil, grupper, officielle links og `TournamentDefinition`.
 - `seasons.json` schema 1 ejer manuelle sæsondefinitioner.
 - pairing-store schema 1 ejer publicerede parringer pr. turneringsrevision.
@@ -153,11 +156,12 @@ Se [Datalagring](data-storage.md) for konkrete stier og kompatibilitetsregler.
 | Kalender | `CalendarEvent`, `build_calendar_events` |
 | Turnering | `TournamentDefinition`, `TournamentConfig`, `TournamentTemplateConfig`, templatekonfigurationer, `tournament_template_config`, `create_tournament_definition`, `build_tournament_state` |
 | Pairings | `TournamentPairing`, `TournamentPairingRevision`, `TournamentPairingStore`, `validate_tournament_pairing_revision`, `build_swiss_pairing_conflicts` |
-| Historik | `compare_snapshots`, `compare_round_snapshots`, `build_history_series` |
+| Historik | `compare_snapshots`, `compare_round_snapshots`, `build_history_series`, `build_intra_round_diff`, `IntraRoundDiff` |
 | Transfer | `TransferScenario`, `simulate_transfers` |
+| Scouting | `WatchlistReason`, `WatchRule`, `ComputedPlayerColumn`, `PlayerScoutingMetrics`, `PeerComparison`, `SimilarPlayerResult`, `SmartList`, `PlayerChangeExplanation`, `build_scouting_metrics`, `build_peer_comparison`, `find_similar_players`, `build_smart_lists`, `build_player_change_explanation`, `evaluate_player_formula` |
 | Beslutningsanalyse | `GameRuleProfile`, `AnalysisProvenance`, `build_player_decision_analysis`, `build_team_decision_ledger`, `build_group_comparison`, `build_group_exposure` |
 | Idealhold og model | `optimize_ideal_team`, `simulate_transfer_scenario` |
-| Alarmer og fixtures | `AnalysisInboxStore`, `build_watchlist_alerts`, `FixtureRecord`, `FixtureStore`, `parse_fixture_records` |
+| Alarmer og fixtures | `AnalysisInboxStore`, `WatchlistReason`, `WatchRule`, `build_watchlist_alerts`, `FixtureRecord`, `FixtureStore`, `parse_fixture_records` |
 | Datastatus | `DataQualityReport`, `build_data_quality_report` |
 | Backup | `create_backup`, `validate_backup`, `restore_backup` |
 | Dataportabilitet | `DataPackage`, `DataTable`, `serialize_data_package`, `preview_import`, `anonymize_data_package` |

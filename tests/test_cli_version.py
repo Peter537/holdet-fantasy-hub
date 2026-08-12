@@ -49,7 +49,8 @@ class VersionAndDispatchTests(unittest.TestCase):
 
         required_documentation = {
             "Rundecenter",
-            "Sammenligning og watchlist",
+            "Scouting",
+            "panel=watchlist",
             "Transferlaboratorium",
             "Hall of Fame",
             "Datastatus",

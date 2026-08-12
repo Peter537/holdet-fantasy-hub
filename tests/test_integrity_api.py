@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 import hashlib
 import os
@@ -11,6 +12,7 @@ from starlette.testclient import TestClient
 import holdet_lib as holdet
 from holdet_lib.local_api import LocalDataApi
 import website.server as server
+from tests.test_player_statistics import sample_statistics
 
 
 def paths_for(root: Path) -> holdet.AppPaths:
@@ -195,3 +197,49 @@ def test_local_api_catalog_filters_and_security_headers(tmp_path: Path, monkeypa
     blocked = TestClient(server.app, base_url="http://evil.example", client=("203.0.113.5", 41000))
     denied = blocked.get("/api/v1/health", headers={"Host": "evil.example"})
     assert denied.status_code == 403
+
+
+def test_local_players_api_exposes_optional_public_fields_read_only(
+    tmp_path: Path, monkeypatch
+) -> None:
+    paths = paths_for(tmp_path / "hub")
+    paths.config_dir.mkdir(parents=True)
+    paths.groups_file.write_text(
+        json.dumps({"schema_version": 8, "games": [], "groups": []}),
+        encoding="utf-8",
+    )
+    statistics = sample_statistics(variant="soccer")
+    enriched = replace(
+        statistics,
+        entries=(
+            replace(
+                statistics.entries[0],
+                popularity=0.25,
+                popularity_change=0.05,
+                trend=2,
+                index=91,
+            ),
+        ),
+    )
+    holdet.PlayerStatisticsStore(paths.snapshot_dir).save(enriched)
+    monkeypatch.setattr(server, "APP_PATHS", paths)
+    monkeypatch.setattr(server, "DATA_API", LocalDataApi(paths))
+    client = TestClient(
+        server.app,
+        base_url="http://127.0.0.1:8501",
+        client=("127.0.0.1", 41000),
+    )
+
+    response = client.get(
+        f"/api/v1/data/players?game={statistics.game.slug}&format=json"
+    )
+
+    assert response.status_code == 200
+    row = response.json()["rows"][0]
+    assert (
+        row["popularity"],
+        row["popularity_change"],
+        row["trend"],
+        row["index"],
+    ) == (0.25, 0.05, 2.0, 91.0)
+    assert "computed_columns" not in row

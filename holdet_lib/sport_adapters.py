@@ -90,6 +90,10 @@ _COMMON_LABELS = {
     "value": "Pris",
     "total_growth": "Totalvækst",
     "round_growth": "Vækst",
+    "popularity": "Popularitet",
+    "popularity_change": "Popularitetsændring",
+    "trend": "Trend",
+    "index": "Indeks",
     "status": "Status",
 }
 

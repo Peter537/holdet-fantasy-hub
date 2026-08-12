@@ -43,6 +43,12 @@ from website.hub_pages import (
 )
 from website.navigation import PageId, go_to, page_link, relative_url
 from website.round_center_page import render_round_center
+from website.scouting_page import (
+    render_contextual_scouting_panel,
+    render_contextual_watchlist_panel,
+    render_player_bulk_controls,
+    render_scouting_page,
+)
 from website.presentation import (
     data_status_label,
     dataframe,
@@ -99,8 +105,10 @@ from holdet_lib import (
     TeamReference,
     build_player_export,
     build_player_decision_analysis,
+    build_scouting_metrics,
     build_watchlist_alerts,
     select_alert_baseline,
+    watch_form_signals,
     build_standings,
     build_tournament_head_to_head,
     build_tournament_state,
@@ -838,6 +846,14 @@ def _sidebar(
         ):
             _navigate("players")
         if st.button(
+            "Scouting",
+            key="scouting-sidebar",
+            icon=":material/travel_explore:",
+            width="stretch",
+            type="primary" if view == "scouting" else "secondary",
+        ):
+            _navigate("scouting")
+        if st.button(
             "Holdstatistik",
             key="standalone-team-statistics-sidebar",
             icon=":material/groups:",
@@ -1065,6 +1081,13 @@ def _home(
                 width="content",
             ):
                 _navigate("players")
+            if st.button(
+                "Scouting",
+                key="scouting-home",
+                icon=":material/travel_explore:",
+                width="content",
+            ):
+                _navigate("scouting")
             if st.button(
                 "Holdstatistik",
                 key="standalone-team-statistics-home",
@@ -1308,6 +1331,7 @@ def _fetch_player_statistics(game: GameUrl, round_number: int | None) -> None:
                         game, statistics.round_number
                     )
                     if current is not None:
+                        alert_index = snapshot_store.scan(game)
                         settings = HubSettingsStore(
                             APP_PATHS.hub_settings_file
                         ).load()
@@ -1315,6 +1339,21 @@ def _fetch_player_statistics(game: GameUrl, round_number: int | None) -> None:
                             previous,
                             current,
                             settings.watchlist,
+                            prior=next(
+                                (
+                                    snapshot
+                                    for snapshot in before_index.for_game(game)
+                                    if previous is not None
+                                    and snapshot.generated_at < previous.generated_at
+                                ),
+                                None,
+                            ),
+                            previous_forms=(
+                                watch_form_signals(alert_index, previous)
+                                if previous is not None
+                                else None
+                            ),
+                            current_forms=watch_form_signals(alert_index, current),
                         )
                         AnalysisInboxStore(
                             APP_PATHS.analysis_inbox_file
@@ -1827,6 +1866,37 @@ def _player_export_controls(statistics, query, selected, scope: str) -> None:
         format_func=format_labels.__getitem__,
         key=f"{scope}-export-formats",
     )
+    try:
+        settings = HubSettingsStore(APP_PATHS.hub_settings_file).load()
+        computed_columns = tuple(
+            item
+            for item in settings.computed_player_columns
+            if (item.game_locale, item.game_slug)
+            == (statistics.game.locale.casefold(), statistics.game.slug)
+        )
+    except (OSError, PayloadError, ValueError):
+        computed_columns = ()
+    selected_computed = tuple(
+        st.multiselect(
+            "Beregnede kolonner",
+            tuple(item.column_id for item in computed_columns),
+            format_func=lambda column_id: next(
+                item.name for item in computed_columns if item.column_id == column_id
+            ),
+            key=f"{scope}-export-computed-columns",
+        )
+    )
+    scouting_by_key = {
+        item.player_key: item
+        for item in (
+            build_scouting_metrics(
+                PlayerStatisticsStore(OUTPUT_DIR).scan(statistics.game),
+                statistics.game,
+            )
+            if selected_computed
+            else ()
+        )
+    }
     ready_key = f"{scope}-ready-export-{statistics.round_number}"
     if st.button(
         "Opret eksport",
@@ -1837,9 +1907,24 @@ def _player_export_controls(statistics, query, selected, scope: str) -> None:
         try:
             document = build_player_export(
                 statistics,
-                query,
+                replace(query, computed_player_column_ids=selected_computed),
                 generated_at=datetime.now().astimezone(),
                 source_generated_at=selected.generated_at,
+                computed_columns=computed_columns,
+                computed_contexts={
+                    entry.source_index: {
+                        "form_3": scouting_by_key[key].form_3,
+                        "form_5": scouting_by_key[key].form_5,
+                        "stability": scouting_by_key[key].stability,
+                        "growth_per_million": (
+                            scouting_by_key[key].metric("growth_per_million").value
+                        ),
+                        "potential": scouting_by_key[key].potential.value,
+                        "risk": scouting_by_key[key].risk.value,
+                    }
+                    for entry in statistics.entries
+                    if (key := player_identity(statistics.game, entry)) in scouting_by_key
+                },
             )
             artifacts = PlayerExportStore(PLAYER_EXPORT_DIR).save(
                 document, tuple(formats or ())
@@ -1994,11 +2079,13 @@ def _player_list_panel(selected, empty_label: str) -> None:
                         if analysis is None or analysis.stability_score is None
                         else f"{analysis.stability_score}/100 · {analysis.stability_label}"
                     )
-                    row["Datastatus"] = data_status_label(
+                    row["Sikkerhed"] = data_status_label(
                         "unverified"
                         if analysis is None
                         else analysis.provenance.certainty
                     )
+                    row["Snapshotalder"] = format_relative_precise(selected.generated_at)
+                    row["Snapshot"] = selected.generated_at
                     row["Grundlag"] = (
                         0 if analysis is None else analysis.provenance.sample_size
                     )
@@ -2014,10 +2101,12 @@ def _player_list_panel(selected, empty_label: str) -> None:
                         player=key,
                         round=statistics.round_number,
                     )
-            dataframe(
+            event = dataframe(
                 _style_integer_columns(rows, integer_columns),
                 hide_index=True,
                 width="stretch",
+                on_select="rerun",
+                selection_mode="multi-row",
                 column_config={
                     "Detaljer": st.column_config.LinkColumn(
                         "Detaljer", display_text="Åbn spiller"
@@ -2039,6 +2128,25 @@ def _player_list_panel(selected, empty_label: str) -> None:
                     f"player-statistics:{game.locale}:{game.slug}:v1"
                 ),
             )
+        selected_keys = tuple(
+            player_keys[index]
+            for index in event.selection.rows
+            if 0 <= index < len(player_keys)
+        )
+        with st.expander(
+            f"Bulkhandlinger · {len(selected_keys)} valgt",
+            icon=":material/checklist:",
+            key=f"player-list-bulk:{game.locale}:{game.slug}",
+            on_change="rerun",
+        ) as bulk_expander:
+            if bulk_expander.open:
+                render_player_bulk_controls(
+                    scope=f"player-list:{game.locale}:{game.slug}",
+                    selected_keys=selected_keys,
+                    game=game,
+                    entries={key: entry for key, entry in zip(player_keys, entries, strict=True)},
+                    paths=APP_PATHS,
+                )
         _player_export_section(statistics, applied_query, selected, scope)
     else:
         st.info("Ingen spillere matcher de valgte filtre.")
@@ -2236,19 +2344,24 @@ def _player_statistics_panel(
     player_tabs = _stateful_tabs(
         (
             "Spillerliste",
-            "Sammenligning og watchlist",
+            "Scouting",
+            "Sammenligning",
+            "Watchlist",
             "Ændringer",
         ),
-        ("list", "compare", "changes"),
+        ("list", "scouting", "compare", "watchlist", "changes"),
         key=(
             f"player-panels-{game.locale}-{game.slug}-{empty_label}"
         ),
         parameter="panel",
     )
-    list_tab, compare_tab, changes_tab = player_tabs
+    list_tab, scouting_tab, compare_tab, watchlist_tab, changes_tab = player_tabs
     if list_tab.open:
         with list_tab:
             _player_list_panel(selected, empty_label)
+    if scouting_tab.open:
+        with scouting_tab:
+            render_contextual_scouting_panel(game, index, APP_PATHS)
     if compare_tab.open:
         with compare_tab:
             player_compare_panel(
@@ -2257,6 +2370,9 @@ def _player_statistics_panel(
                 APP_PATHS,
                 int(selected_round),
             )
+    if watchlist_tab.open:
+        with watchlist_tab:
+            render_contextual_watchlist_panel(game, index, APP_PATHS)
     if changes_tab.open:
         with changes_tab:
             player_changes_panel(
@@ -5557,6 +5673,8 @@ def render_page(page_id: PageId) -> None:
         _render_player_page(context)
     elif page_id is PageId.PLAYERS:
         _standalone_player_statistics(games)
+    elif page_id is PageId.SCOUTING:
+        render_scouting_page(games, APP_PATHS)
     elif page_id is PageId.TEAMS:
         _standalone_team_statistics(games, groups, index)
     elif page_id is PageId.GROUP and group is not None:

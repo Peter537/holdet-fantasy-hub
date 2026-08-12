@@ -6,8 +6,9 @@ from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from datetime import datetime
 import json
+from math import isfinite
 from pathlib import Path
-from typing import Any, TYPE_CHECKING
+from typing import Any, Literal, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .groups import GroupDefinition
@@ -16,6 +17,7 @@ if TYPE_CHECKING:
 from .errors import PayloadError
 from .models import GameUrl, PlayerEntry
 from .persistence import replace_text_atomically
+from .player_formulas import ComputedPlayerColumn
 from .player_exports import (
     PlayerStatisticsQuery,
     player_query_from_dict,
@@ -23,8 +25,70 @@ from .player_exports import (
 )
 
 
-HUB_SETTINGS_SCHEMA_VERSION = 3
+HUB_SETTINGS_SCHEMA_VERSION = 4
 DEFAULT_PLAYER_TAGS = ("overvej", "undgå", "kaptajn", "langsigtet")
+WATCHLIST_REASONS = (
+    "kaptajnkandidat",
+    "vent på prisfald",
+    "modstander til mit hold",
+)
+WatchlistReason = Literal[
+    "kaptajnkandidat",
+    "vent på prisfald",
+    "modstander til mit hold",
+]
+WatchRuleKind = Literal[
+    "value_drop",
+    "value_rise",
+    "status_change",
+    "form3_above",
+    "form3_below",
+    "form5_above",
+    "form5_below",
+]
+WatchThresholdUnit = Literal["absolute", "percent"]
+
+
+@dataclass(frozen=True, slots=True)
+class WatchRule:
+    rule_id: str
+    kind: WatchRuleKind
+    threshold: float | None = None
+    threshold_unit: WatchThresholdUnit = "absolute"
+
+    def __post_init__(self) -> None:
+        if not self.rule_id.strip() or len(self.rule_id) > 64:
+            raise ValueError("En watchregel kræver et kort regel-id")
+        if self.kind not in {
+            "value_drop",
+            "value_rise",
+            "status_change",
+            "form3_above",
+            "form3_below",
+            "form5_above",
+            "form5_below",
+        }:
+            raise ValueError("Ukendt watchregel")
+        if self.threshold_unit not in {"absolute", "percent"}:
+            raise ValueError("Ukendt tærskelenhed")
+        if self.kind == "status_change":
+            if self.threshold is not None:
+                raise ValueError("Statusregler har ingen numerisk tærskel")
+        else:
+            if (
+                not isinstance(self.threshold, (int, float))
+                or isinstance(self.threshold, bool)
+                or not isfinite(float(self.threshold))
+            ):
+                raise ValueError("Reglen kræver en endelig numerisk tærskel")
+            if self.kind in {"value_drop", "value_rise"} and self.threshold <= 0:
+                raise ValueError("Pristærskler skal være positive")
+            if self.kind.startswith("form") and self.threshold_unit != "absolute":
+                raise ValueError("Formtærskler bruger absolutte værdier")
+            object.__setattr__(self, "threshold", float(self.threshold))
+
+
+DEFAULT_STATUS_WATCH_RULE = WatchRule("status-change", "status_change")
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +123,23 @@ class WatchlistEntry:
     name: str
     team: str
     position: str
+    reasons: tuple[WatchlistReason, ...] = ()
+    reason_note: str = ""
+    rules: tuple[WatchRule, ...] = ()
+
+    def __post_init__(self) -> None:
+        reasons = tuple(dict.fromkeys(self.reasons))
+        if any(reason not in WATCHLIST_REASONS for reason in reasons):
+            raise ValueError("Watchlist-begrundelsen er ukendt")
+        if len(self.reason_note) > 280:
+            raise ValueError("Watchlist-begrundelsen må højst være 280 tegn")
+        if len(self.rules) > 8:
+            raise ValueError("Der må højst være otte watchregler pr. spiller")
+        rule_ids = [rule.rule_id for rule in self.rules]
+        if len(rule_ids) != len(set(rule_ids)):
+            raise ValueError("Watchregler skal have entydige ID'er pr. spiller")
+        object.__setattr__(self, "reasons", reasons)
+        object.__setattr__(self, "reason_note", self.reason_note.strip())
 
     @property
     def game_identity(self) -> tuple[str, str]:
@@ -152,6 +233,20 @@ class HubSettings:
     saved_player_filters: tuple[SavedPlayerFilter, ...] = ()
     own_teams: tuple[OwnTeamSelection, ...] = ()
     experimental_games: tuple[tuple[str, str], ...] = ()
+    computed_player_columns: tuple[ComputedPlayerColumn, ...] = ()
+
+    def __post_init__(self) -> None:
+        per_game: dict[tuple[str, str], list[ComputedPlayerColumn]] = {}
+        for column in self.computed_player_columns:
+            per_game.setdefault(
+                (column.game_locale.casefold(), column.game_slug), []
+            ).append(column)
+        if any(len(values) > 20 for values in per_game.values()):
+            raise ValueError("Der må højst være 20 beregnede kolonner pr. spil")
+        for values in per_game.values():
+            ids = [column.column_id for column in values]
+            if len(ids) != len(set(ids)):
+                raise ValueError("Beregnede kolonne-ID'er skal være entydige pr. spil")
 
 
 def effective_manager_profiles(settings: HubSettings) -> tuple[ManagerProfile, ...]:
@@ -362,6 +457,7 @@ def watchlist_entry(game: GameUrl, entry: PlayerEntry) -> WatchlistEntry:
         entry.name,
         entry.team,
         entry.position,
+        rules=(DEFAULT_STATUS_WATCH_RULE,),
     )
 
 
@@ -438,6 +534,31 @@ def _optional_integer(value: object, label: str) -> int | None:
     return value
 
 
+def _optional_number(value: object, label: str) -> float | None:
+    if value is None:
+        return None
+    if (
+        not isinstance(value, (int, float))
+        or isinstance(value, bool)
+        or not isfinite(float(value))
+    ):
+        raise PayloadError(f"{label} skal være et endeligt tal")
+    return float(value)
+
+
+def _watch_rule_from_dict(raw: object, label: str) -> WatchRule:
+    item = _require_object(raw, label)
+    try:
+        return WatchRule(
+            _require_text(item.get("rule_id"), f"{label}.rule_id"),
+            _require_text(item.get("kind"), f"{label}.kind"),  # type: ignore[arg-type]
+            _optional_number(item.get("threshold"), f"{label}.threshold"),
+            str(item.get("threshold_unit", "absolute")),  # type: ignore[arg-type]
+        )
+    except ValueError as exc:
+        raise PayloadError(f"Ugyldig watchregel: {exc}") from exc
+
+
 def _score_from_dict(raw: object) -> HallOfFameScoreProfile:
     item = _require_object(raw, "hall_of_fame_score")
     group_raw = item.get("group_points")
@@ -486,7 +607,7 @@ def _validate_manager_profiles(
 def _settings_from_dict(payload: object) -> HubSettings:
     root = _require_object(payload, "Hub-indstillinger")
     source_schema_version = root.get("schema_version")
-    if source_schema_version not in {1, 2, HUB_SETTINGS_SCHEMA_VERSION}:
+    if source_schema_version not in {1, 2, 3, HUB_SETTINGS_SCHEMA_VERSION}:
         raise PayloadError("ukendt skema for Hub-indstillinger")
     raw_watchlist = root.get("watchlist", [])
     raw_aliases = root.get("manager_aliases", [])
@@ -495,8 +616,24 @@ def _settings_from_dict(payload: object) -> HubSettings:
     watched: list[WatchlistEntry] = []
     for index, raw in enumerate(raw_watchlist):
         item = _require_object(raw, f"watchlist[{index}]")
-        watched.append(
-            WatchlistEntry(
+        reasons = item.get("reasons", []) if source_schema_version >= 4 else []
+        raw_rules = item.get("rules", []) if source_schema_version >= 4 else []
+        if not isinstance(reasons, list) or not all(
+            isinstance(reason, str) for reason in reasons
+        ):
+            raise PayloadError("Watchlist-begrundelser skal være tekst")
+        if not isinstance(raw_rules, list):
+            raise PayloadError("Watchregler skal være en liste")
+        rules = (
+            tuple(
+                _watch_rule_from_dict(rule, f"watchlist[{index}].rules[{rule_index}]")
+                for rule_index, rule in enumerate(raw_rules)
+            )
+            if source_schema_version >= 4
+            else (DEFAULT_STATUS_WATCH_RULE,)
+        )
+        try:
+            watched.append(WatchlistEntry(
                 _require_text(item.get("game_locale"), "game_locale").casefold(),
                 _require_text(item.get("game_slug"), "game_slug"),
                 _require_text(item.get("player_key"), "player_key"),
@@ -505,8 +642,12 @@ def _settings_from_dict(payload: object) -> HubSettings:
                 _require_text(item.get("name"), "name"),
                 _require_text(item.get("team"), "team"),
                 _require_text(item.get("position"), "position"),
-            )
-        )
+                tuple(reasons),
+                str(item.get("reason_note", "")),
+                rules,
+            ))
+        except ValueError as exc:
+            raise PayloadError(f"Ugyldig watchlistpost: {exc}") from exc
     aliases: list[ManagerAlias] = []
     for index, raw in enumerate(raw_aliases):
         item = _require_object(raw, f"manager_aliases[{index}]")
@@ -523,7 +664,7 @@ def _settings_from_dict(payload: object) -> HubSettings:
             )
         )
     profiles: list[ManagerProfile] = []
-    if source_schema_version in {2, HUB_SETTINGS_SCHEMA_VERSION}:
+    if source_schema_version in {2, 3, HUB_SETTINGS_SCHEMA_VERSION}:
         raw_profiles = root.get("manager_profiles", [])
         if not isinstance(raw_profiles, list):
             raise PayloadError("manager_profiles skal være en liste")
@@ -559,7 +700,8 @@ def _settings_from_dict(payload: object) -> HubSettings:
     filters: list[SavedPlayerFilter] = []
     own_teams: list[OwnTeamSelection] = []
     experimental_games: list[tuple[str, str]] = []
-    if source_schema_version == HUB_SETTINGS_SCHEMA_VERSION:
+    computed_columns: list[ComputedPlayerColumn] = []
+    if source_schema_version in {3, HUB_SETTINGS_SCHEMA_VERSION}:
         raw_annotations = root.get("player_annotations", [])
         raw_filters = root.get("saved_player_filters", [])
         raw_teams = root.get("own_teams", [])
@@ -644,6 +786,28 @@ def _settings_from_dict(payload: object) -> HubSettings:
                     _require_text(item.get("game_slug"), "game_slug"),
                 )
             )
+    if source_schema_version >= 4:
+        raw_columns = root.get("computed_player_columns", [])
+        if not isinstance(raw_columns, list):
+            raise PayloadError("computed_player_columns skal være en liste")
+        for index, raw in enumerate(raw_columns):
+            item = _require_object(raw, f"computed_player_columns[{index}]")
+            decimals = item.get("decimals", 2)
+            if not isinstance(decimals, int) or isinstance(decimals, bool):
+                raise PayloadError("Beregnede kolonnedecimaler skal være et heltal")
+            try:
+                computed_columns.append(
+                    ComputedPlayerColumn(
+                        _require_text(item.get("game_locale"), "game_locale"),
+                        _require_text(item.get("game_slug"), "game_slug"),
+                        _require_text(item.get("column_id"), "column_id"),
+                        _require_text(item.get("name"), "name"),
+                        _require_text(item.get("expression"), "expression"),
+                        decimals,
+                    )
+                )
+            except ValueError as exc:
+                raise PayloadError(f"Ugyldig beregnet kolonne: {exc}") from exc
     filter_names: set[tuple[str, str, str]] = set()
     for item in filters:
         key = (item.game_locale, item.game_slug, item.name.casefold())
@@ -652,16 +816,20 @@ def _settings_from_dict(payload: object) -> HubSettings:
                 "Gemte filterprofiler skal have entydige navne pr. spil"
             )
         filter_names.add(key)
-    return HubSettings(
-        tuple(watched),
-        tuple(aliases),
-        _score_from_dict(root.get("hall_of_fame_score", {})),
-        _validate_manager_profiles(tuple(profiles)),
-        tuple(annotations),
-        tuple(filters),
-        tuple(own_teams),
-        tuple(dict.fromkeys(experimental_games)),
-    )
+    try:
+        return HubSettings(
+            tuple(watched),
+            tuple(aliases),
+            _score_from_dict(root.get("hall_of_fame_score", {})),
+            _validate_manager_profiles(tuple(profiles)),
+            tuple(annotations),
+            tuple(filters),
+            tuple(own_teams),
+            tuple(dict.fromkeys(experimental_games)),
+            tuple(computed_columns),
+        )
+    except ValueError as exc:
+        raise PayloadError(f"Ugyldige Hub-indstillinger: {exc}") from exc
 
 
 def _settings_to_dict(settings: HubSettings) -> dict[str, object]:
@@ -679,6 +847,17 @@ def _settings_to_dict(settings: HubSettings) -> dict[str, object]:
                 "name": item.name,
                 "team": item.team,
                 "position": item.position,
+                "reasons": list(item.reasons),
+                "reason_note": item.reason_note,
+                "rules": [
+                    {
+                        "rule_id": rule.rule_id,
+                        "kind": rule.kind,
+                        "threshold": rule.threshold,
+                        "threshold_unit": rule.threshold_unit,
+                    }
+                    for rule in item.rules
+                ],
             }
             for item in settings.watchlist
         ],
@@ -735,6 +914,17 @@ def _settings_to_dict(settings: HubSettings) -> dict[str, object]:
             {"game_locale": locale, "game_slug": slug}
             for locale, slug in settings.experimental_games
         ],
+        "computed_player_columns": [
+            {
+                "game_locale": item.game_locale,
+                "game_slug": item.game_slug,
+                "column_id": item.column_id,
+                "name": item.name,
+                "expression": item.expression,
+                "decimals": item.decimals,
+            }
+            for item in settings.computed_player_columns
+        ],
     }
 
 
@@ -789,6 +979,69 @@ class HubSettingsStore:
                 )
             ),
         )
+        self.save(updated)
+        return updated
+
+    def apply_player_bulk_update(
+        self,
+        settings: HubSettings,
+        *,
+        watchlist: tuple[WatchlistEntry, ...] | None = None,
+        annotations: tuple[PlayerAnnotation, ...] | None = None,
+    ) -> HubSettings:
+        """Validate a complete bulk candidate, then perform exactly one save."""
+
+        selected_watchlist = settings.watchlist if watchlist is None else watchlist
+        selected_annotations = (
+            settings.player_annotations if annotations is None else annotations
+        )
+        watch_keys = [item.player_key for item in selected_watchlist]
+        annotation_keys = [item.player_key for item in selected_annotations]
+        if len(watch_keys) != len(set(watch_keys)):
+            raise ValueError("Bulkhandlingen indeholder dublerede watchlistspillere")
+        if len(annotation_keys) != len(set(annotation_keys)):
+            raise ValueError("Bulkhandlingen indeholder dublerede spillernoter")
+        # Constructors hold all per-player limits. Reconstruct them before the
+        # write so a malformed externally-built candidate cannot partly persist.
+        for item in selected_watchlist:
+            WatchlistEntry(
+                item.game_locale,
+                item.game_slug,
+                item.player_key,
+                item.entry_id,
+                item.person_id,
+                item.name,
+                item.team,
+                item.position,
+                item.reasons,
+                item.reason_note,
+                item.rules,
+            )
+        for item in selected_annotations:
+            PlayerAnnotation(
+                item.game_locale,
+                item.game_slug,
+                item.player_key,
+                item.note,
+                item.tags,
+                item.updated_at,
+            )
+        updated = replace(
+            settings,
+            watchlist=tuple(sorted(selected_watchlist, key=lambda item: item.player_key)),
+            player_annotations=tuple(
+                sorted(selected_annotations, key=lambda item: item.player_key)
+            ),
+        )
+        self.save(updated)
+        return updated
+
+    def set_computed_player_columns(
+        self,
+        settings: HubSettings,
+        columns: tuple[ComputedPlayerColumn, ...],
+    ) -> HubSettings:
+        updated = replace(settings, computed_player_columns=columns)
         self.save(updated)
         return updated
 

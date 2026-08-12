@@ -46,8 +46,10 @@ from holdet_lib import (
     build_hall_of_fame,
     build_double_elimination_bracket,
     build_history_series,
+    build_intra_round_diff,
     build_live_hall_of_fame_events,
     build_player_history,
+    build_scouting_metrics,
     compare_round_snapshots,
     compare_team_rounds,
     create_backup_bytes,
@@ -589,39 +591,12 @@ def player_compare_panel(
         format_func=lambda key: f"{keyed[key].name} · {keyed[key].team}",
         key=f"compare-players:{scope}",
     )
-    with st.container(horizontal=True):
-        if st.button(
-            "Gem valgte pÅ watchlist",
-            icon=":material/star:",
-            key=f"save-watchlist:{scope}",
-            disabled=len(selected) < 2,
-        ):
-            other = tuple(
-                item
-                for item in settings.watchlist
-                if item.game_identity != (game.locale.casefold(), game.slug)
-            )
-            chosen = tuple(
-                watchlist_entry(game, keyed[key]) for key in selected
-            )
-            store.set_watchlist(settings, (*other, *chosen))
-            st.toast("Watchlisten er gemt.")
-            st.rerun()
-        if st.button(
-            "Fjern spillets favoritter",
-            icon=":material/star_border:",
-            key=f"clear-watchlist:{scope}",
-        ):
-            remaining = tuple(
-                item
-                for item in settings.watchlist
-                if item.game_identity != (game.locale.casefold(), game.slug)
-            )
-            store.set_watchlist(settings, remaining)
-            st.rerun()
     if len(selected) < 2:
         st.info("Vælg mindst to spillere for at sammenligne dem.")
         return
+    scouting = {
+        item.player_key: item for item in build_scouting_metrics(players, game)
+    }
     dataframe(
         [
             {
@@ -631,7 +606,24 @@ def player_compare_panel(
                 "Pris": keyed[key].value,
                 "Total vækst": keyed[key].total_growth,
                 "Rundevækst": keyed[key].round_growth,
+                "Form 3": scouting[key].form_3 if key in scouting else None,
+                "Form 3-percentil": (
+                    scouting[key].metric("form_3").percentile
+                    if key in scouting
+                    else None
+                ),
+                "Prispercentil": (
+                    scouting[key].metric("value").percentile
+                    if key in scouting
+                    else None
+                ),
                 "Status": _status_labels(keyed[key]),
+                "Snapshotalder": format_relative_precise(snapshot.generated_at),
+                "Sikkerhed": data_status_label(
+                    "final"
+                    if snapshot.statistics.round_status == "complete"
+                    else "preliminary"
+                ),
             }
             for key in selected
         ],
@@ -668,11 +660,23 @@ def player_changes_panel(
     teams: SnapshotIndex,
     round_number: int,
 ) -> None:
-    diff = compare_round_snapshots(players, teams, game, round_number)
+    mode = st.segmented_control(
+        "Sammenlign",
+        ("Mellem hentninger", "Mellem runder"),
+        default="Mellem runder",
+        key=f"player-change-mode:{game.locale}:{game.slug}",
+    )
+    intra = build_intra_round_diff(players, game) if mode == "Mellem hentninger" else None
+    diff = (
+        None
+        if mode == "Mellem hentninger" and intra is None
+        else intra.diff
+        if intra is not None
+        else compare_round_snapshots(players, teams, game, round_number)
+    )
     if diff is None:
         st.info(
-            "Den valgte runde eller en tidligere cachet runde mangler, "
-            "sÅ der kan endnu ikke laves en sammenligning."
+            "Der mangler to cachede hentninger i den valgte sammenligning."
         )
         return
     if not diff.is_final:
@@ -683,6 +687,7 @@ def player_changes_panel(
     st.caption(
         f"Runde {diff.previous_round} ({_time(diff.previous_generated_at)}) · "
         f"runde {diff.current_round} ({_time(diff.current_generated_at)})"
+        + (" · samme runde" if intra is not None and intra.same_round else "")
     )
     with st.container(horizontal=True):
         st.metric("PrisÅndringer", len(diff.price_changes), border=True)

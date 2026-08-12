@@ -21,6 +21,7 @@ from .models import (
     AccountConfig,
     GameUrl,
     PlayerEntry,
+    PlayerPerformanceStat,
     RosterEntry,
     RoundStatus,
     RoundSummary,
@@ -203,6 +204,7 @@ from .analytics import (
     DataQualityReport,
     DataQualityRound,
     HistoryPoint,
+    IntraRoundDiff,
     PlayerHistoryPoint,
     PlayerSnapshotChange,
     SnapshotDiff,
@@ -210,6 +212,7 @@ from .analytics import (
     TeamSnapshotDiff,
     build_data_quality_report,
     build_history_series,
+    build_intra_round_diff,
     build_player_history,
     compare_round_snapshots,
     compare_snapshots,
@@ -336,7 +339,9 @@ from .hall_of_fame import (
 )
 from .hub_settings import (
     DEFAULT_PLAYER_TAGS,
+    DEFAULT_STATUS_WATCH_RULE,
     HUB_SETTINGS_SCHEMA_VERSION,
+    WATCHLIST_REASONS,
     HallOfFameScoreProfile,
     HubSettings,
     HubSettingsStore,
@@ -346,11 +351,44 @@ from .hub_settings import (
     PlayerAnnotation,
     SavedPlayerFilter,
     WatchlistEntry,
+    WatchlistReason,
+    WatchRule,
     build_effective_manager_settings,
     manager_identity_keys,
     player_identity,
     resolve_manager_identity,
     watchlist_entry,
+)
+from .player_formulas import (
+    MAX_FORMULA_DEPTH,
+    MAX_FORMULA_LENGTH,
+    MAX_FORMULA_NODES,
+    PLAYER_FORMULA_METRICS,
+    ComputedPlayerColumn,
+    FormulaError,
+    FormulaResult,
+    evaluate_player_formula,
+    validate_player_formula,
+)
+from .scouting import (
+    CompositeScore,
+    ObservedPlayerDelta,
+    OwnershipSignal,
+    PeerComparison,
+    PercentileMetric,
+    PerformanceRuleProfile,
+    PlayerChangeExplanation,
+    PlayerScoutingMetrics,
+    PriceAlternative,
+    ScoreComponent,
+    SimilarPlayerResult,
+    SmartList,
+    average_rank_percentiles,
+    build_peer_comparison,
+    build_player_change_explanation,
+    build_scouting_metrics,
+    build_smart_lists,
+    find_similar_players,
 )
 from .rules import (
     AUDITED_RULE_PROFILES,
@@ -367,6 +405,7 @@ from .analysis_inbox import (
     WatchlistAlert,
     build_watchlist_alerts,
     select_alert_baseline,
+    watch_form_signals,
 )
 from .decision_analysis import (
     BankAnalysis,
@@ -580,6 +619,7 @@ __all__ += [
     "game_rule_from_dict", "game_rule_to_dict", "optimize_ideal_team",
     "parse_fixture_records", "player_query_from_dict", "rule_profile_for_game",
     "select_alert_baseline",
+    "watch_form_signals",
     "simulate_transfer_scenario",
 ]
 __all__ += [
@@ -605,4 +645,18 @@ __all__ += [
     "render_round_story_html", "round_story_html_filename",
     "repair_integrity_index", "resolve_registered_artifact",
     "serialize_data_package", "table_to_csv", "player_export_data_package",
+]
+__all__ += [
+    "ComputedPlayerColumn", "FormulaError", "FormulaResult",
+    "MAX_FORMULA_DEPTH", "MAX_FORMULA_LENGTH", "MAX_FORMULA_NODES",
+    "PLAYER_FORMULA_METRICS", "evaluate_player_formula",
+    "validate_player_formula", "DEFAULT_STATUS_WATCH_RULE",
+    "WATCHLIST_REASONS", "WatchlistReason", "WatchRule", "PlayerPerformanceStat",
+    "IntraRoundDiff", "build_intra_round_diff", "CompositeScore",
+    "ObservedPlayerDelta", "OwnershipSignal", "PeerComparison",
+    "PercentileMetric", "PerformanceRuleProfile", "PlayerChangeExplanation",
+    "PlayerScoutingMetrics", "PriceAlternative", "ScoreComponent",
+    "SimilarPlayerResult", "SmartList", "average_rank_percentiles",
+    "build_peer_comparison", "build_player_change_explanation",
+    "build_scouting_metrics", "build_smart_lists", "find_similar_players",
 ]

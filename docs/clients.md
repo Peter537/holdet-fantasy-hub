@@ -18,7 +18,7 @@ Destinationerne står i denne rækkefølge:
 
 1. **Mine managerspil** – kun managerspilskort og overordnede handlinger; Rundecenter vises ikke her.
 2. **Tilføj managerspil**.
-3. **Spillerstatistik** og **Holdstatistik** – selvstændige paneler med én nødvendig managerspilvælger.
+3. **Scouting**, **Spillerstatistik** og **Holdstatistik** – globale eller selvstændige cache-only paneler med spilfilter.
 4. Aktive managerspil med deres grupper. Et spilnavn viser antal ulæste statusalarmer, når tallet er større end nul.
 5. **Arkiverede managerspil**.
 6. **Managers** – Rangliste, Medaljer og rekorder, Sammenlign, Sæsoner og Identiteter.
@@ -49,7 +49,7 @@ Rundecenter samler næste handling, handelsvindue, cache-only opdaterings-previe
 
 Analyse har query-parametret segmentvalg mellem Beslutninger, Gruppe, Idealhold og Eksperimentel. Kun det aktive segment beregnes. Standardhold gemmes pr. spil, mens et midlertidigt valg ikke ændrer standarden. Eksperimentelle fixtures og Monte Carlo kræver et gemt opt-in og viser en synlig modeladvarsel.
 
-Spillerstatistik genbruger managerspil og runde til Spillerliste, Sammenligning og watchlist samt Ændringer. **Statusalarmer** viser kun det aktuelle managerspils hændelser, antal watchlistspillere og en genvej til watchlist-editoren. Ulæste alarmer tælles både på fanen og ved managerspillets navn. Holdstatistik vælger hold og runde én gang og genbruger dem til Overblik, Holdopstilling, Transferlaboratorium, Historik, Ændringer og Eksport. En gruppe, som allerede har valgt spil eller hold, åbner de samme paneler uden overflødige vælgere.
+Spillerstatistik genbruger managerspil og runde til **Spillerliste**, **Scouting**, **Sammenligning**, **Watchlist** og **Ændringer**. `panel=compare` og `panel=watchlist` er stabile deeplinks. Den globale `/scouting`-side samler watchlist med atomiske bulkhandlinger, ikke-persistente smartlister og søgbare noter på tværs af spil. **Statusalarmer** viser kun det aktuelle managerspils hændelser, antal watchlistspillere og en genvej til watchlist-editoren. Ulæste alarmer tælles både på fanen og ved managerspillets navn. Holdstatistik vælger hold og runde én gang og genbruger dem til Overblik, Holdopstilling, Transferlaboratorium, Historik, Ændringer og Eksport. En gruppe, som allerede har valgt spil eller hold, åbner de samme paneler uden overflødige vælgere.
 
 ### Deeplinks og session state
 
@@ -60,6 +60,7 @@ Pathen vælger hoveddestinationen; query-parametrene bærer kun kontekst:
 | `section` | Managerspillets hovedfane eller aktivt Data og lager-område |
 | `analysis` | Aktivt Analyse-panel: `decisions`, `group`, `ideal` eller `experimental` |
 | `panel` | Underfane i spiller-, hold-, gruppe- eller datavisningen |
+| `view` | Global Scouting-visning: `watchlist`, `smartlists` eller `notes` |
 | `round` | Valgt runde |
 | `team` | Valgt hold |
 | `group` | Valgt gruppe |
@@ -72,7 +73,7 @@ Eksempel: `/game?locale=da&game=tour-de-france-2026&section=players`. Valg i Str
 
 ### Offline-first
 
-Navigation, faneskift, rundeskift, grafer, Analyse, spillerdetaljer, spilafgrænset alarmfiltrering, sammenligning, ændringsvisning, transfersimulation og Rundecenterets time machine læser kun kompatible snapshots. Netværk bruges kun af tydeligt navngivne og bekræftede handlinger som **Hent**, **Find hold**, **Opdater** eller **Prøv igen**. Alarmer skriver kun ved **Markér som læst**, **Afvis** eller **Ryd afviste alarmer**. Simuleringer og Rundecenterets afvigelsesfiltre lever i `st.session_state`; kun eksplicit gem af noter, filtre, standardhold eller opt-in skriver konfiguration.
+Navigation, faneskift, rundeskift, Scouting, smartlister, notesøgning, grafer, Analyse, spillerdetaljer, spilafgrænset alarmfiltrering, sammenligning, ændringsvisning, transfersimulation og Rundecenterets time machine læser kun kompatible snapshots. Netværk bruges kun af tydeligt navngivne og bekræftede handlinger som **Hent**, **Find hold**, **Opdater** eller **Prøv igen**. Alarmer skriver kun ved **Markér som læst**, **Afvis** eller **Ryd afviste alarmer**. Bulkhandlinger validerer alle spillere før ét atomisk settings-write; formeldefinitioner gemmes kun eksplicit. Simuleringer og Rundecenterets afvigelsesfiltre lever i `st.session_state`; kun eksplicit gem af noter, filtre, standardhold, watchlist, formler eller opt-in skriver konfiguration.
 
 Den kanoniske alarmroute er `/game?locale=…&game=…&section=alerts`. `/alerts?locale=…&game=…` er den skjulte, spilfiltrerede kompatibilitetsside for watchlists fra den selvstændige Spillerstatistik. Hvis spillet er gemt som managerspil, viderestilles den til den kanoniske fane.
 

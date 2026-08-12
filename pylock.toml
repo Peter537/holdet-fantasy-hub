@@ -58,14 +58,14 @@ sha256 = "62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775"
 
 [[packages]]
 name = "charset-normalizer"
-version = "3.4.9"
+version = "3.5.0"
 
 [[packages.wheels]]
-name = "charset_normalizer-3.4.9-cp314-cp314-win_amd64.whl"
-url = "https://files.pythonhosted.org/packages/49/fd/a1d26144398c67486422a72bf5812cda22cb4ccfcd95a290fb41ceb4b8e2/charset_normalizer-3.4.9-cp314-cp314-win_amd64.whl"
+name = "charset_normalizer-3.5.0-cp314-cp314-win_amd64.whl"
+url = "https://files.pythonhosted.org/packages/01/51/f94dcf34fa8eba48c1fb89b6490a5f1426e19488fe5f38aac6c648c99057/charset_normalizer-3.5.0-cp314-cp314-win_amd64.whl"
 
 [packages.wheels.hashes]
-sha256 = "16b65ea0f2465b6fb52aa22de5eca612aa964ddfec00a912e26f4656cbef890b"
+sha256 = "ec6c464cf45867f66a2273e2214d9199a8fbad5cb95ca0fd45f6a2fe1d9d2cf4"
 
 [[packages]]
 name = "click"
@@ -91,14 +91,14 @@ sha256 = "4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6"
 
 [[packages]]
 name = "greenlet"
-version = "3.5.4"
+version = "3.5.5"
 
 [[packages.wheels]]
-name = "greenlet-3.5.4-cp314-cp314-win_amd64.whl"
-url = "https://files.pythonhosted.org/packages/d0/11/f799f9637e2c6e9b0b716015e339040598b058cf7654dfc0d67468b177ed/greenlet-3.5.4-cp314-cp314-win_amd64.whl"
+name = "greenlet-3.5.5-cp314-cp314-win_amd64.whl"
+url = "https://files.pythonhosted.org/packages/2e/3d/5cc9701117ea4dc0eb7bf1f4f9b7888a6e2e5277ddfae095805ace50f2b6/greenlet-3.5.5-cp314-cp314-win_amd64.whl"
 
 [packages.wheels.hashes]
-sha256 = "305f69e6c4523d7f6979ed001cff4e5853c063e5da04880296603aa0227e544c"
+sha256 = "7dffc5c859fe6059974df1e37d7923d654a83e2ae18fdd616994270e001115e1"
 
 [[packages]]
 name = "h11"
@@ -278,14 +278,14 @@ sha256 = "fdafc9cce40277e0f7a0feabce0ee50dd2fa1800f3b38015e51296b5e814048d"
 
 [[packages]]
 name = "platformdirs"
-version = "4.11.1"
+version = "4.11.2"
 
 [[packages.wheels]]
-name = "platformdirs-4.11.1-py3-none-any.whl"
-url = "https://files.pythonhosted.org/packages/4c/85/9b31b44296cfa3bb56cddb35e6a0f6578bab0b490c0806c0245e32c6110c/platformdirs-4.11.1-py3-none-any.whl"
+name = "platformdirs-4.11.2-py3-none-any.whl"
+url = "https://files.pythonhosted.org/packages/49/e2/4e6eee633809c376c024821b91ade709cbfd040ec53939ffbcc292aa7eee/platformdirs-4.11.2-py3-none-any.whl"
 
 [packages.wheels.hashes]
-sha256 = "2efd27d363e8dd2e661639ffb398865a5e0a46442a11d266bf375a0e0c10e386"
+sha256 = "7f89089b6ea71bda7962953edcf784b2e2d9d285b40ad88be2bb75c6e9d82ab4"
 
 [[packages]]
 name = "playwright"
@@ -388,14 +388,14 @@ sha256 = "3ad15611778764d451927b2a53240c1a7a591b521ea44cebfe45849d2d2812e6"
 
 [[packages]]
 name = "pytest-playwright"
-version = "0.8.0"
+version = "0.9.0"
 
 [[packages.wheels]]
-name = "pytest_playwright-0.8.0-py3-none-any.whl"
-url = "https://files.pythonhosted.org/packages/fe/71/1c545fac6a9054b52b3771238fb2dc6e8f1d0ccec116e1c7786ec191887c/pytest_playwright-0.8.0-py3-none-any.whl"
+name = "pytest_playwright-0.9.0-py3-none-any.whl"
+url = "https://files.pythonhosted.org/packages/ab/70/72ff5c3833f0faa9b5fb23f24c0a606f070ad33bb61b802ba38dfe125e7d/pytest_playwright-0.9.0-py3-none-any.whl"
 
 [packages.wheels.hashes]
-sha256 = "856aae6efd4bc055f2ef229c647768760bcaad5cd3a5983c314ac260a974a933"
+sha256 = "9d9dc74e335c647944cecfffa706cc9e6e4bf4c25e84592c128b584d494d4471"
 
 [[packages]]
 name = "python-dateutil"

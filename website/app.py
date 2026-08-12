@@ -22,7 +22,7 @@ from website.ui import (
 
 st.set_page_config(
     page_title="Holdet Fantasy Hub",
-    page_icon="🏆",
+    page_icon=":material/trophy:",
     layout="wide",
     initial_sidebar_state="auto",
 )
@@ -32,11 +32,11 @@ pages = create_pages()
 selected_page = st.navigation(list(pages.values()), position="hidden")
 context = build_ui_context()
 set_ui_context(context)
+page_id = selected_page_id(selected_page, pages)
 
 # Register pages before redirecting so st.switch_page recognizes every target.
-redirect_legacy_query()
+redirect_legacy_query(page_id)
 
-page_id = selected_page_id(selected_page, pages)
 render_sidebar(context, page_id)
 render_shared_shell(context, page_id)
 selected_page.run()

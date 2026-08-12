@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import re
+from math import isfinite
 from typing import Callable, Iterable
 from urllib.parse import unquote, urlsplit
 
 from .errors import PayloadError, UnsupportedGameError, UrlValidationError
 from .flight import extract_flight_text
 from .http import fetch_html
-from .models import GameUrl, PlayerEntry, ScrapedGame
+from .models import GameUrl, PlayerEntry, PlayerPerformanceStat, ScrapedGame
 from .policies import KNOWN_ROUTE_VARIANTS, GamePolicy, legacy_policy
 from .sport_adapters import get_sport_adapter
 
@@ -133,6 +134,12 @@ def _row_to_entry(row: dict[str, object], source_index: int) -> PlayerEntry:
         round_growth=_optional_integer_value(
             row.get("growth"), f"entry {source_index} round growth"
         ),
+        popularity=_optional_public_number(row.get("popularity")),
+        popularity_change=_optional_public_number(row.get("popularityChange")),
+        trend=_optional_public_number(row.get("trend")),
+        index=_optional_public_number(row.get("index")),
+        stats=_optional_performance_stats(row.get("stats")),
+        total_stats=_optional_performance_stats(row.get("totalStats")),
     )
 
 
@@ -148,6 +155,60 @@ def _integer_value(value: object, label: str) -> int:
 
 def _optional_integer_value(value: object, label: str) -> int | None:
     return None if value is None else _integer_value(value, label)
+
+
+def _optional_public_number(value: object) -> float | None:
+    """Fail closed when an optional public payload field drifts."""
+
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return None
+    result = float(value)
+    return result if isfinite(result) else None
+
+
+def _optional_performance_stats(value: object) -> tuple[PlayerPerformanceStat, ...]:
+    """Keep valid numeric public stats without making core parsing brittle."""
+
+    candidates: list[tuple[object, object]] = []
+    if isinstance(value, dict):
+        candidates.extend(value.items())
+    elif isinstance(value, list):
+        for raw in value:
+            if not isinstance(raw, dict):
+                continue
+            name = next(
+                (
+                    raw.get(key)
+                    for key in ("name", "key", "title", "label", "stat")
+                    if raw.get(key) is not None
+                ),
+                None,
+            )
+            number = next(
+                (
+                    raw.get(key)
+                    for key in ("value", "score", "total")
+                    if raw.get(key) is not None
+                ),
+                None,
+            )
+            candidates.append((name, number))
+    result: list[PlayerPerformanceStat] = []
+    seen: set[str] = set()
+    for raw_name, raw_number in candidates:
+        if not isinstance(raw_name, str):
+            continue
+        number = _optional_public_number(raw_number)
+        normalized = raw_name.strip().casefold()
+        if number is None or not normalized or normalized in seen:
+            continue
+        try:
+            stat = PlayerPerformanceStat(raw_name, number)
+        except ValueError:
+            continue
+        seen.add(normalized)
+        result.append(stat)
+    return tuple(result)
 
 
 def extract_entries_and_round(html: str) -> tuple[tuple[PlayerEntry, ...], int]:

@@ -12,6 +12,7 @@ from uuid import uuid4
 from .analysis_inbox import (
     AnalysisInboxStore,
     build_watchlist_alerts,
+    watch_form_signals,
 )
 from .client import HoldetClient
 from .errors import PayloadError
@@ -1066,9 +1067,13 @@ def refresh_manager_game(
 
     def referenced_player_snapshot(
         reference: str | None,
-    ) -> tuple[PlayerStatisticsSnapshot | None, PlayerStatisticsSnapshot | None]:
+    ) -> tuple[
+        PlayerStatisticsSnapshot | None,
+        PlayerStatisticsSnapshot | None,
+        PlayerStatisticsSnapshot | None,
+    ]:
         if reference is None:
-            return None, None
+            return None, None, None
         snapshots = player_store.scan(manager_game.game).for_game(
             manager_game.game
         )
@@ -1081,7 +1086,7 @@ def refresh_manager_game(
             None,
         )
         if current_index is None:
-            return None, None
+            return None, None, None
         current_snapshot = snapshots[current_index]
         previous_snapshot = next(
             (
@@ -1092,14 +1097,23 @@ def refresh_manager_game(
             ),
             None,
         )
-        return previous_snapshot, current_snapshot
+        prior_snapshot = next(
+            (
+                item
+                for item in snapshots[current_index + 1 :]
+                if previous_snapshot is not None
+                and item.generated_at < previous_snapshot.generated_at
+            ),
+            None,
+        )
+        return prior_snapshot, previous_snapshot, current_snapshot
 
     def merge_player_alerts(reference: str | None) -> int:
         """Derive alerts for one immutable, explicitly referenced transition."""
 
         if reference is None or settings is None or inbox_store is None:
             return 0
-        previous_snapshot, current_snapshot = referenced_player_snapshot(
+        prior_snapshot, previous_snapshot, current_snapshot = referenced_player_snapshot(
             reference
         )
         if current_snapshot is None:
@@ -1111,6 +1125,17 @@ def refresh_manager_game(
             current_snapshot,
             settings.watchlist,
             now=started_at,
+            prior=prior_snapshot,
+            previous_forms=(
+                watch_form_signals(
+                    player_store.scan(manager_game.game), previous_snapshot
+                )
+                if previous_snapshot is not None
+                else None
+            ),
+            current_forms=watch_form_signals(
+                player_store.scan(manager_game.game), current_snapshot
+            ),
         )
         inbox_store.merge(alerts)
         return len(alerts)

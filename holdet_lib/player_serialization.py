@@ -4,14 +4,21 @@ from __future__ import annotations
 
 from datetime import datetime
 import json
+from math import isfinite
 from typing import Any, cast
 
 from .errors import PayloadError
-from .models import GameUrl, PlayerEntry, RoundStatus, ScrapedGame
+from .models import (
+    GameUrl,
+    PlayerEntry,
+    PlayerPerformanceStat,
+    RoundStatus,
+    ScrapedGame,
+)
 from .policies import legacy_policy
 
 
-PLAYER_STATISTICS_SCHEMA_VERSION = 3
+PLAYER_STATISTICS_SCHEMA_VERSION = 4
 
 
 def _statuses(entry: PlayerEntry) -> list[str]:
@@ -61,6 +68,18 @@ def player_statistics_to_dict(
                 "value": entry.value,
                 "total_growth": entry.total_growth,
                 "round_growth": entry.round_growth,
+                "popularity": entry.popularity,
+                "popularity_change": entry.popularity_change,
+                "trend": entry.trend,
+                "index": entry.index,
+                "stats": [
+                    {"name": item.name, "value": item.value}
+                    for item in entry.stats
+                ],
+                "total_stats": [
+                    {"name": item.name, "value": item.value}
+                    for item in entry.total_stats
+                ],
                 "statuses": _statuses(entry),
             }
             for entry in game.entries
@@ -98,6 +117,41 @@ def _integer(value: object, label: str, *, optional: bool = False) -> int | None
     return value
 
 
+def _number(value: object, label: str, *, optional: bool = False) -> float | None:
+    if value is None and optional:
+        return None
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise PayloadError(f"Spillersnapshottets {label} skal være et tal")
+    result = float(value)
+    if not isfinite(result):
+        raise PayloadError(f"Spillersnapshottets {label} skal være et endeligt tal")
+    return result
+
+
+def _performance_stats(value: object, label: str) -> tuple[PlayerPerformanceStat, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise PayloadError(f"Spillersnapshottets {label} skal være en liste")
+    result: list[PlayerPerformanceStat] = []
+    seen: set[str] = set()
+    for index, raw in enumerate(value):
+        item = _object(raw, f"{label}[{index}]")
+        name = _text(item.get("name"), f"{label}[{index}].name").strip()
+        if len(name) > 80 or any(ord(character) < 32 for character in name):
+            raise PayloadError(
+                f"Spillersnapshottets {label}[{index}].name er ugyldigt"
+            )
+        normalized = name.casefold()
+        if normalized in seen:
+            raise PayloadError(f"Spillersnapshottets {label} har dublerede statnavne")
+        seen.add(normalized)
+        number = _number(item.get("value"), f"{label}[{index}].value")
+        assert number is not None
+        result.append(PlayerPerformanceStat(name, number))
+    return tuple(result)
+
+
 def _round_status(value: object) -> RoundStatus:
     if value not in {"complete", "in_progress", "unknown"}:
         raise PayloadError("Spillersnapshottets game.round_status er ugyldig")
@@ -122,7 +176,7 @@ def player_statistics_from_dict(payload: object) -> ScrapedGame:
 
     root = _object(payload, "root")
     schema_version = root.get("schema_version")
-    if schema_version not in {1, 2, PLAYER_STATISTICS_SCHEMA_VERSION}:
+    if schema_version not in {1, 2, 3, PLAYER_STATISTICS_SCHEMA_VERSION}:
         raise PayloadError(
             "Ikke-understøttet skema for spillersnapshot: "
             f"{schema_version!r}"
@@ -180,6 +234,57 @@ def player_statistics_from_dict(payload: object) -> ScrapedGame:
                     item.get("round_growth"),
                     f"entries[{index}].round_growth",
                     optional=True,
+                ),
+                popularity=(
+                    _number(
+                        item.get("popularity"),
+                        f"entries[{index}].popularity",
+                        optional=True,
+                    )
+                    if schema_version >= 4
+                    else None
+                ),
+                popularity_change=(
+                    _number(
+                        item.get("popularity_change"),
+                        f"entries[{index}].popularity_change",
+                        optional=True,
+                    )
+                    if schema_version >= 4
+                    else None
+                ),
+                trend=(
+                    _number(
+                        item.get("trend"),
+                        f"entries[{index}].trend",
+                        optional=True,
+                    )
+                    if schema_version >= 4
+                    else None
+                ),
+                index=(
+                    _number(
+                        item.get("index"),
+                        f"entries[{index}].index",
+                        optional=True,
+                    )
+                    if schema_version >= 4
+                    else None
+                ),
+                stats=(
+                    _performance_stats(
+                        item.get("stats", []), f"entries[{index}].stats"
+                    )
+                    if schema_version >= 4
+                    else ()
+                ),
+                total_stats=(
+                    _performance_stats(
+                        item.get("total_stats", []),
+                        f"entries[{index}].total_stats",
+                    )
+                    if schema_version >= 4
+                    else ()
                 ),
             )
         )

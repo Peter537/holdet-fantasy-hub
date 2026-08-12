@@ -6,7 +6,12 @@ from datetime import datetime
 import pandas as pd
 import streamlit as st
 
-from website.presentation import data_status_label, dataframe
+from website.scouting_page import (
+    render_player_scouting_detail,
+    render_player_watchlist_editor,
+)
+
+from website.presentation import data_status_label, dataframe, format_relative_precise
 
 from website.navigation import PageId, page_link, relative_url
 
@@ -30,12 +35,12 @@ from holdet_lib import (
     build_group_comparison,
     build_group_exposure,
     build_player_decision_analysis,
+    build_player_change_explanation,
     build_team_decision_ledger,
     optimize_ideal_team,
     player_identity,
     rule_profile_for_game,
     simulate_transfer_scenario,
-    watchlist_entry,
 )
 
 
@@ -872,27 +877,52 @@ def player_detail_view(
         f"{latest_entry.team} · {latest_entry.position} · "
         f"seneste lokale runde {latest.statistics.round_number}"
     )
-    metric_count = 5 if latest.statistics.unit != "points" else 4
-    metrics = st.columns(metric_count)
+    with st.container(horizontal=True):
+        st.metric(
+            "Status",
+            "Aktiv" if latest_entry.is_active and not latest_entry.is_disabled else "Ikke aktiv",
+            border=True,
+        )
+        st.metric("Snapshotalder", format_relative_precise(latest.generated_at), border=True)
+        st.metric(
+            "Sikkerhed",
+            data_status_label(
+                "final" if latest.statistics.round_status == "complete" else "preliminary"
+            ),
+            border=True,
+        )
     value_label = (
         "Aktuel pris" if latest.statistics.unit != "points" else "Aktuelle point"
     )
-    metrics[0].metric(value_label, _format(analysis.latest_value))
-    offset = 1
     if latest.statistics.unit != "points":
-        metrics[1].metric(
+        primary_metrics = st.columns(3)
+        primary_metrics[0].metric(value_label, _format(analysis.latest_value))
+        primary_metrics[1].metric(
             "Vækst pr. aktuel mio.", _format(analysis.growth_per_million)
         )
-        offset = 2
-    metrics[offset].metric("Form 3", _format(analysis.form_3))
-    metrics[offset + 1].metric("Form 5", _format(analysis.form_5))
-    metrics[offset + 2].metric(
-        "Stabilitet",
-        "—"
-        if analysis.stability_score is None
-        else f"{analysis.stability_score}/100",
-        analysis.stability_label,
-    )
+        primary_metrics[2].metric(
+            "Stabilitet",
+            "—"
+            if analysis.stability_score is None
+            else f"{analysis.stability_score}/100",
+            analysis.stability_label,
+        )
+        form_metrics = st.columns(2)
+        form_metrics[0].metric("Form 3", _format(analysis.form_3))
+        form_metrics[1].metric("Form 5", _format(analysis.form_5))
+    else:
+        primary_metrics = st.columns(2)
+        primary_metrics[0].metric(value_label, _format(analysis.latest_value))
+        primary_metrics[1].metric(
+            "Stabilitet",
+            "—"
+            if analysis.stability_score is None
+            else f"{analysis.stability_score}/100",
+            analysis.stability_label,
+        )
+        form_metrics = st.columns(2)
+        form_metrics[0].metric("Form 3", _format(analysis.form_3))
+        form_metrics[1].metric("Form 5", _format(analysis.form_5))
     _certainty(analysis.provenance)
     st.subheader("Runde-for-runde udvikling")
     if analysis.curve:
@@ -935,9 +965,13 @@ def player_detail_view(
             )
     else:
         st.info("Der er ingen numeriske værdier at tegne endnu.")
+    st.subheader("Scouting")
+    render_player_scouting_detail(
+        manager_game.game, player_key, index, paths
+    )
     st.subheader("Statushistorik")
-    by_round = {}
-    for snapshot in index.for_game(manager_game.game):
+    status_rows = []
+    for snapshot in sorted(index.for_game(manager_game.game), key=lambda item: item.generated_at):
         entry = next(
             (
                 item
@@ -946,10 +980,8 @@ def player_detail_view(
             ),
             None,
         )
-        if entry is not None:
-            by_round[snapshot.statistics.round_number] = (snapshot, entry)
-    status_rows = []
-    for round_number, (snapshot, entry) in sorted(by_round.items()):
+        if entry is None:
+            continue
         states = []
         if not entry.is_active:
             states.append("Inaktiv")
@@ -961,7 +993,8 @@ def player_detail_view(
             states.append("Karantæne")
         status_rows.append(
             {
-                "Runde": round_number,
+                "Runde": snapshot.statistics.round_number,
+                "Hentet": snapshot.generated_at,
                 "Spillerstatus": " · ".join(states) if states else "Aktiv",
                 "Datastatus": (
                     data_status_label("final")
@@ -982,6 +1015,34 @@ def player_detail_view(
         )
     else:
         st.info("Der er ingen gemte statusobservationer for spilleren.")
+    snapshots = index.for_game(manager_game.game)
+    st.subheader("Hvorfor ændrede denne spiller sig?")
+    if len(snapshots) >= 2:
+        explanation = build_player_change_explanation(
+            snapshots[1], snapshots[0], player_key
+        )
+        if explanation is not None:
+            st.caption(explanation.reconciliation_reason)
+            dataframe(
+                [
+                    {
+                        "Felt": item.field,
+                        "Før": item.previous,
+                        "Nu": item.current,
+                        "Delta": item.delta,
+                        "Evidens": (
+                            "Kausalt/additivt"
+                            if item.evidence == "causal"
+                            else "Observeret samtidigt"
+                        ),
+                    }
+                    for item in explanation.observations
+                ],
+                hide_index=True,
+                key=f"player-change-explanation:{player_key}",
+            )
+    else:
+        st.info("Der kræves mindst to lokale hentninger for en ændringsforklaring.")
     st.subheader("Egne noter og tags")
     settings_store = HubSettingsStore(paths.hub_settings_file)
     settings = settings_store.load()
@@ -1020,17 +1081,13 @@ def player_detail_view(
             st.error(str(exc))
         else:
             st.success("Noten og tags er gemt.")
-    watched = any(item.player_key == player_key for item in settings.watchlist)
-    if st.button(
-        "Fjern fra watchlist" if watched else "Føj til watchlist",
-        disabled=read_only,
-        key=f"detail-watch-{player_key}",
-    ):
-        values = tuple(item for item in settings.watchlist if item.player_key != player_key)
-        if not watched:
-            values = (*values, watchlist_entry(manager_game.game, latest_entry))
-        settings_store.set_watchlist(settings, values)
-        st.rerun()
+    st.subheader("Watchlist")
+    render_player_watchlist_editor(
+        manager_game.game,
+        latest_entry,
+        paths,
+        read_only=read_only,
+    )
     page_link(
         PageId.GAME,
         "Tilbage til spillerstatistik",
@@ -1082,7 +1139,7 @@ def alerts_view(
             icon=":material/star:",
             locale=game.locale,
             game=game.slug,
-            panel="compare",
+            panel="watchlist",
             **({} if standalone else {"section": "players"}),
         )
     if settings_error is not None:
@@ -1131,6 +1188,15 @@ def alerts_view(
         "suspended": "Karantæne",
         "removed": "Fjernet fra spillerlisten",
         "sold": "Solgt",
+        "activated": "Aktiveret",
+        "recovered": "Bedret status",
+        "status_change": "Statusændring",
+        "value_drop": "Prisfald",
+        "value_rise": "Prisstigning",
+        "form3_above": "Form 3 over",
+        "form3_below": "Form 3 under",
+        "form5_above": "Form 5 over",
+        "form5_below": "Form 5 under",
     }
     kinds = filters[1].multiselect(
         "Hændelsestype",

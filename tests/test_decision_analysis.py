@@ -548,7 +548,7 @@ def test_alert_baseline_prefers_same_or_latest_earlier_round_over_late_backfill(
     assert holdet.select_alert_baseline(index, GAME, 0) is None
 
 
-def test_settings_schema_two_loads_without_rewrite_and_schema_three_roundtrips(
+def test_settings_schema_two_loads_without_rewrite_and_schema_four_roundtrips(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "hub.json"
@@ -592,7 +592,7 @@ def test_settings_schema_two_loads_without_rewrite_and_schema_three_roundtrips(
         ),
     )
     assert store.load() == settings
-    assert json.loads(path.read_text(encoding="utf-8"))["schema_version"] == 3
+    assert json.loads(path.read_text(encoding="utf-8"))["schema_version"] == 4
 
     with pytest.raises(ValueError, match="12 tags"):
         holdet.PlayerAnnotation(

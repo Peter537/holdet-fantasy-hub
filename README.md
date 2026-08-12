@@ -11,7 +11,8 @@ Holdet Fantasy Hub er et uofficielt, lokalt Windows-værktøj til offentlige fan
 ## Funktioner
 
 - Rundecenter med næste bedste handling, handelsvindue, cache-preview, målrettet refresh/retry, rundeafvigelser, sammenligning, time machine, gruppematrix og forklarlig Rundens historie i delbar HTML.
-- Spiller- og holdstatistik, watchlist, noter/tags, gemte filtre, spillerdetaljer, sammenligning, historik, ændringer, transferlaboratorium og eksport i TXT, JSON, Markdown, CSV, XLSX og valgfri Parquet.
+- Global cache-only Scouting med regelstyret watchlist, begrundelser, atomiske bulkhandlinger, smartlister, notesøgning, sikre beregnede kolonner, positionspercentiler, prisalternativer, lignende spillere og tilgængelige scatterplots.
+- Spiller- og holdstatistik med spillerdetaljer, sammenligning, historik, intra-runde-ændringer, transferlaboratorium og eksport i TXT, JSON, Markdown, CSV, XLSX og valgfri Parquet.
 - Cachebaseret analyse- og beslutningscenter med form, stabilitet, kaptajn, bank, transferregnskab, gruppeswing, eksponering og regelverificeret idealhold.
 - Opt-in-modeller for fixturecache og Monte Carlo, tydeligt mærket som eksperimentelle og aldrig som facit.
 - Managerprofiler på tværs af spil og hold, Elo-rating, medaljer, rekorder, streaks og H2H.
@@ -48,7 +49,7 @@ py -3.14 -m streamlit run .\website\server.py
 
 ## Navigation
 
-Streamlit ejer routingen via `st.navigation`/`st.Page`, mens den dynamiske sidebar fortsat viser **Mine managerspil**, statistikvisninger, aktive og arkiverede managerspil, **Managers**, **Kalender** og **Data og lager**. Ulæste statusalarmer vises ved det relevante managerspil og i managerspillets egen **Statusalarmer**-fane. Gamle `?view=…`-links viderestilles; eksempelvis går `?view=hall-of-fame` til `/managers`.
+Streamlit ejer routingen via `st.navigation`/`st.Page`, mens den dynamiske sidebar fortsat viser **Mine managerspil**, **Scouting**, statistikvisninger, aktive og arkiverede managerspil, **Managers**, **Kalender** og **Data og lager**. `/scouting?game=…&view=watchlist|smartlists|notes` er den globale cache-only indgang; kontekstuelle spillerfaner bevarer `panel=compare`, mens watchlist bruger `panel=watchlist`. Ulæste statusalarmer vises ved det relevante managerspil og i managerspillets egen **Statusalarmer**-fane. Gamle `?view=…`-links viderestilles; eksempelvis går `?view=hall-of-fame` til `/managers`.
 
 Managers har fanerne Rangliste, Medaljer og rekorder, Sammenlign, Sæsoner og Identiteter. Kalenderen kan filtreres på managerspil og gruppe eller turnering. Gruppe-, hold- og managerkort viser officielle links, når de findes i cache eller konfiguration.
 
@@ -83,10 +84,10 @@ Repositoryet må ikke indeholde virkelige profil-ID'er, fantasy-team-ID'er eller
 
 ```powershell
 py -3.14 -m pytest tests -q
+py -3.14 -m pytest tests/ui -q --run-ui --browser chromium
+py -3.14 -m pytest tests/parser_canary -q --run-parser-canary
+py -3.14 -m pip check
 py -3.14 .\scripts\refresh_dependency_lock.py --check
-```
-
-```powershell
 git diff --check
 ```
 

@@ -105,6 +105,10 @@ def _seed_data(root: Path) -> None:
             person_id=60_000 + index,
             total_growth=500_000 - index * 8_000,
             round_growth=75_000 - index * 2_000,
+            popularity=float((index * 3) % 45),
+            popularity_change=float((index % 7) - 3),
+            trend=float((index % 9) - 4),
+            index=float(40 + index),
         )
         for index in range(60)
     )
@@ -119,9 +123,48 @@ def _seed_data(root: Path) -> None:
             for entry in entries
         )
         player_store.save(
-            replace(base, round_number=round_number, entries=round_entries),
+            replace(
+                base,
+                round_number=round_number,
+                entries=round_entries,
+                round_status="complete",
+            ),
             now=FIXED_TIME.replace(hour=9 + round_number),
         )
+    # Preserve a second immutable fetch in the same round for intra-round UI.
+    player_store.save(
+        replace(
+            base,
+            round_number=3,
+            entries=tuple(
+                replace(entry, value=entry.value + 25_000)
+                for entry in entries
+            ),
+            round_status="complete",
+        ),
+        now=FIXED_TIME.replace(hour=12, minute=30),
+    )
+    watched = holdet.watchlist_entry(game, entries[0])
+    watched = replace(
+        watched,
+        reasons=("kaptajnkandidat",),
+        reason_note="Følg næste prisbevægelse",
+    )
+    holdet.HubSettingsStore(paths.hub_settings_file).save(
+        holdet.HubSettings(
+            watchlist=(watched,),
+            player_annotations=(
+                holdet.PlayerAnnotation(
+                    game.locale,
+                    game.slug,
+                    watched.player_key,
+                    "Stærk kandidat til næste runde",
+                    ("overvej", "kaptajn"),
+                    FIXED_TIME,
+                ),
+            ),
+        )
+    )
 
 
 @pytest.fixture(scope="session")
