@@ -515,6 +515,22 @@ class GameInfoTests(unittest.TestCase):
         self.assertIs(client.fetch_game_info(game), info)
         self.assertEqual(len(calls), 2)
 
+    def test_nfl_ruleset_policy_preserves_route_format_and_money_unit(self) -> None:
+        game = scraper.normalize_game_url(
+            "https://www.holdet.dk/da/fantasy/football-fantasy-2026"
+        )
+        payload = cartridge_payload(salary_cap=60_000_000)
+        payload["_embedded"]["rulesets"]["8"]["properties"] = {
+            "Format": "nfl"
+        }
+
+        context = scraper.parse_game_context(game, "nfl", payload)
+
+        self.assertEqual(
+            (context.variant, context.format, context.unit, context.salary_cap),
+            ("nfl", "nfl", "money", 60_000_000),
+        )
+
     def test_ruleset_policy_detects_units_aliases_and_conflicts(self) -> None:
         game = scraper.normalize_game_url(
             "https://www.holdet.dk/da/fantasy/tour-manager"

@@ -39,7 +39,7 @@ Den markerede canary-suite er opt-in og er den eneste test, som kontakter offent
 py -3.14 -m pytest tests/parser_canary -q --run-parser-canary
 ```
 
-Uden flaget skippes canary-testene, og standardsuiten er helt offline. Canarien kalder `HoldetClient.fetch_players` for de fem aktuelle fodbold-, cykel-, Formel 1- og golfspil. Den validerer format, enhed, positiv runde, ikke-tomme entries, obligatoriske spillerfelter og kontrakten for `popularity`, `popularityChange`, `trend`, `index`, `stats` og `totalStats`. Rå `stats`/`totalStats` skal findes med en kendt mappe-/listeform; en legitim tom mappe er tilladt, mens ikke-tomme rå værdier skal overleve parseren. Drift i de valgfrie felter rapporteres som kildedrift; produktionsparseren forbliver fail-closed og kompatibel med de obligatoriske felter.
+Uden flaget skippes canary-testene, og standardsuiten er helt offline. Canarien kalder `HoldetClient.fetch_players` for de seks aktuelle spil: ét fodboldspil, to cykelspil, ét Formel 1-spil, ét golfspil og Football Fantasy 2026 (`nfl`). Den validerer format, enhed, positiv runde, ikke-tomme entries, obligatoriske spillerfelter og kontrakten for `popularity`, `popularityChange`, `trend`, `index`, `stats` og `totalStats`. I preseason-payloads skal hvert af de fire numeriske scoutingfelter mappe `null` til `None` og et endeligt tal til den tilsvarende numeriske værdi. Rå `stats`/`totalStats` skal findes med en kendt mappe-/listeform; en legitim tom mappe er tilladt, mens ikke-tomme rå værdier skal overleve parseren. Drift i de valgfrie felter rapporteres som kildedrift; produktionsparseren forbliver fail-closed og kompatibel med de obligatoriske felter.
 
 ## Testområder
 

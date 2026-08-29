@@ -214,11 +214,20 @@ def test_text_import_is_archived_without_domain_parsing(tmp_path: Path) -> None:
 
 def test_sport_adapter_registry_is_closed_and_rules_fail_closed() -> None:
     adapters = holdet.registered_sport_adapters()
-    assert {adapter.key for adapter in adapters} == {"soccer", "cycling", "formula1", "golf"}
+    assert {adapter.key for adapter in adapters} == {
+        "soccer",
+        "cycling",
+        "formula1",
+        "golf",
+        "nfl",
+    }
     assert all(adapter.capabilities.rules_certainty == "unverified" for adapter in adapters)
     assert holdet.get_sport_adapter("cycling_world_tour").key == "cycling"
     assert holdet.get_sport_adapter("soccer").normalize_position("Maalmand") == "goalkeeper"
+    assert holdet.get_sport_adapter("nfl").default_unit == "money"
     assert holdet.transfer_rule_profile(game_format="soccer").known is False
+    assert holdet.transfer_rule_profile(variant="nfl") == holdet.UNKNOWN_RULES
+    assert holdet.transfer_rule_profile(game_format="nfl") == holdet.UNKNOWN_RULES
     assert holdet.transfer_rule_profile(game_slug="super-manager-fall-2026") == holdet.UNKNOWN_RULES
     with pytest.raises(holdet.UnsupportedGameError):
         holdet.get_sport_adapter("curling")

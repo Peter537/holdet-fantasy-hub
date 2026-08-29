@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from math import isfinite
 
 import pytest
 
@@ -21,6 +22,7 @@ PUBLIC_GAMES = (
     ),
     ("https://www.holdet.dk/da/fantasy/motor-manager-2026", "formula1", "money"),
     ("https://www.holdet.dk/da/fantasy/golf-manager-2026", "golf", "points"),
+    ("https://www.holdet.dk/da/fantasy/football-fantasy-2026", "nfl", "money"),
 )
 
 
@@ -80,6 +82,9 @@ def test_current_public_player_contract(
         assert entry.position.strip()
     assert statistics_pages
     raw_rows = _public_rows(statistics_pages[-1])
+    assert len(raw_rows) == len(result.entries), (
+        "Den offentlige statisticssides rækker matcher ikke parserresultatet"
+    )
     raw_stats = {
         field: all(
             field in item and isinstance(item[field], (dict, list))
@@ -87,24 +92,46 @@ def test_current_public_player_contract(
         )
         for field in ("stats", "totalStats")
     }
-    optional_contract = {
-        "popularity": any(item.popularity is not None for item in result.entries),
-        "popularityChange": any(
-            item.popularity_change is not None for item in result.entries
-        ),
-        "trend": any(item.trend is not None for item in result.entries),
-        "index": any(item.index is not None for item in result.entries),
-        "stats": raw_stats["stats"]
-        and (
-            not any(item["stats"] not in ({}, []) for item in raw_rows)
-            or any(item.stats for item in result.entries)
-        ),
-        "totalStats": raw_stats["totalStats"]
-        and (
-            not any(item["totalStats"] not in ({}, []) for item in raw_rows)
-            or any(item.total_stats for item in result.entries)
-        ),
-    }
+    optional_contract: dict[str, bool] = {}
+    for field, attribute in (
+        ("popularity", "popularity"),
+        ("popularityChange", "popularity_change"),
+        ("trend", "trend"),
+        ("index", "index"),
+    ):
+        found = False
+        aligned_values = True
+        for raw, parsed in zip(raw_rows, result.entries, strict=True):
+            if field not in raw:
+                continue
+            found = True
+            raw_value = raw[field]
+            parsed_value = getattr(parsed, attribute)
+            if raw_value is None:
+                aligned_values = aligned_values and parsed_value is None
+            elif (
+                isinstance(raw_value, (int, float))
+                and not isinstance(raw_value, bool)
+                and isfinite(raw_value)
+            ):
+                aligned_values = aligned_values and parsed_value == float(raw_value)
+            else:
+                aligned_values = aligned_values and parsed_value is None
+        optional_contract[field] = found and aligned_values
+    optional_contract.update(
+        {
+            "stats": raw_stats["stats"]
+            and (
+                not any(item["stats"] not in ({}, []) for item in raw_rows)
+                or any(item.stats for item in result.entries)
+            ),
+            "totalStats": raw_stats["totalStats"]
+            and (
+                not any(item["totalStats"] not in ({}, []) for item in raw_rows)
+                or any(item.total_stats for item in result.entries)
+            ),
+        }
+    )
     assert all(optional_contract.values()), (
         "Offentlig spillerpayload har ændret de research-gated scoutingfelter: "
         f"{optional_contract}. Produktionsparseren skal fortsat være fail-closed."

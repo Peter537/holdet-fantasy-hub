@@ -62,6 +62,6 @@ Arkivering skriver de oprindelige relative stier og checksums til en midlertidig
 
 ## Sportsadaptere
 
-Det interne registry har indbyggede `SportAdapter`-objekter for fodbold, cykling, Formel 1 og golf. Adaptere ejer rute-/formatmapping, labels, positionsnormalisering, præsentation og sportskapabiliteter. `GameRuleProfile` er fortsat den sæsonspecifikke regelautoritet. Adapterdefaults er altid `unverified`, og format- eller slugmatches kan ikke give en grøn regelgodkendelse.
+Det interne registry har indbyggede `SportAdapter`-objekter for fodbold, amerikansk fodbold (`nfl`), cykling, Formel 1 og golf. Adaptere ejer rute-/formatmapping, labels, positionsnormalisering, præsentation og sportskapabiliteter. `GameRuleProfile` er fortsat den sæsonspecifikke regelautoritet. Adapterdefaults er altid `unverified`, og format- eller slugmatches kan ikke give en grøn regelgodkendelse.
 
 Der indlæses ingen tredjeparts-entry-points eller dynamisk Python-kode. De eksisterende top-level-konstanter og hjælpefunktioner er kompatibilitetsfacader.

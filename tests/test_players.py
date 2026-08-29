@@ -95,6 +95,14 @@ class PayloadTests(unittest.TestCase):
             "cycling",
         )
 
+    def test_accepts_nfl_variant_and_format_mapping(self) -> None:
+        payload = (
+            '<script>self.__next_f.push([1,'
+            '"{\\"variant\\":\\"nfl\\"}"]);</script>'
+        )
+        self.assertEqual(scraper.discover_variant(payload), "nfl")
+        self.assertEqual(scraper.format_for_variant("nfl"), "nfl")
+
     def test_rejects_missing_or_empty_player_rows(self) -> None:
         missing = '<script>self.__next_f.push([1,"{\\"variant\\":\\"soccer\\"}"]);</script>'
         empty = '<script>self.__next_f.push([1,"{\\"rows\\":[],\\"round\\":1}"]);</script>'
@@ -140,6 +148,19 @@ class FormattingTests(unittest.TestCase):
 
     def test_formats_negative_integer_with_danish_grouping(self) -> None:
         self.assertEqual(scraper.format_integer(-1234567), "-1.234.567")
+
+    def test_formats_nfl_entry_with_money_policy(self) -> None:
+        entry = scraper.PlayerEntry(
+            0,
+            "Alex Nordlys",
+            "Test City Comets",
+            "Quarterback",
+            5_500_000,
+        )
+        self.assertEqual(
+            scraper.format_entry(entry, "nfl"),
+            "Alex Nordlys (Test City Comets, Quarterback): 5.500.000",
+        )
 
 
 class SortingTests(unittest.TestCase):

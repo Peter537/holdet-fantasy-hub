@@ -160,7 +160,9 @@ def transfer_rule_profile(
         "cycling": CYCLING_RULES,
         "formula1": MOTOR_RULES,
         "golf": GOLF_RULES,
-    }[adapter.key]
+    }.get(adapter.key)
+    if profile is None:
+        return UNKNOWN_RULES
     return replace(profile, known=False)
 
 

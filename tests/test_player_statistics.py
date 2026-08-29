@@ -47,6 +47,27 @@ def statistics_html(*, round_number: int = 7, include_growth: bool = True) -> st
     return flight_html({"rows": [row], "round": round_number})
 
 
+def nfl_statistics_html(*, round_number: int = 0) -> str:
+    return flight_html(
+        {
+            "rows": [
+                {
+                    "id": 920_001,
+                    "person": {"id": 910_001, "fullName": "Alex Nordlys"},
+                    "team": {"name": "Test City Comets"},
+                    "position": {"title": "Quarterback"},
+                    "score": 5_500_000,
+                    "isActive": True,
+                    "isDisabled": False,
+                    "isInjured": False,
+                    "hasSuspension": False,
+                }
+            ],
+            "round": round_number,
+        }
+    )
+
+
 def sample_statistics(round_number: int = 7, *, variant: str = "cycling") -> holdet.ScrapedGame:
     game = holdet.GameUrl(
         "https://www.holdet.dk/da/fantasy/tour-de-france-2026",
@@ -69,6 +90,25 @@ def sample_statistics(round_number: int = 7, *, variant: str = "cycling") -> hol
         -125_000,
     )
     return holdet.ScrapedGame(game, variant, round_number, (entry,))
+
+
+def sample_nfl_statistics(round_number: int = 0) -> holdet.ScrapedGame:
+    game = holdet.GameUrl(
+        "https://www.holdet.dk/da/fantasy/football-fantasy-2026",
+        "da",
+        "football-fantasy-2026",
+    )
+    entries, actual_round = holdet.extract_entries_and_round(
+        nfl_statistics_html(round_number=round_number)
+    )
+    return holdet.ScrapedGame(
+        game,
+        "nfl",
+        actual_round,
+        entries,
+        format="nfl",
+        unit="money",
+    )
 
 
 class PlayerPayloadTests(unittest.TestCase):
@@ -133,6 +173,66 @@ class PlayerPayloadTests(unittest.TestCase):
         self.assertEqual(requested[-1], game.statistics_url("cycling", 6))
         self.assertEqual(result.round_status, "unknown")
 
+    def test_nfl_client_resolves_root_cartridge_and_statistics_route(self) -> None:
+        game = holdet.GameUrl(
+            "https://www.holdet.dk/da/fantasy/football-fantasy-2026",
+            "da",
+            "football-fantasy-2026",
+        )
+        text_requests: list[str] = []
+        json_requests: list[str] = []
+
+        def fetch_text(url: str) -> str:
+            text_requests.append(url)
+            if url == game.nexus_root_url:
+                return flight_html({"variant": "nfl"})
+            if url == game.statistics_url("nfl"):
+                return nfl_statistics_html()
+            raise AssertionError(url)
+
+        cartridge = {
+            "gameId": 17,
+            "_embedded": {
+                "games": {"17": {"id": 17, "rulesetId": 18}},
+                "rulesets": {
+                    "18": {
+                        "id": 18,
+                        "salaryCap": 60_000_000,
+                        "properties": {"Format": "nfl"},
+                    }
+                },
+            },
+        }
+
+        def fetch_json(url: str) -> object:
+            json_requests.append(url)
+            return cartridge
+
+        result = holdet.HoldetClient(
+            text_fetcher=fetch_text,
+            json_fetcher=fetch_json,
+        ).fetch_players(game)
+
+        self.assertEqual(
+            text_requests,
+            [game.nexus_root_url, game.statistics_url("nfl")],
+        )
+        self.assertEqual(
+            json_requests,
+            [
+                "https://nexus-app-fantasy.holdet.dk/api/cartridges/"
+                "football-fantasy-2026"
+            ],
+        )
+        self.assertEqual(
+            (result.variant, result.format, result.unit, result.round_number),
+            ("nfl", "nfl", "money", 0),
+        )
+        self.assertEqual(
+            (result.entries[0].name, result.entries[0].position),
+            ("Alex Nordlys", "Quarterback"),
+        )
+
 
 class PlayerSerializationTests(unittest.TestCase):
     def test_unicode_round_trip_and_unknown_schema(self) -> None:
@@ -155,6 +255,25 @@ class PlayerSerializationTests(unittest.TestCase):
         self.assertEqual(payload["entries"][0]["name"], "Søren Pogačar")
         with self.assertRaises(holdet.PayloadError):
             holdet.player_statistics_from_dict({"schema_version": 5})
+
+    def test_nfl_schema_four_round_trip_preserves_money_policy(self) -> None:
+        original = sample_nfl_statistics()
+        payload = json.loads(
+            holdet.player_statistics_to_json(
+                original,
+                generated_at=datetime(2026, 8, 29, 12, 0),
+            )
+        )
+
+        self.assertEqual(
+            (
+                payload["game"]["variant"],
+                payload["game"]["format"],
+                payload["game"]["unit"],
+            ),
+            ("nfl", "nfl", "money"),
+        )
+        self.assertEqual(holdet.player_statistics_from_dict(payload), original)
 
     def test_schema_one_cycling_requires_refetch_but_other_formats_load(self) -> None:
         generated = datetime(2026, 7, 28, 12, 34, 56)
