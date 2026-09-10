@@ -142,16 +142,18 @@ class PlayerPayloadTests(unittest.TestCase):
         game = sample_statistics().game
         self.assertEqual(
             game.statistics_url("cycling", 6),
-            "https://nexus-app-fantasy.holdet.dk/da/"
+            "https://www.holdet.dk/da/season/"
             "tour-de-france-2026/cycling/statistics?round=6",
         )
         requested: list[str] = []
 
         def fetch(url: str) -> str:
             requested.append(url)
-            if url == game.nexus_root_url:
+            if url == "https://www.holdet.dk/da/season/tour-de-france-2026":
                 return flight_html({"variant": "cycling"})
-            return statistics_html(round_number=6)
+            if url == "https://www.holdet.dk/da/season/tour-de-france-2026/cycling/statistics?round=6":
+                return statistics_html(round_number=6)
+            raise AssertionError(url)
 
         cartridge = {
             "gameId": 7,
@@ -184,9 +186,9 @@ class PlayerPayloadTests(unittest.TestCase):
 
         def fetch_text(url: str) -> str:
             text_requests.append(url)
-            if url == game.nexus_root_url:
+            if url == "https://www.holdet.dk/da/season/football-fantasy-2026":
                 return flight_html({"variant": "nfl"})
-            if url == game.statistics_url("nfl"):
+            if url == "https://www.holdet.dk/da/season/football-fantasy-2026/nfl/statistics":
                 return nfl_statistics_html()
             raise AssertionError(url)
 
@@ -215,12 +217,15 @@ class PlayerPayloadTests(unittest.TestCase):
 
         self.assertEqual(
             text_requests,
-            [game.nexus_root_url, game.statistics_url("nfl")],
+            [
+                "https://www.holdet.dk/da/season/football-fantasy-2026",
+                "https://www.holdet.dk/da/season/football-fantasy-2026/nfl/statistics",
+            ],
         )
         self.assertEqual(
             json_requests,
             [
-                "https://nexus-app-fantasy.holdet.dk/api/cartridges/"
+                "https://www.holdet.dk/api/season/cartridges/"
                 "football-fantasy-2026"
             ],
         )

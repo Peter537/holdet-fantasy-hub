@@ -45,8 +45,25 @@ class UrlNormalizationTests(unittest.TestCase):
         self.assertEqual(nested.slug, root.slug)
         self.assertEqual(
             root.nexus_root_url,
-            "https://nexus-app-fantasy.holdet.dk/da/super-manager-fall-2026",
+            "https://www.holdet.dk/da/season/super-manager-fall-2026",
         )
+
+    def test_season_routes_preserve_locale_and_legacy_alias(self) -> None:
+        game = scraper.normalize_game_url(
+            "https://holdet.dk/en-GB/fantasy/premier-league-fantasy-fall-2026/"
+            "soccer/statistics?round=3#players"
+        )
+        root = "https://www.holdet.dk/en-GB/season/premier-league-fantasy-fall-2026"
+        self.assertEqual(game.season_root_url, root)
+        self.assertEqual(game.nexus_root_url, root)
+        self.assertEqual(game.statistics_url("soccer"), f"{root}/soccer/statistics")
+        self.assertEqual(game.statistics_url("soccer", 0), f"{root}/soccer/statistics?round=0")
+        self.assertEqual(game.statistics_url("soccer", 3), f"{root}/soccer/statistics?round=3")
+        self.assertEqual(game.team_url("soccer", 123), f"{root}/soccer/fantasyteams/123")
+        for invalid_round in (-1, True):
+            with self.subTest(round_number=invalid_round):
+                with self.assertRaises(ValueError):
+                    game.statistics_url("soccer", invalid_round)
 
     def test_rejects_invalid_input_urls(self) -> None:
         invalid = (

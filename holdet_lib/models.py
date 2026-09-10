@@ -9,7 +9,8 @@ from typing import Literal
 from urllib.parse import quote
 
 
-NEXUS_HOST = "nexus-app-fantasy.holdet.dk"
+HOLDET_ORIGIN = "https://www.holdet.dk"
+SEASON_API_ROOT = f"{HOLDET_ORIGIN}/api/season"
 RoundStatus = Literal["complete", "in_progress", "unknown"]
 
 
@@ -28,14 +29,19 @@ class GameUrl:
     slug: str
 
     @property
-    def nexus_root_url(self) -> str:
+    def season_root_url(self) -> str:
         return (
-            f"https://{NEXUS_HOST}/"
-            f"{quote(self.locale, safe='-')}/{quote(self.slug, safe='-')}"
+            f"{HOLDET_ORIGIN}/{quote(self.locale, safe='-')}/season/"
+            f"{quote(self.slug, safe='-')}"
         )
 
+    @property
+    def nexus_root_url(self) -> str:
+        """Compatibility alias for the current public season URL."""
+        return self.season_root_url
+
     def statistics_url(self, variant: str, round_number: int | None = None) -> str:
-        url = f"{self.nexus_root_url}/{quote(variant, safe='_')}/statistics"
+        url = f"{self.season_root_url}/{quote(variant, safe='_')}/statistics"
         if round_number is None:
             return url
         if isinstance(round_number, bool) or round_number < 0:
@@ -44,7 +50,7 @@ class GameUrl:
 
     def team_url(self, variant: str, team_id: int) -> str:
         return (
-            f"{self.nexus_root_url}/{quote(variant, safe='_')}"
+            f"{self.season_root_url}/{quote(variant, safe='_')}"
             f"/fantasyteams/{team_id}"
         )
 

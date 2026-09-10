@@ -15,7 +15,7 @@ from .errors import PayloadError, UrlValidationError
 from .flight import rendered_scalars, walk_flight
 from .http import HttpClient
 from .models import (
-    NEXUS_HOST,
+    SEASON_API_ROOT,
     AccountConfig,
     GameUrl,
     RosterEntry,
@@ -683,8 +683,8 @@ class TeamDataService:
     def context(self, game: GameUrl) -> GameContext:
         key = (game.locale.casefold(), game.slug)
         if key not in self._contexts:
-            variant = discover_variant(self.fetch_text(game.nexus_root_url))
-            cartridge_url = f"https://{NEXUS_HOST}/api/cartridges/{game.slug}"
+            variant = discover_variant(self.fetch_text(game.season_root_url))
+            cartridge_url = f"{SEASON_API_ROOT}/cartridges/{game.slug}"
             self._contexts[key] = parse_game_context(
                 game, variant, self.fetch_json(cartridge_url)
             )
@@ -706,7 +706,7 @@ class TeamDataService:
                 raise PayloadError("Spilmetadata mangler scheduleId")
             self._schedule_unavailable.add(key)
             return context
-        schedule_url = f"https://{NEXUS_HOST}/api/schedules/{context.schedule_id}"
+        schedule_url = f"{SEASON_API_ROOT}/schedules/{context.schedule_id}"
         try:
             rounds = parse_schedule_rounds(self.fetch_json(schedule_url))
         except Exception:
@@ -747,7 +747,7 @@ class TeamDataService:
         if context.default_league_id is None:
             return {}, {}
         base = (
-            f"https://{NEXUS_HOST}/api/fantasyteams/{team_id}"
+            f"{SEASON_API_ROOT}/fantasyteams/{team_id}"
             f"/fantasyleagues/{context.default_league_id}/leaderboards"
         )
         overall = _rank_map(self.fetch_json(f"{base}/overall"))
@@ -758,7 +758,7 @@ class TeamDataService:
         context = self.context_with_schedule(reference.game)
         team_url = reference.game.team_url(context.variant, reference.team_id)
         history_url = (
-            f"https://{NEXUS_HOST}/api/fantasyteams/{reference.team_id}/history"
+            f"{SEASON_API_ROOT}/fantasyteams/{reference.team_id}/history"
         )
         round_ranks, overall_ranks = self._rank_payloads(context, reference.team_id)
 

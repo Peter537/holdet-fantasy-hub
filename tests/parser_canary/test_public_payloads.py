@@ -13,6 +13,7 @@ from holdet_lib.http import HttpClient
 
 
 PUBLIC_GAMES = (
+    ("https://www.holdet.dk/da/fantasy/premier-league-fantasy-fall-2026", "soccer", "money"),
     ("https://www.holdet.dk/da/fantasy/super-manager-fall-2026", "soccer", "money"),
     ("https://www.holdet.dk/da/fantasy/tour-de-france-2026", "cycling", "money"),
     (

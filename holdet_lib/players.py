@@ -271,7 +271,7 @@ def scrape_game(
     variant = (
         policy.route_variant
         if policy is not None
-        else discover_variant(fetcher(game.nexus_root_url))
+        else discover_variant(fetcher(game.season_root_url))
     )
     selected_policy = policy or legacy_policy(variant)
     entries, actual_round = extract_entries_and_round(

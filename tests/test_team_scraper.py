@@ -337,17 +337,17 @@ class TeamServiceAndOutputTests(unittest.TestCase):
             account_user_id=FICTIONAL_USER_ID,
         )
         text = {
-            game.nexus_root_url: variant_html("cycling"),
-            game.team_url("cycling", FICTIONAL_TEAM_ID): team_page_html(),
+            "https://www.holdet.dk/da/season/tour-de-france-2026": variant_html("cycling"),
+            f"https://www.holdet.dk/da/season/tour-de-france-2026/cycling/fantasyteams/{FICTIONAL_TEAM_ID}": team_page_html(),
         }
-        base = "https://nexus-app-fantasy.holdet.dk"
+        base = "https://www.holdet.dk/api/season"
         json_data = {
-            f"{base}/api/cartridges/{game.slug}": cartridge_payload(),
-            f"{base}/api/fantasyteams/{FICTIONAL_TEAM_ID}/history": history_payload(),
-            f"{base}/api/fantasyteams/{FICTIONAL_TEAM_ID}/fantasyleagues/99/leaderboards/overall": {
+            f"{base}/cartridges/{game.slug}": cartridge_payload(),
+            f"{base}/fantasyteams/{FICTIONAL_TEAM_ID}/history": history_payload(),
+            f"{base}/fantasyteams/{FICTIONAL_TEAM_ID}/fantasyleagues/99/leaderboards/overall": {
                 "items": [{"round": 2, "rank": 100}, {"round": 3, "rank": 80}]
             },
-            f"{base}/api/fantasyteams/{FICTIONAL_TEAM_ID}/fantasyleagues/99/leaderboards/round": {
+            f"{base}/fantasyteams/{FICTIONAL_TEAM_ID}/fantasyleagues/99/leaderboards/round": {
                 "items": [{"round": 2, "rank": 20}, {"round": 3, "rank": 15}]
             },
         }
@@ -486,21 +486,23 @@ class GameInfoTests(unittest.TestCase):
         )
         cartridge = cartridge_payload()
         cartridge["_embedded"]["games"]["7"]["scheduleId"] = 623
-        base = "https://nexus-app-fantasy.holdet.dk"
+        base = "https://www.holdet.dk/api/season"
         calls: list[str] = []
 
         def fetch_json(url: str):
             calls.append(url)
-            if url.endswith("/api/cartridges/super-manager-fall-2026"):
+            if url == f"{base}/cartridges/super-manager-fall-2026":
                 return cartridge
-            if url.endswith("/api/schedules/623"):
+            if url == f"{base}/schedules/623":
                 return schedule_payload(17)
             raise AssertionError(url)
 
         def fetch_text(url: str) -> str:
             if url == game.original:
                 return "<h1>Super Manager <span>Efter" + chr(0xe5) + "r 2026</span></h1>"
-            return variant_html("soccer")
+            if url == "https://www.holdet.dk/da/season/super-manager-fall-2026":
+                return variant_html("soccer")
+            raise AssertionError(url)
 
         client = scraper.HoldetClient(
             text_fetcher=fetch_text,
@@ -511,7 +513,7 @@ class GameInfoTests(unittest.TestCase):
         self.assertEqual(info.final_round, 17)
         self.assertEqual(len(info.rounds), 17)
         self.assertEqual(info.display_name, "Super Manager Efter" + chr(0xe5) + "r 2026")
-        self.assertEqual(calls[-1], f"{base}/api/schedules/623")
+        self.assertEqual(calls, [f"{base}/cartridges/super-manager-fall-2026", f"{base}/schedules/623"])
         self.assertIs(client.fetch_game_info(game), info)
         self.assertEqual(len(calls), 2)
 
