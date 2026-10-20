@@ -759,11 +759,12 @@ def history_panel(
             "Værdi/point": item.total,
             "Rundevækst": item.round_growth,
             "Samlet placering": item.overall_rank,
+            "Rundeplacering": item.round_rank,
             "Grupperang": item.group_rank,
         }
         for item in history
     )
-    labels = ["Værdi/point", "Rundevækst", "Samlet placering"]
+    labels = ["Værdi/point", "Rundevækst", "Samlet placering", "Rundeplacering"]
     if group is not None:
         labels.append("Grupperang")
     tabs = st.tabs(
@@ -775,12 +776,14 @@ def history_panel(
         if not tab.open:
             continue
         with tab:
+            is_rank = column in {"Samlet placering", "Rundeplacering", "Grupperang"}
             chart = alt.Chart(frame).mark_line(point=True).encode(
                 x=alt.X("Runde:Q", title="Runde"),
                 y=alt.Y(
                     f"{column}:Q",
                     title=column,
-                    scale=alt.Scale(reverse=column.endswith("rang")),
+                    scale=alt.Scale(reverse=is_rank, zero=False if is_rank else alt.Undefined),
+                    axis=alt.Axis(format="d", tickMinStep=1) if is_rank else alt.Undefined,
                 ),
                 color=alt.Color("Hold:N", title="Hold"),
                 tooltip=("Runde:Q", "Hold:N", f"{column}:Q"),

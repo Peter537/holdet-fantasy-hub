@@ -113,6 +113,7 @@ class HistoryPoint:
     round_growth: int | None
     overall_rank: int | None
     group_rank: int | None
+    round_rank: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -505,6 +506,7 @@ def build_history_series(
                     None if summary is None else summary.change,
                     None if summary is None else summary.overall_rank,
                     group_ranks.get(team_id),
+                    None if summary is None else summary.round_rank,
                 )
             )
     return tuple(result)

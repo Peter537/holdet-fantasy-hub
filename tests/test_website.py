@@ -782,7 +782,7 @@ class DashboardTests(unittest.TestCase):
             rank=1,
             owner_name="Manager",
             team_name=team.team_name,
-            summary=SimpleNamespace(total=500),
+            summary=SimpleNamespace(total=500, overall_rank=202, round_rank=77),
             change=25,
             distance=0,
             team_id=42,
@@ -1496,7 +1496,7 @@ class DashboardTests(unittest.TestCase):
                 self.assertTrue(any(item.value == group.name for item in app.title))
                 self.assertEqual({item.value for item in app.segmented_control}, {"Samlet"})
                 expected_columns = [
-                    "Rang", "Manager", "Hold", "Værdi",
+                    "Grupperang", "Manager", "Hold", "Samlet placering", "Rundeplacering", "Værdi",
                     "Vækst", "Afstand", "Hold-ID",
                 ]
                 overall_frame = app.dataframe[0].value
@@ -1529,6 +1529,88 @@ class DashboardTests(unittest.TestCase):
                         for item in app.warning
                     )
                 )
+
+    def test_official_rankings_and_history_are_round_specific_and_cache_only(self) -> None:
+        with website_environment() as (config, output):
+            first = sample_team(1, name="Alpha", total=500, change=10, history_rounds=(1, 3))
+            second = sample_team(2, name="Beta", total=500, change=30, history_rounds=(1, 3))
+            second = replace(second, history=tuple(
+                replace(item, overall_rank=None, round_rank=70 + item.round_number)
+                for item in second.history
+            ))
+            snapshots = holdet.SnapshotStore(output)
+            snapshots.save_team_json(first)
+            snapshots.save_team_json(second)
+            store = holdet.GroupStore(config / "groups.json")
+            game = first.reference.game
+            store.create_manager_game(game, "Testspil")
+            group = store.create("Testgruppe", game, (
+                holdet.GroupTeam(1, "Alpha", first.reference.source_url),
+                holdet.GroupTeam(2, "Beta", second.reference.source_url),
+                holdet.GroupTeam(3, "Gamma", f"{game.original}/fantasyteams/3"),
+            ), group_id="ranking-test")
+            before = {
+                path.relative_to(config.parent): path.read_bytes()
+                for path in config.parent.rglob("*") if path.is_file()
+            }
+            with (
+                patch("holdet_lib.http.HttpClient.fetch_text", side_effect=AssertionError("network")) as fetch,
+                patch("website.hub_pages.st.altair_chart") as render_chart,
+            ):
+                app = AppTest.from_file(APP_PATH).run(timeout=15)
+                navigate(app, "group", group=group.group_id, round=1)
+                self.assertFalse(app.exception)
+                frame = app.dataframe[0].value.set_index("Hold")
+                self.assertEqual(frame.index.tolist(), ["Alpha", "Beta", "Gamma"])
+                self.assertEqual(frame.loc[["Alpha", "Beta"], "Grupperang"].tolist(), [1, 1])
+                self.assertEqual(frame.loc["Alpha", "Samlet placering"], 21)
+                self.assertEqual(frame.loc["Alpha", "Rundeplacering"], 11)
+                self.assertTrue(dashboard.pd.isna(frame.loc["Beta", "Samlet placering"]))
+                self.assertEqual(frame.loc["Beta", "Rundeplacering"], 71)
+                self.assertTrue(frame.loc["Gamma", ["Grupperang", "Samlet placering", "Rundeplacering"]].isna().all())
+
+                app.segmented_control[0].set_value("Runde").run(timeout=15)
+                round_frame = app.dataframe[0].value.set_index("Hold")
+                self.assertEqual(round_frame.index.tolist(), ["Beta", "Alpha", "Gamma"])
+                self.assertEqual(round_frame.loc["Beta", "Grupperang"], 1)
+                self.assertEqual(round_frame.loc["Alpha", "Grupperang"], 2)
+                self.assertTrue(frame[["Samlet placering", "Rundeplacering"]].equals(
+                    round_frame.loc[frame.index, ["Samlet placering", "Rundeplacering"]]
+                ))
+
+                routes = (
+                    ("group", {"group": group.group_id, "section": "history"}, f"group:{group.group_id}", True),
+                    ("game", {"locale": game.locale, "game": game.slug, "section": "history"}, f"game:{game.locale}:{game.slug}", False),
+                    ("team", {"group": group.group_id, "team": 1, "panel": "history"}, f"team:{game.locale}:{game.slug}:1", True),
+                )
+                for route, parameters, scope, has_group in routes:
+                    with self.subTest(route=route):
+                        navigate(app, route, **parameters)
+                        self.assertFalse(app.exception)
+                        self.assertIn("Rundeplacering", [item.label for item in app.tabs])
+                        columns = ["Samlet placering", "Rundeplacering", "Værdi/point"]
+                        if has_group:
+                            columns.append("Grupperang")
+                        for column in columns:
+                            render_chart.reset_mock()
+                            app.session_state[f"history-tabs:{scope}"] = column
+                            app.run(timeout=15)
+                            self.assertFalse(app.exception)
+                            render_chart.assert_called_once()
+                            chart = render_chart.call_args.args[0]
+                            spec = chart.to_dict()
+                            self.assertEqual(spec["encoding"]["y"]["field"], column)
+                            self.assertEqual(spec["encoding"]["y"]["scale"]["reverse"], column != "Værdi/point")
+                            alpha = chart.data[chart.data["Hold"] == "Alpha"].set_index("Runde")
+                            self.assertEqual(alpha.loc[1, "Samlet placering"], 21)
+                            self.assertEqual(alpha.loc[1, "Rundeplacering"], 11)
+                            self.assertTrue(alpha.loc[2, ["Samlet placering", "Rundeplacering"]].isna().all())
+                fetch.assert_not_called()
+            after = {
+                path.relative_to(config.parent): path.read_bytes()
+                for path in config.parent.rglob("*") if path.is_file()
+            }
+            self.assertEqual(after, before)
 
     def test_round_center_refresh_preview_is_cache_only_and_noop_when_current(
         self,

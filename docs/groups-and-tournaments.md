@@ -10,14 +10,16 @@ Rundecenter er managerspillets første fane. **Grupper** og **Statusalarmer** vi
 
 ## Almindelige grupper
 
-En almindelig gruppe har fanerne **Stilling** og **Historik**. Historikken genbruger gruppens managerspil og medlemmer uden nye vælgere og viser værdi/point, rundevækst og grupperang. Manglende runder forbliver huller, og rangaksen vender førsteplads øverst.
+En almindelig gruppe har fanerne **Stilling** og **Historik**. Historikken genbruger gruppens managerspil og medlemmer uden nye vælgere og viser værdi/point, rundevækst, samlet placering, rundeplacering og grupperang. Manglende runder eller placeringer forbliver huller, og alle rangakser vender førsteplads øverst.
 
-Stillingen viser `Rang · Manager · Hold · Værdi · Vækst · Afstand`:
+Stillingen viser `Grupperang · Manager · Hold · Samlet placering · Rundeplacering · Værdi · Vækst · Afstand`:
 
 - **Samlet** rangerer efter rundens sluttotal; afstand er forskellen til totallederen.
 - **Runde** rangerer efter rundens ændring; afstand er forskellen til rundelederen.
 
-Competition ranking bruges ved ties, og holdnavn er den deterministiske sekundære sortering.
+Valget styrer grupperang, sortering og afstand. **Samlet placering** og **Rundeplacering** vises samtidig og er Holdet.dk's officielle placeringer blandt alle hold i managerspillet for den valgte runde. De beregnes ikke ud fra gruppen. Manglende officielle placeringer vises som **–**; en eksisterende grupperang kan stadig vises.
+
+Competition ranking bruges ved ties i gruppen, og holdnavn er den deterministiske sekundære sortering. Officielle placeringer bevares som leveret af Holdet.dk. Se [Datahentning](data-retrieval.md#fantasyhold-historik-og-schedule) for datakilder og opdatering.
 
 **Analyse → Gruppe** finder gruppeføreren fra den eksisterende stilling i valgt runde og viser fælles spillere, hver sides unikke spillere, afsluttet faktisk swing og en tydeligt mærket formbaseret proxy. Eksponering er antal ejere divideret med hold med dækkende rundesnapshot; UI viser altid dækkede hold, total gruppestørrelse og manglende hold. Der foretages ingen automatisk hentning af opstillinger.
 

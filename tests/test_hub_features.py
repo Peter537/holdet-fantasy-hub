@@ -364,7 +364,10 @@ def summary(round_number: int, total: int, change: int) -> holdet.RoundSummary:
 
 
 def test_history_keeps_round_holes_and_calculates_group_rank() -> None:
-    first = team_snapshot(1, (summary(1, 100, 10), summary(3, 130, 30)))
+    first = team_snapshot(1, (
+        replace(summary(1, 100, 10), round_rank=501),
+        replace(summary(3, 130, 30), round_rank=208),
+    ))
     second = team_snapshot(2, (summary(1, 90, 9), summary(3, 140, 50)))
     index = holdet.SnapshotIndex((first, second))
     group = holdet.GroupDefinition(
@@ -385,9 +388,31 @@ def test_history_keeps_round_holes_and_calculates_group_rank() -> None:
     holes = [item for item in points if item.round_number == 2]
     assert len(holes) == 2
     assert all(item.total is None for item in holes)
+    assert all(item.overall_rank is None and item.round_rank is None for item in holes)
     latest = {item.team_id: item for item in points if item.round_number == 3}
     assert latest[2].group_rank == 1
     assert latest[1].group_rank == 2
+    assert latest[1].overall_rank == 130
+    assert latest[1].round_rank == 208
+    assert latest[2].round_rank is None
+
+
+def test_history_uses_latest_summary_ranks_and_preserves_legacy_construction() -> None:
+    older = team_snapshot(1, (replace(summary(1, 100, 10), round_rank=501),))
+    newer = replace(
+        team_snapshot(1, (
+            replace(summary(1, 100, 10), overall_rank=99, round_rank=499),
+            replace(summary(3, 130, 30), overall_rank=80, round_rank=None),
+        )),
+        generated_at=NOW + timedelta(days=1),
+    )
+    points = holdet.build_history_series(
+        holdet.SnapshotIndex((older, newer)), GAME, (1,),
+    )
+    assert [(point.overall_rank, point.round_rank) for point in points] == [
+        (99, 499), (None, None), (80, None),
+    ]
+    assert holdet.HistoryPoint(1, 1, "Team", 100, 10, 99, 1).round_rank is None
 
 
 def test_hall_of_fame_ties_deduplication_scoring_and_idempotent_freeze(tmp_path: Path) -> None:

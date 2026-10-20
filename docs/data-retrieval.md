@@ -55,7 +55,20 @@ Efter **Hent seneste** evalueres watchlistregler mod den umiddelbart foregående
 
 ## Fantasyhold, historik og schedule
 
-En teamhentning kombinerer fantasyteam-siden, `/api/season/fantasyteams/<id>/history`, offentlige samlede lister og rundelister samt cartridge-data. `/api/season/schedules/<schedule-id>` hentes sammen med manuelle spiller- og holdhentninger.
+En teamhentning kombinerer fantasyteam-siden, `/api/season/fantasyteams/<id>/history`, offentlige ranglister og cartridge-data. `/api/season/schedules/<schedule-id>` hentes sammen med manuelle spiller- og holdhentninger.
+
+Spillets cartridge leverer `defaultFantasyLeagueId`, som bruges til at hente holdets officielle placeringer blandt alle hold i managerspillet:
+
+```text
+/api/season/fantasyteams/<team-id>/fantasyleagues/<defaultFantasyLeagueId>/leaderboards/overall
+/api/season/fantasyteams/<team-id>/fantasyleagues/<defaultFantasyLeagueId>/leaderboards/round
+```
+
+Begge svar indeholder en `items`-liste med `round` og `rank`. Importen matcher på rundenummer og gemmer `overall` som `RoundSummary.overall_rank` og `round` som `RoundSummary.round_rank`. Samlet placering gælder holdets total i den pågældende runde; rundeplacering gælder kun rundens vækst. Grupperang beregnes separat ud fra den lokale gruppes medlemmer.
+
+Ranglisterne leverer også historiske runder, så én manuel holdopdatering kan hente tidligere placeringer. Hvis spillet mangler `defaultFantasyLeagueId`, eller en rangliste mangler en rundes placering, gemmes den som `None`. UI'et viser **–**, og historikgrafen har et hul. Placeringer estimeres aldrig fra gruppens resultater. Et fejlet ranglistekald følger den almindelige fejlhåndtering og cachefallback.
+
+En igangværende rundes placeringer kan ændre sig. Visningerne bruger de senest gemte oplysninger for den valgte runde og kontakter ikke Holdet.dk ved navigation. Begge placeringsfelter findes allerede i teamsnapshot schema 2, holdeksporterne og det lokale `team_history`-API.
 
 Schedule-parseren gemmer hver rundes `start`, `close` og `end`. Sluttid og hentetid afgør, om en sammenligning eller transfersimulation kan kaldes `final`, mens snapshotstatus er `complete`, `in_progress` eller `unknown`. Hvis schedulekaldet fejler, gemmes øvrige gyldige data med `unknown` og UI'et markerer grundlaget som foreløbigt.
 

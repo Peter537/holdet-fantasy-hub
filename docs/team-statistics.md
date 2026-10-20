@@ -15,13 +15,15 @@ Efter valg af hold og runde vises:
 - **Overblik** – totalværdi/point, bank, rundevækst, rang, rangbevægelse og tilgængelige bonusfelter.
 - **Holdopstilling** – navn, hold/land, position/kategori, pris/point, vækst, købsrunde, rolle og status.
 - **Transferlaboratorium** – en sessionsbaseret simulation fra det viste holdsnapshot.
-- **Historik** – værdi eller point, rundevækst, samlet rang og beregnet grupperang.
+- **Historik** – værdi eller point, rundevækst, samlet placering og rundeplacering på Holdet.dk samt beregnet grupperang, når en gruppe er valgt.
 - **Ændringer** – rang, værdi, point og relevante trupændringer mod foregående tilgængelige runde.
 - **Eksport** – komplet snapshot eller valgt runde i TXT, JSON, Markdown, CSV, XLSX og valgfri Parquet.
 
 Managerspillets separate **Analyse → Beslutninger** bruger samme cache til faktisk kaptajnbonus, verificerede alternative kaptajnscenarier, bankens rente/break-even, transferregnskab, **hvis jeg ikke havde handlet** samt bedste og værste transfer. Et standardhold gemmes pr. spil; analysevælgeren kan midlertidigt skifte hold uden at ændre standarden.
 
-Ranggrafer vender aksen, så førsteplads står øverst. Manglende runder vises som huller. Grupperang beregnes kun, når gruppens sammenlignelige snapshots findes.
+Samlet placering og rundeplacering sammenligner holdet med alle hold i managerspillet. Samlet placering gælder rundens total, mens rundeplacering gælder rundens vækst. Begge kurver findes i historikken på hold-, gruppe- og managerspilsniveau og bruger det nyeste snapshot, som indeholder den pågældende runde. Se [Datahentning](data-retrieval.md#fantasyhold-historik-og-schedule) for de officielle datakilder.
+
+Alle ranggrafer vender aksen, så førsteplads står øverst. Manglende runder eller placeringer vises som huller. Grupperang beregnes kun, når gruppens sammenlignelige snapshots findes.
 
 ## Transferlaboratorium
 

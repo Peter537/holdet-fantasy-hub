@@ -3218,9 +3218,11 @@ def _standings_table(
     for row in standings:
         rows.append(
             {
-                "Rang": row.rank,
+                "Grupperang": row.rank,
                 "Manager": row.owner_name,
                 "Hold": row.team_name,
+                "Samlet placering": row.summary.overall_rank if row.summary else None,
+                "Rundeplacering": row.summary.round_rank if row.summary else None,
                 "Værdi": row.summary.total if row.summary else None,
                 "Vækst": row.change,
                 "Afstand": row.distance,
@@ -3229,12 +3231,15 @@ def _standings_table(
         )
     st.caption("Klik p\u00e5 en r\u00e6kke for at \u00e5bne holdet")
     event = dataframe(
-        _style_integer_columns(rows, ("Værdi", "Vækst", "Afstand")),
+        _style_integer_columns(
+            rows,
+            ("Grupperang", "Samlet placering", "Rundeplacering", "Værdi", "Vækst", "Afstand"),
+        ),
         hide_index=True,
         width="stretch",
         on_select="rerun",
         selection_mode="single-row",
-        key=f"standing-{group.group_id}-v1",
+        key=f"standing-{group.group_id}-v2",
         column_config={"Hold-ID": None},
     )
     selected = event.selection.rows

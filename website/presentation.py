@@ -64,6 +64,9 @@ _DATA_STATUS_LABELS: dict[str, DataStatus] = {
 
 _COLUMN_HELP = {
     "Rang": "Placering i den viste rangliste. En tankestreg betyder, at placeringen endnu ikke kan beregnes.",
+    "Grupperang": "Placering blandt gruppens hold. Samlet bruger totalværdi/point; Runde bruger rundevækst.",
+    "Samlet placering": "Holdet.dk-placering blandt alle hold i managerspillet efter den valgte rundes total. – betyder, at placeringen mangler i cache.",
+    "Rundeplacering": "Holdet.dk-placering blandt alle hold i managerspillet for den valgte rundes vækst. – betyder, at placeringen mangler i cache.",
     "Elo": "Managerens Elo-rating, afrundet til nærmeste heltal til visning.",
     "Afstand": "Forskel til den førende placering i den viste opgørelse.",
     "Form 3": "Gennemsnitlig udvikling over de seneste tre tilgængelige runder.",
@@ -81,6 +84,9 @@ _COLUMN_HELP = {
 
 _INTEGER_COLUMNS = {
     "Rang",
+    "Grupperang",
+    "Samlet placering",
+    "Rundeplacering",
     "Runde",
     "Point",
     "Perioder",
