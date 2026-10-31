@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from holdet_lib.hub_settings import HubFeature, feature_enabled
+
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -621,6 +623,8 @@ def _metadata_changes_for_round(
     changes: list[object] = []
     seen: set[tuple[str, str, int | None]] = set()
     for revision in revisions:  # newest first
+        if revision.promotion != "current":
+            continue
         for change in revision.changes:
             if change.round_number != round_number:
                 continue
@@ -893,6 +897,8 @@ def _render_story(
     except Exception as exc:
         st.warning(f"Rundens historie bruger standardindstillinger: {exc}")
         settings = HubSettings()
+    if not feature_enabled(settings, HubFeature.STORIES):
+        return
     story = build_round_story(
         groups,
         teams,

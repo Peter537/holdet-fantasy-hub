@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .refresh_runs import exclusive_data_operation
+
 from dataclasses import dataclass
 from datetime import datetime
 import hashlib
@@ -71,6 +73,7 @@ def _canonical_files(paths: AppPaths) -> tuple[tuple[str, Path], ...]:
         ("config", paths.config_dir),
         ("data/snapshots", paths.snapshot_dir),
         ("data/manifests", paths.manifest_dir),
+        ("data/refresh-runs", paths.refresh_run_dir),
         ("data/group-revisions", paths.group_revision_dir),
         ("data/tournament-pairings", paths.tournament_pairing_dir),
         ("data/game-metadata", paths.game_metadata_dir),
@@ -84,6 +87,8 @@ def _canonical_files(paths: AppPaths) -> tuple[tuple[str, Path], ...]:
             continue
         for path in root.rglob("*"):
             if path.is_file() and not path.is_symlink():
+                if archive_root == "data/refresh-runs" and path.name != "run.json" and not (path.name.startswith("pending-") and path.suffix == ".json"):
+                    continue
                 relative = path.relative_to(root).as_posix()
                 result.append((f"{archive_root}/{relative}", path))
     result.sort(key=lambda item: item[0])
@@ -261,14 +266,14 @@ def known_schema_error(path: str, data: bytes) -> str | None:
         return f"{path}: ukendt gruppeschema"
     if path == "config/groups.json" and version == 8:
         return None
-    if path == "config/hub-settings.json" and version in {2, 3, 4}:
+    if path == "config/hub-settings.json" and version in {2, 3, 4, 5}:
         return None
     if path == "config/analysis-inbox.json" and version in {1, 2}:
         return None
     if path == "config/seasons.json" and version == 1:
         return None
-    if path.startswith("data/tournament-pairings/") and version == 1:
-        return None
+    if path.startswith("data/tournament-pairings/"):
+        return None if version in {1, 2} else f"{path}: ukendt parringsschema"
     if path.startswith("data/hall-of-fame/") and version == 2:
         return None
     if path == "config/hub-settings.json" and version != 1:
@@ -285,8 +290,17 @@ def known_schema_error(path: str, data: bytes) -> str | None:
         return f"{path}: ukendt spillersnapshotschema"
     if "/teams/" in path and "team-round" in path and version not in {1, 2}:
         return f"{path}: ukendt teamsnapshotschema"
-    if path.startswith("data/manifests/") and version not in {1, 2}:
+    if path.startswith("data/manifests/") and version not in {1, 2, 3}:
         return f"{path}: ukendt manifestschema"
+    if path.startswith("data/refresh-runs/"):
+        if path.endswith("/run.json"):
+            if version != 1 or not isinstance(payload.get("games"), list) or not isinstance(payload.get("run_id"), str):
+                return f"{path}: ugyldig opdateringsjournal"
+        elif "/pending-" in path:
+            if version not in {1, 2, 3}:
+                return f"{path}: ukendt afventende manifestschema"
+        else:
+            return f"{path}: ukendt journalfil"
     if path.startswith("data/group-revisions/") and version != 1:
         return f"{path}: ukendt revisionsschema"
     return None
@@ -469,93 +483,94 @@ def restore_backup(
         checked = source_path.stat()
         if (checked.st_size, checked.st_mtime_ns) != source_signature:
             raise PayloadError("Backupkilden ændrede sig under valideringen")
-    config_parent = paths.config_dir.parent
-    data_parent = paths.data_dir.parent
-    config_parent.mkdir(parents=True, exist_ok=True)
-    data_parent.mkdir(parents=True, exist_ok=True)
-    required = validation.manifest.total_bytes + 32 * 1024 * 1024
-    for parent in {config_parent.resolve(), data_parent.resolve()}:
-        if shutil.disk_usage(parent).free < required:
-            raise PayloadError("Der er ikke nok ledig diskplads til sikker gendannelse")
-    rollback_base = paths.backup_dir / (
-        f"rollback-{aware_local(now).strftime('%Y%m%d-%H%M%S')}.zip"
-    )
-    rollback_target = rollback_base
-    number = 2
-    while rollback_target.exists():
-        rollback_target = rollback_base.with_name(
-            f"{rollback_base.stem}-{number}{rollback_base.suffix}"
+    with exclusive_data_operation(paths.data_dir):
+        config_parent = paths.config_dir.parent
+        data_parent = paths.data_dir.parent
+        config_parent.mkdir(parents=True, exist_ok=True)
+        data_parent.mkdir(parents=True, exist_ok=True)
+        required = validation.manifest.total_bytes + 32 * 1024 * 1024
+        for parent in {config_parent.resolve(), data_parent.resolve()}:
+            if shutil.disk_usage(parent).free < required:
+                raise PayloadError("Der er ikke nok ledig diskplads til sikker gendannelse")
+        rollback_base = paths.backup_dir / (
+            f"rollback-{aware_local(now).strftime('%Y%m%d-%H%M%S')}.zip"
         )
-        number += 1
-    rollback_target.parent.mkdir(parents=True, exist_ok=True)
-    rollback_temporary = rollback_target.parent / (
-        f".{rollback_target.name}.{uuid4().hex}.tmp"
-    )
-    try:
-        _write_backup_zip(paths, rollback_temporary, now=aware_local(now))
-        rollback_validation = validate_backup(
-            rollback_temporary, _validate_schemas=False
-        )
-        if not rollback_validation.is_valid:
-            raise PayloadError(
-                "Rollback-backuppen bestod ikke checksumvalideringen: "
-                + "; ".join(rollback_validation.errors)
+        rollback_target = rollback_base
+        number = 2
+        while rollback_target.exists():
+            rollback_target = rollback_base.with_name(
+                f"{rollback_base.stem}-{number}{rollback_base.suffix}"
             )
-        os.replace(rollback_temporary, rollback_target)
-    finally:
-        rollback_temporary.unlink(missing_ok=True)
-    rollback = rollback_target.resolve()
-    config_temp = Path(tempfile.mkdtemp(prefix=".holdet-restore-", dir=config_parent))
-    data_temp = Path(tempfile.mkdtemp(prefix=".holdet-restore-", dir=data_parent))
-    staged_config = config_temp / "config"
-    staged_data = data_temp / "data"
-    old_config = config_parent / f".{paths.config_dir.name}.old-{uuid4().hex}"
-    old_data = data_parent / f".{paths.data_dir.name}.old-{uuid4().hex}"
-    moved_config = moved_data = installed_config = installed_data = False
-    try:
-        with zipfile.ZipFile(archive_source) as archive:
-            _extract_tree(archive, "config", staged_config)
-            _extract_tree(archive, "data", staged_data)
-        if source_path is not None:
-            checked = source_path.stat()
-            if (checked.st_size, checked.st_mtime_ns) != source_signature:
-                raise PayloadError("Backupkilden ændrede sig under staging")
-        if paths.config_dir.exists():
-            os.replace(paths.config_dir, old_config)
-            moved_config = True
-        os.replace(staged_config, paths.config_dir)
-        installed_config = True
-        if paths.data_dir.exists():
-            os.replace(paths.data_dir, old_data)
-            moved_data = True
-        os.replace(staged_data, paths.data_dir)
-        installed_data = True
-    except Exception as exc:
+            number += 1
+        rollback_target.parent.mkdir(parents=True, exist_ok=True)
+        rollback_temporary = rollback_target.parent / (
+            f".{rollback_target.name}.{uuid4().hex}.tmp"
+        )
         try:
-            if installed_data and paths.data_dir.exists():
-                shutil.rmtree(paths.data_dir)
-            if moved_data and old_data.exists():
-                os.replace(old_data, paths.data_dir)
-            if installed_config and paths.config_dir.exists():
-                shutil.rmtree(paths.config_dir)
-            if moved_config and old_config.exists():
-                os.replace(old_config, paths.config_dir)
-        except Exception as rollback_exc:
+            _write_backup_zip(paths, rollback_temporary, now=aware_local(now))
+            rollback_validation = validate_backup(
+                rollback_temporary, _validate_schemas=False
+            )
+            if not rollback_validation.is_valid:
+                raise PayloadError(
+                    "Rollback-backuppen bestod ikke checksumvalideringen: "
+                    + "; ".join(rollback_validation.errors)
+                )
+            os.replace(rollback_temporary, rollback_target)
+        finally:
+            rollback_temporary.unlink(missing_ok=True)
+        rollback = rollback_target.resolve()
+        config_temp = Path(tempfile.mkdtemp(prefix=".holdet-restore-", dir=config_parent))
+        data_temp = Path(tempfile.mkdtemp(prefix=".holdet-restore-", dir=data_parent))
+        staged_config = config_temp / "config"
+        staged_data = data_temp / "data"
+        old_config = config_parent / f".{paths.config_dir.name}.old-{uuid4().hex}"
+        old_data = data_parent / f".{paths.data_dir.name}.old-{uuid4().hex}"
+        moved_config = moved_data = installed_config = installed_data = False
+        try:
+            with zipfile.ZipFile(archive_source) as archive:
+                _extract_tree(archive, "config", staged_config)
+                _extract_tree(archive, "data", staged_data)
+            if source_path is not None:
+                checked = source_path.stat()
+                if (checked.st_size, checked.st_mtime_ns) != source_signature:
+                    raise PayloadError("Backupkilden ændrede sig under staging")
+            if paths.config_dir.exists():
+                os.replace(paths.config_dir, old_config)
+                moved_config = True
+            os.replace(staged_config, paths.config_dir)
+            installed_config = True
+            if paths.data_dir.exists():
+                os.replace(paths.data_dir, old_data)
+                moved_data = True
+            os.replace(staged_data, paths.data_dir)
+            installed_data = True
+        except Exception as exc:
+            try:
+                if installed_data and paths.data_dir.exists():
+                    shutil.rmtree(paths.data_dir)
+                if moved_data and old_data.exists():
+                    os.replace(old_data, paths.data_dir)
+                if installed_config and paths.config_dir.exists():
+                    shutil.rmtree(paths.config_dir)
+                if moved_config and old_config.exists():
+                    os.replace(old_config, paths.config_dir)
+            except Exception as rollback_exc:
+                raise PayloadError(
+                    f"Gendannelsen mislykkedes, og tilbagerulningen mislykkedes: {rollback_exc}. "
+                    f"Rollback-ZIP: {rollback}"
+                ) from exc
             raise PayloadError(
-                f"Gendannelsen mislykkedes, og tilbagerulningen mislykkedes: {rollback_exc}. "
-                f"Rollback-ZIP: {rollback}"
+                f"Gendannelsen mislykkedes; den oprindelige installation er lagt tilbage: {exc}"
             ) from exc
-        raise PayloadError(
-            f"Gendannelsen mislykkedes; den oprindelige installation er lagt tilbage: {exc}"
-        ) from exc
-    finally:
-        shutil.rmtree(config_temp, ignore_errors=True)
-        shutil.rmtree(data_temp, ignore_errors=True)
-    shutil.rmtree(old_config, ignore_errors=True)
-    shutil.rmtree(old_data, ignore_errors=True)
-    return RestoreResult(
-        len(validation.manifest.files),
-        validation.manifest.total_bytes,
-        rollback,
-    )
+        finally:
+            shutil.rmtree(config_temp, ignore_errors=True)
+            shutil.rmtree(data_temp, ignore_errors=True)
+        shutil.rmtree(old_config, ignore_errors=True)
+        shutil.rmtree(old_data, ignore_errors=True)
+        return RestoreResult(
+            len(validation.manifest.files),
+            validation.manifest.total_bytes,
+            rollback,
+        )
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .refresh_runs import exclusive_data_operation
+
 from dataclasses import dataclass, field
 from datetime import datetime
 import hashlib
@@ -494,15 +496,16 @@ def apply_import(
     if current.kind == "backup":
         restored = restore_backup(raw, paths)
         return ImportResult("backup", restored.restored_files, 0, restored)
-    published: list[Path] = []
-    try:
-        for operation, (target, content) in zip(current.operations, current._payloads, strict=True):
-            if operation.action == "skip":
-                continue
-            publish_immutable(target, content)
-            published.append(target)
-    except Exception:
-        for path in published:
-            path.unlink(missing_ok=True)
-        raise
-    return ImportResult(current.kind, len(published), current.skipped_count)
+    with exclusive_data_operation(paths.data_dir):
+        published: list[Path] = []
+        try:
+            for operation, (target, content) in zip(current.operations, current._payloads, strict=True):
+                if operation.action == "skip":
+                    continue
+                publish_immutable(target, content)
+                published.append(target)
+        except Exception:
+            for path in published:
+                path.unlink(missing_ok=True)
+            raise
+        return ImportResult(current.kind, len(published), current.skipped_count)

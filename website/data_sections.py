@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from holdet_lib.refresh_runs import RefreshRunBusyError
+
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -165,7 +167,7 @@ def _report_actions(package, *, title: str, stem: str, paths: AppPaths, key: str
         try:
             artifact = ReportStore(paths.report_dir).save(package, title=title, stem=stem)
             registered = register_artifact(paths, artifact.path)
-        except (OSError, ValueError, PayloadError) as exc:
+        except (OSError, ValueError, PayloadError, RefreshRunBusyError) as exc:
             st.error(f"Rapporten kunne ikke gemmes: {exc}")
         else:
             st.session_state[f"{key}-artifact"] = (registered.artifact_id, artifact.path.name)
@@ -248,7 +250,7 @@ def render_exports(
         seasons = SeasonStore(paths.seasons_file).load()
         events, warnings = HallOfFameStore(paths.hall_of_fame_dir).scan()
         settings = HubSettingsStore(paths.hub_settings_file).load()
-    except (OSError, ValueError, PayloadError) as exc:
+    except (OSError, ValueError, PayloadError, RefreshRunBusyError) as exc:
         st.error(f"Sæsondata kunne ikke læses: {exc}")
         return
     if warnings:
@@ -323,7 +325,7 @@ def render_import_backup(paths: AppPaths) -> None:
             try:
                 path = create_backup(paths)
                 registered = register_artifact(paths, path)
-            except (OSError, ValueError, PayloadError) as exc:
+            except (OSError, ValueError, PayloadError, RefreshRunBusyError) as exc:
                 st.error(f"Backup kunne ikke oprettes: {exc}")
             else:
                 st.session_state["latest-backup-artifact"] = (
@@ -351,7 +353,7 @@ def render_import_backup(paths: AppPaths) -> None:
         raw = uploaded.getvalue()
         try:
             preview = preview_import(raw, paths, filename=uploaded.name)
-        except (OSError, ValueError, PayloadError) as exc:
+        except (OSError, ValueError, PayloadError, RefreshRunBusyError) as exc:
             st.error(f"Filen kunne ikke forhåndsvises: {exc}")
             return
         _show_import_preview(preview)
@@ -373,7 +375,7 @@ def render_import_backup(paths: AppPaths) -> None:
         ):
             try:
                 result = apply_import(preview, raw, paths)
-            except (OSError, ValueError, PayloadError) as exc:
+            except (OSError, ValueError, PayloadError, RefreshRunBusyError) as exc:
                 st.error(f"Importen blev ikke udført: {exc}")
             else:
                 st.cache_data.clear()
@@ -405,7 +407,7 @@ def _archive_dialog(
     ):
         try:
             result = archive_retention_candidates(paths, selected)
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, RefreshRunBusyError) as exc:
             st.error(f"Arkiveringen blev afbrudt: {exc}")
         else:
             message = (
@@ -436,7 +438,7 @@ def _delete_dialog(paths: AppPaths, selected: tuple[CleanupCandidate, ...]) -> N
     ):
         try:
             deleted = delete_derived_files(paths, tuple(item.path for item in selected))
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, RefreshRunBusyError) as exc:
             st.error(f"Sletningen blev afbrudt: {exc}")
         else:
             st.session_state["data-action-message"] = f"{len(deleted)} afledte filer blev slettet."
@@ -501,7 +503,7 @@ def _integrity_panel(paths: AppPaths) -> None:
             ):
                 try:
                     path = repair_integrity_index(paths, repair)
-                except (OSError, ValueError) as exc:
+                except (OSError, ValueError, RefreshRunBusyError) as exc:
                     st.error(f"Indekset blev ikke repareret: {exc}")
                 else:
                     st.session_state["data-action-message"] = f"Det afledte indeks er erstattet atomisk: {path.name}."

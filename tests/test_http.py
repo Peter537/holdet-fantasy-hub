@@ -31,6 +31,11 @@ class _Response:
 
 
 class HttpRetryTests(unittest.TestCase):
+    def test_html_response_instead_of_json_has_actionable_error(self) -> None:
+        with patch("holdet_lib.http.urlopen", return_value=_Response(b"<!DOCTYPE html><html><title>Holdet.dk</title></html>")):
+            with self.assertRaisesRegex(holdet.PayloadError, "HTML-side i stedet for JSON"):
+                holdet.HttpClient().fetch_json("https://example.test/api/cartridge")
+
     def test_direct_connection_refusal_can_succeed_on_fifth_attempt(self) -> None:
         sleeps: list[float] = []
         refused = ConnectionRefusedError(errno.ECONNREFUSED, "refused")

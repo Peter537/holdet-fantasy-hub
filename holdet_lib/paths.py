@@ -40,6 +40,10 @@ class AppPaths:
     integrity_index_file: Path
     artifact_registry_file: Path
 
+    @property
+    def refresh_run_dir(self) -> Path:
+        return self.data_dir / "refresh-runs"
+
 
 @dataclass(frozen=True, slots=True)
 class PathOverrides:

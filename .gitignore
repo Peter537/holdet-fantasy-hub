@@ -1,4 +1,6 @@
 __pycache__/
+.venv/
+/.codex-tmp/
 *.py[cod]
 *.egg-info/
 .pytest_cache/

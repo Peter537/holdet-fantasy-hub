@@ -65,7 +65,7 @@ Rene builders skriver ikke filer. Stores skriver kun efter eksplicitte handlinge
 
 `website/server.py` er den kanoniske `st.App`-wrapper og registrerer loopback-only API-ruter. `website/app.py` er en tynd entrypoint: den konfigurerer siden, registrerer filbaserede sider, bygger den typed `UiContext`, håndterer legacy-links, tegner den dynamiske sidebar og kører den valgte side. `website/navigation.py` er den eneste route-tabel og ejer `PageId`, `go_to`, `page_link` og legacy-mapping. De filbaserede moduler i `website/app_pages/` gør native routing og `AppTest.switch_page` ensartede.
 
-`website/ui.py` ejer den fælles kontekst og de eksisterende domænevisninger. `website/scouting_page.py` ejer den globale `/scouting`-side, kontekstuelle scoutingpaneler, plots, bulkhandlinger og spillerens peer-/similaritetsvisninger. `website/round_center_page.py` sammensætter Rundecenterets rene builders og modtager fremdrift fra eksplicit refresh; `website/hub_pages.py` ejer Managers, Kalender, Rundens historie og relaterede paneler; `website/analysis_pages.py` ejer beslutningspaneler og spillerens ændringsforklaring; `website/data_sections.py` ejer data-, import-, integritets- og oprydningsflows. Spillerfiltre/-tabel, analysepanel, kalender og managercenter er sekventielle `st.fragment`-grænser. Muterende handlinger afsluttes med fuld `st.rerun()`, mens filterændringer bliver i fragmentet. Query-parametre og semantiske session-state-nøgler fastholder kontekst. Almindelig navigation læser cache.
+`website/ui.py` ejer den fælles kontekst og de eksisterende domænevisninger. `website/preferences.py` ejer værktøjstilvalg og engangsadgang. `website/workflows.py` ejer de fælles opdaterings- og JSON-handlinger samt read-only fremdriftspolling. `website/refresh_service.py` forbinder den Streamlit-uafhængige worker med klienter og stores; arbejdet fortsætter på tværs af browsernavigation og kræver eksplicit genoptagelse efter procesafbrydelse. `website/scouting_page.py` ejer den globale `/scouting`-side, kontekstuelle scoutingpaneler, plots, bulkhandlinger og spillerens peer-/similaritetsvisninger. `website/round_center_page.py` sammensætter Rundecenterets rene builders og modtager fremdrift fra eksplicit refresh; `website/hub_pages.py` ejer Managers, Kalender, Rundens historie og relaterede paneler; `website/analysis_pages.py` ejer beslutningspaneler og spillerens ændringsforklaring; `website/data_sections.py` ejer data-, import-, integritets- og oprydningsflows. Spillerfiltre/-tabel, analysepanel, kalender og managercenter er sekventielle `st.fragment`-grænser. Muterende handlinger afsluttes med fuld `st.rerun()`, mens filterændringer bliver i fragmentet. Query-parametre og semantiske session-state-nøgler fastholder kontekst. Almindelig navigation læser cache.
 
 ```mermaid
 flowchart LR
@@ -128,15 +128,17 @@ Seeds fryses ved oprettelse. Schema 8 bruger fortsat `TournamentConfig` som runt
 ## Dataejerskab
 
 - `SnapshotIndex` er læseindekset for uforanderlige snapshots.
-- `HubSettings` schema 4 ejer watchlistregler og -begrundelser, beregnede spillerkolonner, `ManagerProfile`, spillerannotationer, gemte filterprofiler, standardhold, eksperimentelt opt-in og den globale pointprofil. Schema 1–3 migreres kun i hukommelsen ved læsning.
+- `HubSettings` schema 5 ejer tilvalg af værktøjer samt watchlistregler og -begrundelser, beregnede spillerkolonner, `ManagerProfile`, spillerannotationer, gemte filterprofiler, standardhold, eksperimentelt opt-in og den globale pointprofil. Schema 1–4 migreres kun i hukommelsen ved læsning.
 - `analysis-inbox.json` schema 2 ejer regel- og snapshottidsbaserede watchlistalarmer og deres læst-/afvisttilstand; schema 1 dual-reades.
 - Uforanderlige spillersnapshots schema 4 ejer de obligatoriske spillerfelter og valgfrie popularitets-, trend-, indeks- og præstationsfelter. Schema 1–3 dual-reades.
 - `groups.json` schema 8 ejer managerspil, grupper, officielle links og `TournamentDefinition`.
 - `seasons.json` schema 1 ejer manuelle sæsondefinitioner.
-- pairing-store schema 1 ejer publicerede parringer pr. turneringsrevision.
+- pairing-store schema 2 ejer publicerede Swiss-parringer og frosne knockoutdeltagere pr. turneringsrevision; schema 1 læses fortsat.
 - eventledger schema 2 ejer rå managerresultater og revisioner.
 - `GameMetadata` schema 2 ejer schedule, deadlines og en fail-closed sæsonregelprojektion, som kalender og analyser læser uden fetch.
-- Uforanderlige metadatarevisioner ejer regel- og scheduleændringer, mens `RefreshManifest` schema 2 ejer udfald, cacheprovenance og retryrelationer for eksplicitte opdateringer. Manifest schema 1 og 2 læses side om side uden startup-write.
+- Uforanderlige metadatarevisioner ejer regel- og scheduleændringer, mens `RefreshManifest` schema 3 ejer udfald, cacheprovenance, ønskede runder, annullering og retryrelationer for eksplicitte opdateringer. Manifest schema 1, 2 og 3 læses side om side uden startup-write.
+- `RefreshRunCoordinator` gemmer schema-1-kørselsjournaler og ventende manifester under `data/refresh-runs/`. En proceslås uden for den udskiftelige datamappe deles med restore, import og retention.
+- `ResolvedScope` er den fælles medlemsafgrænsning for indhentning og samlet JSON. JSON schema 1 er en ren cacheprojektion og uafhængig af tabelfiltre.
 - `DataPackage` schema 1 er den fælles, rene tabulære projektion for CSV, XLSX, Parquet og rapporter.
 - `integrity-index.json` schema 1 er et afledt checksumindeks, der kan genopbygges uden at ændre kanoniske filer.
 - Fixturecache schema 1 ejer kun offentligt verificerede, parsertestede kampe; difficulty kræver særskilt feltdokumentation.
@@ -149,7 +151,7 @@ Se [Datalagring](data-storage.md) for konkrete stier og kompatibilitetsregler.
 | --- | --- |
 | Hentning | `HoldetClient`, `GameUrl`, `ScrapedGame`, `ScrapedTeam`, `RoundStatus` |
 | Rundecenter | `RoundCenterReadiness`, `RoundDeviation`, `RoundComparison`, `GroupMatrix`, `build_round_center_readiness`, `build_round_deviations`, `build_round_comparison`, `build_group_matrix` |
-| Refresh | `RefreshPlan`, `RefreshProgressEvent`, `RefreshManifest`, `build_refresh_plan`, `refresh_manager_game` |
+| Refresh | `RefreshPlan`, `RefreshProgressEvent`, `RefreshManifest`, `build_refresh_plan`, `refresh_manager_game`, `catch_up_manager_game`, `RefreshRunCoordinator` |
 | Identitet | `ManagerProfile`, `HubSettings`, `HubSettingsStore`, `build_effective_manager_settings`, `manager_identity_keys`, `resolve_manager_identity` |
 | Manageranalyse | `ManagerEvent`, `ManagerRating`, `ManagerCareer`, `ManagerHeadToHead`, `RoundAward`, `RoundStory`, `RoundStoryFact`, `build_hall_of_fame`, `render_round_story_html` |
 | Sæson | `SeasonDefinition`, `SeasonStanding`, `SeasonStore`, `build_season_standings` |
@@ -164,7 +166,7 @@ Se [Datalagring](data-storage.md) for konkrete stier og kompatibilitetsregler.
 | Alarmer og fixtures | `AnalysisInboxStore`, `WatchlistReason`, `WatchRule`, `build_watchlist_alerts`, `FixtureRecord`, `FixtureStore`, `parse_fixture_records` |
 | Datastatus | `DataQualityReport`, `build_data_quality_report` |
 | Backup | `create_backup`, `validate_backup`, `restore_backup` |
-| Dataportabilitet | `DataPackage`, `DataTable`, `serialize_data_package`, `preview_import`, `anonymize_data_package` |
+| Dataportabilitet | `ResolvedScope`, `resolve_scope`, `build_scope_export`, `serialize_scope_export`, `DataPackage`, `DataTable`, `serialize_data_package`, `preview_import`, `anonymize_data_package` |
 | Integritet og lager | `quick_integrity_check`, `full_integrity_check`, `repair_integrity_index`, `build_storage_inventory`, `plan_snapshot_retention` |
 | Sportsadaptere | `SportAdapter`, `SportCapabilities`, `get_sport_adapter`, `registered_sport_adapters` |
 | Lokalt API | `LocalDataApi`, `dataset_catalog`, `register_artifact` |

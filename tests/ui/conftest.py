@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import shutil
 import socket
 import subprocess
 import sys
@@ -54,6 +55,10 @@ def _seed_data(root: Path) -> None:
     store.create_manager_game(game, "Tourspillet 2026")
     store.create_manager_game("super-manager-fall-2026", "Super Manager")
     store.create_manager_game("golf-manager-2026", "Golf Manager")
+    for index in range(7):
+        store.create_manager_game(f"synthetic-manager-{index + 1}-2026", f"Testspil {index + 1}")
+    archived = store.create_manager_game("synthetic-archived-2026", "Arkivspil")
+    store.archive_manager_game(archived.game)
 
     teams = tuple(
         sample_team(
@@ -65,6 +70,13 @@ def _seed_data(root: Path) -> None:
             history_rounds=(3, 2, 1),
         )
         for index in range(8)
+    )
+    teams = (
+        replace(teams[0], history=tuple(
+            replace(round_, round_status="in_progress") if round_.round_number == 3 else round_
+            for round_ in teams[0].history
+        )),
+        *teams[1:],
     )
     members = tuple(
         holdet.GroupTeam(
@@ -79,6 +91,11 @@ def _seed_data(root: Path) -> None:
         for team in teams
     )
     store.create("UI Testliga", game, members, group_id="ui-testliga")
+    store.create_tournament(
+        "UI Testcup", game, members[:4], group_id="ui-testcup",
+        start_round=1, final_round=3, rounds_per_tie=1,
+        template="league", shuffle=lambda values: None,
+    )
 
     team_store = holdet.SnapshotStore(paths.snapshot_dir)
     for index, team in enumerate(teams):
@@ -86,6 +103,16 @@ def _seed_data(root: Path) -> None:
             team,
             now=FIXED_TIME.replace(minute=index),
         )
+    long_history = sample_team(
+        801, name="Lang historik", slug="synthetic-manager-1-2026",
+        current_round=20, history_rounds=tuple(range(1, 21)), total=1000, change=40,
+    )
+    store.create(
+        "UI Lang historik", long_history.reference.game,
+        (holdet.GroupTeam(801, long_history.team_name, long_history.reference.source_url),),
+        group_id="ui-long-history",
+    )
+    team_store.save_team_json(long_history, now=FIXED_TIME)
 
     base = sample_statistics(round_number=3)
     base_entry = base.entries[0]
@@ -152,6 +179,7 @@ def _seed_data(root: Path) -> None:
     )
     holdet.HubSettingsStore(paths.hub_settings_file).save(
         holdet.HubSettings(
+            enabled_features=(holdet.HubFeature.SCOUTING,),
             watchlist=(watched,),
             player_annotations=(
                 holdet.PlayerAnnotation(
@@ -171,6 +199,27 @@ def _seed_data(root: Path) -> None:
 def ui_server(tmp_path_factory: pytest.TempPathFactory) -> UiServer:
     root = tmp_path_factory.mktemp("holdet-ui-data")
     _seed_data(root)
+    # Keep the server strictly local even if a UI action accidentally fetches.
+    # Record attempted remote DNS so a cached-navigation test can assert none.
+    (root / "sitecustomize.py").write_text(
+        "import socket\n"
+        "from pathlib import Path\n"
+        "_original = socket.getaddrinfo\n"
+        "def _local_only(host, *args, **kwargs):\n"
+        "    if host not in (None, '', 'localhost', '127.0.0.1', '::1'):\n"
+        f"        Path({str(root / 'remote-attempts.log')!r}).open('a', encoding='utf-8').write(str(host) + '\\n')\n"
+        "        raise OSError('Remote network disabled in UI tests')\n"
+        "    return _original(host, *args, **kwargs)\n"
+        "socket.getaddrinfo = _local_only\n"
+        "from datetime import datetime, timezone\n"
+        "import website.presentation as presentation\n"
+        "class FixedDatetime(datetime):\n"
+        "    @classmethod\n"
+        "    def now(cls, tz=None):\n"
+        "        return cls.fromtimestamp(1793448000, tz=tz)\n"
+        "presentation.datetime = FixedDatetime\n",
+        encoding="utf-8",
+    )
     port = _free_loopback_port()
     base_url = f"http://127.0.0.1:{port}"
     log_path = root / "streamlit-ui.log"
@@ -180,6 +229,7 @@ def ui_server(tmp_path_factory: pytest.TempPathFactory) -> UiServer:
         "PYTHONUTF8": "1",
         "STREAMLIT_BROWSER_GATHER_USAGE_STATS": "false",
         "STREAMLIT_SERVER_FILE_WATCHER_TYPE": "none",
+        "PYTHONPATH": os.pathsep.join((str(root), str(PROJECT_ROOT), os.environ.get("PYTHONPATH", ""))),
     }
     command = (
         sys.executable,
@@ -234,6 +284,7 @@ def ui_server(tmp_path_factory: pytest.TempPathFactory) -> UiServer:
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait(timeout=10)
+    shutil.rmtree(root)
 
 
 @pytest.fixture(scope="session")

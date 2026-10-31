@@ -57,6 +57,8 @@ def test_metadata_store_preserves_baseline_and_structured_changes(tmp_path) -> N
         first.fetched_at,
     ]
     assert revisions[-1].changes == ()
+    assert revisions[0].promotion == "current"
+    assert revisions[-1].promotion == "unknown"
     assert {(item.kind, item.field) for item in revisions[0].changes} == {
         ("game", "salary_cap"),
         ("schedule", "start"),

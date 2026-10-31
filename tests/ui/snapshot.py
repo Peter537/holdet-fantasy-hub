@@ -13,7 +13,7 @@ import pytest
 BASELINES = Path(__file__).with_name("baselines") / "chromium-win32"
 ARTIFACTS = Path(__file__).with_name("artifacts")
 UPDATE_COMMAND = (
-    "py -3.14 -m pytest tests/ui -q --run-ui --browser chromium "
+    ".\\.venv\\Scripts\\python.exe -m pytest tests/ui -q --run-ui --browser chromium "
     "--update-ui-snapshots"
 )
 

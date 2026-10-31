@@ -259,7 +259,8 @@ def test_refresh_progress_and_manifest_distinguish_cache_and_failure() -> None:
         ]
         assert [item.completed_steps for item in events] == [0, 1, 1, 2, 2, 3]
         raw = json.loads(result.manifest_path.read_text(encoding="utf-8"))
-        assert raw["schema_version"] == 2
+        assert raw["schema_version"] == 3
+        assert next(step for step in raw["steps"] if step["step_id"] == "players")["requested_round"] == 3
         assert all(
             not Path(reference).is_absolute()
             for step in raw["steps"]
@@ -333,7 +334,7 @@ def test_manifest_store_dual_reads_and_rejects_unsafe_schema_two() -> None:
             store.write(unsafe)
 
 
-def test_backup_validation_accepts_both_manifest_schemas() -> None:
+def test_backup_validation_accepts_supported_manifest_schemas() -> None:
     assert known_schema_error(
         "data/manifests/da--demo/game/refresh-round3.json",
         b'{"schema_version": 1}',
@@ -342,10 +343,14 @@ def test_backup_validation_accepts_both_manifest_schemas() -> None:
         "data/manifests/da--demo/game/refresh-round3.json",
         b'{"schema_version": 2}',
     ) is None
+    assert known_schema_error(
+        "data/manifests/da--demo/game/refresh-round3.json",
+        b'{"schema_version": 3}',
+    ) is None
     assert "ukendt manifestschema" in str(
         known_schema_error(
             "data/manifests/da--demo/game/refresh-round3.json",
-            b'{"schema_version": 3}',
+            b'{"schema_version": 4}',
         )
     )
 
@@ -756,6 +761,7 @@ def test_alert_persistence_failure_does_not_reclassify_fetched_players() -> None
     )
     baseline = replace(adverse, entries=(healthy_entry,))
     settings = holdet.HubSettings(
+        enabled_features=("alerts",),
         watchlist=(holdet.watchlist_entry(manager_game.game, healthy_entry),)
     )
 
@@ -875,6 +881,7 @@ def test_non_player_postprocess_does_not_replay_old_alert_transition() -> None:
         ),
     )
     settings = holdet.HubSettings(
+        enabled_features=("alerts",),
         watchlist=(holdet.watchlist_entry(manager_game.game, healthy.entries[0]),)
     )
     prior = _previous_manifest(

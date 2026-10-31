@@ -355,7 +355,7 @@ def test_player_schema_four_preserves_optional_public_fields() -> None:
     assert holdet.player_statistics_from_dict(payload) == game
 
 
-def test_settings_three_migrates_in_memory_without_startup_write_and_saves_four() -> None:
+def test_settings_three_migrates_in_memory_without_startup_write_and_saves_five() -> None:
     legacy_entry = holdet.watchlist_entry(GAME, entry(1))
     legacy = {
         "schema_version": 3,
@@ -398,7 +398,7 @@ def test_settings_three_migrates_in_memory_without_startup_write_and_saves_four(
         )
         updated = store.set_computed_player_columns(settings, (column,))
         assert updated.computed_player_columns == (column,)
-        assert json.loads(path.read_text(encoding="utf-8"))["schema_version"] == 4
+        assert json.loads(path.read_text(encoding="utf-8"))["schema_version"] == 5
 
 
 def test_bulk_settings_write_is_all_or_nothing() -> None:

@@ -33,7 +33,7 @@ En spiladresse normaliseres til locale og slug fra:
 https://www.holdet.dk/<locale>/fantasy/<slug>/...
 ```
 
-En bar slug bruger locale `da`. Ukendte hosts og ugyldige stier afvises før en netværksanmodning. Den offentlige spilside hentes fra `https://www.holdet.dk/<locale>/season/<slug>`. `GameUrl.season_root_url` bygger adressen; `nexus_root_url` er et kompatibilitetsalias til samme adresse. JSON-data hentes fra `https://www.holdet.dk/api/season`, herunder `/cartridges/<slug>` til spilmetadata.
+En bar slug bruger locale `da`. Ukendte hosts og ugyldige stier afvises før en netværksanmodning. Den offentlige spilside hentes fra `https://www.holdet.dk/<locale>/season/<slug>`. `GameUrl.season_root_url` bygger adressen; `nexus_root_url` er et kompatibilitetsalias til samme adresse. JSON-data hentes fra `https://www.holdet.dk/api/fantasy`, herunder `/cartridges/<slug>` til spilmetadata. Den tidligere `/api/season`-adresse returnerer en HTML-side og må ikke bruges til JSON-hentninger.
 
 Cartridge-data leverer ruleset og metadata. Biblioteket skelner mellem rå route-variant, normaliseret format (`soccer`, `cycling`, `formula1`, `golf`, `nfl`) og enhed (`money`, `points`). `salaryCap > 0` betyder penge; `salaryCap = 0` betyder point. Det er nødvendigt for cykling, hvor route-navnet alene ikke afgør enheden.
 
@@ -51,17 +51,17 @@ De obligatoriske identitets-, hold-, positions-, pris- og statusfelter valideres
 
 **Mellem runder** sammenligner det nyeste lokale snapshot i valgt og foregående tilgængelige runde. **Mellem hentninger** sammenligner de to seneste kronologiske snapshots uden at kollapse samme rundenummer. Begge er rene cacheberegninger.
 
-Efter **Hent seneste** evalueres watchlistregler mod den umiddelbart foregående hentning og, for prisdeltaets resettilstand, den foregående baseline. Pris-, procent- og Form 3/5-regler kræver en krydsning; første observation uden baseline alarmerer ikke. Statusreglen registrerer enhver overgang. Historisk backfill danner aldrig aktuelle alarmer.
+Efter **Hent seneste** evalueres watchlistregler, når Statusalarmer er aktiveret i Indstillinger, mod den umiddelbart foregående hentning og, for prisdeltaets resettilstand, den foregående baseline. Pris-, procent- og Form 3/5-regler kræver en krydsning; første observation uden baseline alarmerer ikke. Statusreglen registrerer enhver overgang. Historisk backfill danner aldrig aktuelle alarmer.
 
 ## Fantasyhold, historik og schedule
 
-En teamhentning kombinerer fantasyteam-siden, `/api/season/fantasyteams/<id>/history`, offentlige ranglister og cartridge-data. `/api/season/schedules/<schedule-id>` hentes sammen med manuelle spiller- og holdhentninger.
+En teamhentning kombinerer fantasyteam-siden, `/api/fantasy/fantasyteams/<id>/history`, offentlige ranglister og cartridge-data. `/api/fantasy/schedules/<schedule-id>` hentes sammen med manuelle spiller- og holdhentninger.
 
 Spillets cartridge leverer `defaultFantasyLeagueId`, som bruges til at hente holdets officielle placeringer blandt alle hold i managerspillet:
 
 ```text
-/api/season/fantasyteams/<team-id>/fantasyleagues/<defaultFantasyLeagueId>/leaderboards/overall
-/api/season/fantasyteams/<team-id>/fantasyleagues/<defaultFantasyLeagueId>/leaderboards/round
+/api/fantasy/fantasyteams/<team-id>/fantasyleagues/<defaultFantasyLeagueId>/leaderboards/overall
+/api/fantasy/fantasyteams/<team-id>/fantasyleagues/<defaultFantasyLeagueId>/leaderboards/round
 ```
 
 Begge svar indeholder en `items`-liste med `round` og `rank`. Importen matcher på rundenummer og gemmer `overall` som `RoundSummary.overall_rank` og `round` som `RoundSummary.round_rank`. Samlet placering gælder holdets total i den pågældende runde; rundeplacering gælder kun rundens vækst. Grupperang beregnes separat ud fra den lokale gruppes medlemmer.
@@ -76,11 +76,15 @@ For pengebaserede spil kontrolleres opstillingens værdi mod historikkens total 
 
 ## Manuelle opdateringer og eventrevisioner
 
-Kun eksplicitte manager-, spiller-, hold-, gruppe- og turneringshandlinger skriver nye snapshots eller metadata. **Opdater managerspil** udfører en bekræftet `RefreshPlan`: alt, kun manglende/forældede data eller kun retrybare fejl fra et tidligere manifest. Hold deduplikeres på tværs af grupper, fremdrift rapporteres pr. datakilde, og gyldig kompatibel cache kan genbruges efter en kildefejl. En komplet slutrunde-refresh, arkivering eller **Genopbyg historik fra cache** kan desuden publicere manager-events.
+Kun eksplicitte manager-, spiller-, hold-, gruppe- og turneringshandlinger skriver nye snapshots eller metadata. **Opdater alle** starter én baggrundskørsel for alle aktive managerspil; **Opdater data** bruger samme indhentning for ét spil eller én konkurrence. En spilopdatering omfatter gruppernes unikke hold og et eventuelt eget hold valgt under spillets **Flere funktioner → Indstillinger**. Konkurrenceopdatering omfatter kun dens deltagere. Gyldig kompatibel cache kan genbruges efter en kildefejl.
+
+Indhentningen genvurderer metadata og seneste spillerdata, udfylder manglende historiske spillerunder og genhenter afsluttede runder med foreløbigt eller uverificeret grundlag. Et retry bevarer den oprindeligt ønskede runde og afviser svar fra en anden runde. Fremdrift, delresultater og ventende manifester journalføres, så browseren kan genindlæses, og en afbrudt kørsel kan genoptages eksplicit. Én proceslås forhindrer overlappende opdateringer og samtidige restore-, import- eller retentionmutationer. Se [Rundecenter](round-center.md) for stop og genoptagelse.
+
+Det udvidede Rundecenter har fortsat et bekræftet `RefreshPlan`-preview med alt, kun manglende/forældede data eller kun retrybare fejl fra et tidligere manifest. En komplet slutrunde-refresh, arkivering eller **Genopbyg historik fra cache** kan desuden publicere manager-events.
 
 Et komplet resultat er append-only. Hvis kildedata rettes, gemmes en højere eventrevision med reference til den supersedede revision; den gamle payload overskrives ikke. Schema-1 Hall of Fame-events læses som legacy-revisioner og remappes gennem de aktuelle managerprofiler.
 
-Almindelig navigation beregner kun Elo, awards, historier, H2H, sæsonstillinger og kalender-events som previews. Ufuldstændige runder markeres foreløbige og fryses ikke. Swiss-parringer publiceres først efter en eksplicit refresh, som har gjort den foregående runde komplet.
+Almindelig navigation beregner kun Elo, awards, historier, H2H, sæsonstillinger og kalender-events som previews. Ufuldstændige runder markeres foreløbige og fryses ikke. Swiss-parringer publiceres først efter en eksplicit refresh, som har gjort den foregående runde komplet. Publicerede knockoutdeltagere fryses også pr. turneringsrevision; senere datakorrektioner ændrer scorer, men kan give en konflikt, som kræver en ny revision frem for stiltiende at udskifte deltagere.
 
 ## HTTP, retries og proxy
 
@@ -98,7 +102,9 @@ Ved fejl bevarer dashboardet en gyldig cache og tilbyder et eksplicit retry. Nav
 
 Nødvendige felter valideres strengt. Tom spillerliste, manglende runde, ukendt format eller uforenelig historik giver en konkret fejl uden delvist snapshot. Valgfrie offentlige scoutingfelter kan være `None`; UI og det lokale API viser manglen og substituerer aldrig nul.
 
-Der findes ingen baggrundspolling eller scheduler. Kalenderen er cache-only og opretter ikke ICS-filer eller påmindelser. Historiske opstillinger vises kun, hvis et kanonisk teamsnapshot blev gemt præcis i runden. Manglende værdier, top-procenter eller resultater estimeres aldrig.
+Der findes ingen automatisk netværkspolling eller scheduler. En eksplicit startet worker kan fortsætte, mens browseren navigerer; UI’et poller kun den lokale kørselsjournal. Kalenderen er cache-only og opretter ikke ICS-filer eller påmindelser. Historiske opstillinger vises kun, hvis et kanonisk teamsnapshot blev gemt præcis i runden. Manglende værdier, top-procenter eller resultater estimeres aldrig.
+
+**Download JSON** opretter én samlet fil fra lokal cache med hele spillerkataloget, scopets hold, historik, konkurrencer og kildeoplysninger. Download udløser ingen Holdet-kald. **Opdater før download** starter indhentningen; efter afslutning vises downloadknappen direkte ved kørselsresultatet. Se [Dataportabilitet](data-portability.md).
 
 ## Fixturekilder og sæsonregler
 

@@ -202,10 +202,79 @@ class PlayerStatisticsIndex:
     def newest(
         self, game: GameUrl, round_number: int | None = None
     ) -> PlayerStatisticsSnapshot | None:
+        """Return the most recently fetched snapshot, including backfilled rounds."""
+
         for snapshot in self.for_game(game):
             if round_number is None or snapshot.statistics.round_number == round_number:
                 return snapshot
         return None
+
+    def through(
+        self,
+        game: GameUrl,
+        *,
+        round_number: int | None = None,
+        generated_at: datetime | None = None,
+    ) -> PlayerStatisticsIndex:
+        """Restrict a game's history to inclusive round and fetch-time bounds.
+
+        A round bound permits later corrections to earlier rounds. Add a fetch
+        bound when reproducing the information available at a particular fetch.
+        """
+
+        if round_number is not None and (
+            isinstance(round_number, bool)
+            or not isinstance(round_number, int)
+            or round_number < 0
+        ):
+            raise ValueError("Rundenummeret skal være ikke-negativt")
+        cutoff = aware_local(generated_at) if generated_at is not None else None
+        return PlayerStatisticsIndex(
+            tuple(
+                snapshot
+                for snapshot in self.for_game(game)
+                if (
+                    round_number is None
+                    or snapshot.statistics.round_number <= round_number
+                )
+                and (cutoff is None or aware_local(snapshot.generated_at) <= cutoff)
+            ),
+            self.warnings,
+        )
+
+    def per_round(
+        self,
+        game: GameUrl,
+        *,
+        round_number: int | None = None,
+        generated_at: datetime | None = None,
+    ) -> tuple[PlayerStatisticsSnapshot, ...]:
+        """Return each round's newest eligible fetch, ordered by round.
+
+        Keep the whole snapshot so values, completion status and timestamps
+        always refer to the same observation.
+        """
+
+        selected: dict[int, PlayerStatisticsSnapshot] = {}
+        for snapshot in self.through(
+            game, round_number=round_number, generated_at=generated_at
+        ).for_game(game):
+            selected.setdefault(snapshot.statistics.round_number, snapshot)
+        return tuple(selected[number] for number in sorted(selected))
+
+    def latest_round(
+        self,
+        game: GameUrl,
+        *,
+        round_number: int | None = None,
+        generated_at: datetime | None = None,
+    ) -> PlayerStatisticsSnapshot | None:
+        """Return the highest eligible round's newest fetch, ignoring backfill order."""
+
+        rounds = self.per_round(
+            game, round_number=round_number, generated_at=generated_at
+        )
+        return rounds[-1] if rounds else None
 
 def _team_directory(output_dir: Path, team: ScrapedTeam) -> Path:
     account_component = (
@@ -366,6 +435,7 @@ ManifestStepStatus = Literal[
     "reused_after_error",
     "failed_no_cache",
     "skipped_unavailable",
+    "cancelled",
     "not_recorded",
 ]
 
@@ -400,6 +470,7 @@ class RefreshManifestStep:
     cache_generated_at: datetime | None = None
     error: str | None = None
     origin_run_id: str | None = None
+    requested_round: int | None = None
 
     @property
     def reused_cache(self) -> bool:
@@ -407,7 +478,7 @@ class RefreshManifestStep:
 
     @property
     def retryable(self) -> bool:
-        return self.status in {"reused_after_error", "failed_no_cache"}
+        return self.status in {"reused_after_error", "failed_no_cache", "cancelled"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -567,13 +638,22 @@ def _metadata_change_from_dict(raw: object, index: int) -> RefreshMetadataChange
     )
 
 
-def _manifest_step_to_dict(step: RefreshManifestStep) -> dict[str, object]:
+def _manifest_step_to_dict(step: RefreshManifestStep, *, version: int = 2) -> dict[str, object]:
     if step.status == "not_recorded":
         raise ValueError("not_recorded må ikke skrives i schema 2")
     if step.source not in _MANIFEST_SOURCES:
         raise ValueError(f"Ukendt manifestkilde: {step.source}")
     if step.status not in _MANIFEST_WIRE_STATUSES:
-        raise ValueError(f"Ukendt manifeststatus: {step.status}")
+        if version != 3 or step.status != "cancelled":
+            raise ValueError(f"Ukendt manifeststatus: {step.status}")
+    if version == 2 and step.requested_round is not None:
+        raise ValueError("requested_round kræver schema 3")
+    if step.requested_round is not None and (
+        isinstance(step.requested_round, bool)
+        or not isinstance(step.requested_round, int)
+        or step.requested_round < 0
+    ):
+        raise ValueError("Manifeststeppets requested_round er ugyldig")
     if not step.step_id.strip() or not step.label.strip():
         raise ValueError("Manifeststeps kræver step_id og label")
     if step.round_number is not None and step.round_number < 0:
@@ -628,7 +708,7 @@ def _manifest_step_to_dict(step: RefreshManifestStep) -> dict[str, object]:
         and data_reference is None
     ):
         raise ValueError("Et hentet kildestep kræver data_reference")
-    return {
+    result = {
         "step_id": step.step_id,
         "source": step.source,
         "label": step.label,
@@ -655,9 +735,12 @@ def _manifest_step_to_dict(step: RefreshManifestStep) -> dict[str, object]:
         "error": step.error,
         "origin_run_id": step.origin_run_id,
     }
+    if version == 3:
+        result["requested_round"] = step.requested_round
+    return result
 
 
-def _manifest_step_from_dict(raw: object, index: int) -> RefreshManifestStep:
+def _manifest_step_from_dict(raw: object, index: int, *, version: int = 2) -> RefreshManifestStep:
     if not isinstance(raw, dict):
         raise PayloadError(f"Manifestets steps[{index}] skal være et objekt")
     step_id = _manifest_text(raw.get("step_id"), f"steps[{index}].step_id")
@@ -666,7 +749,7 @@ def _manifest_step_from_dict(raw: object, index: int) -> RefreshManifestStep:
     label = _manifest_text(raw.get("label"), f"steps[{index}].label")
     if source not in _MANIFEST_SOURCES:
         raise PayloadError(f"Manifestets steps[{index}] har ukendt kilde")
-    if status not in _MANIFEST_WIRE_STATUSES:
+    if status not in _MANIFEST_WIRE_STATUSES and not (version == 3 and status == "cancelled"):
         raise PayloadError(f"Manifestets steps[{index}] har ukendt status")
     attempted = raw.get("attempted")
     if not isinstance(attempted, bool):
@@ -732,9 +815,13 @@ def _manifest_step_from_dict(raw: object, index: int) -> RefreshManifestStep:
             f"steps[{index}].origin_run_id",
             optional=True,
         ),
+        requested_round=_manifest_integer(
+            raw.get("requested_round") if version == 3 else None,
+            f"steps[{index}].requested_round", optional=True,
+        ),
     )
     try:
-        _manifest_step_to_dict(parsed)
+        _manifest_step_to_dict(parsed, version=version)
     except (PayloadError, ValueError) as exc:
         raise PayloadError(f"Manifestets steps[{index}] er ugyldigt: {exc}") from exc
     if retryable is not None and retryable != parsed.retryable:
@@ -745,8 +832,8 @@ def _manifest_step_from_dict(raw: object, index: int) -> RefreshManifestStep:
 
 
 def _manifest_to_dict(manifest: RefreshManifest) -> dict[str, object]:
-    if manifest.schema_version != 2:
-        raise ValueError("Kun schema-2 manifests kan skrives")
+    if manifest.schema_version not in {2, 3}:
+        raise ValueError("Kun schema-2 og schema-3 manifests kan skrives")
     if manifest.scope not in {"game", "group"}:
         raise ValueError("Manifestet har ukendt scope")
     if not manifest.game_slug.strip() or not manifest.game_locale.strip():
@@ -802,6 +889,7 @@ def _manifest_to_dict(manifest: RefreshManifest) -> dict[str, object]:
             "reused_after_error": "cached_fallback",
             "failed_no_cache": "failed",
             "skipped_unavailable": "failed",
+            "cancelled": "failed",
         }[step.status]
         return {
             "team_id": step.team_id,
@@ -813,7 +901,7 @@ def _manifest_to_dict(manifest: RefreshManifest) -> dict[str, object]:
         }
 
     payload: dict[str, object] = {
-        "schema_version": 2,
+        "schema_version": manifest.schema_version,
         "scope": manifest.scope,
         "run_id": manifest.run_id,
         "started_at": manifest.started_at.isoformat(),
@@ -826,13 +914,13 @@ def _manifest_to_dict(manifest: RefreshManifest) -> dict[str, object]:
         "result": manifest.result,
         "attempted_team_ids": list(manifest.attempted_team_ids),
         "skipped_team_ids": list(manifest.skipped_team_ids),
-        "steps": [_manifest_step_to_dict(item) for item in manifest.steps],
+        "steps": [_manifest_step_to_dict(item, version=manifest.schema_version) for item in manifest.steps],
         "teams": [compatibility_step(item) for item in team_steps],
         "player": (
-            None if player_step is None else _manifest_step_to_dict(player_step)
+            None if player_step is None else _manifest_step_to_dict(player_step, version=manifest.schema_version)
         ),
         "metadata": (
-            None if metadata_step is None else _manifest_step_to_dict(metadata_step)
+            None if metadata_step is None else _manifest_step_to_dict(metadata_step, version=manifest.schema_version)
         ),
         "groups": list(manifest.groups),
         "retry_of": manifest.retry_of,
@@ -954,7 +1042,7 @@ def _manifest_from_dict(payload: object, path: Path) -> RefreshManifest:
     version = payload.get("schema_version")
     if version == 1:
         return _legacy_manifest_from_dict(payload, path)
-    if version != 2:
+    if version not in {2, 3}:
         raise PayloadError("Ukendt manifestschema")
     scope = payload.get("scope")
     if scope not in {"game", "group"}:
@@ -966,7 +1054,7 @@ def _manifest_from_dict(payload: object, path: Path) -> RefreshManifest:
     if not isinstance(raw_steps, list):
         raise PayloadError("Manifestet mangler steps")
     steps = tuple(
-        _manifest_step_from_dict(raw, index)
+        _manifest_step_from_dict(raw, index, version=version)
         for index, raw in enumerate(raw_steps)
     )
     if len({item.step_id for item in steps}) != len(steps):
@@ -1002,7 +1090,7 @@ def _manifest_from_dict(payload: object, path: Path) -> RefreshManifest:
     if result is not None and result not in {"complete", "partial", "failed"}:
         raise PayloadError("Manifestet har ukendt overordnet resultat")
     manifest = RefreshManifest(
-        schema_version=2,
+        schema_version=version,
         scope=scope,
         run_id=run_id,
         started_at=started_at,
@@ -1046,8 +1134,8 @@ class ManifestStore:
     def write(self, manifest: RefreshManifest) -> Path:
         """Publish one typed schema-2 manifest immutably."""
 
-        if manifest.schema_version != 2:
-            raise ValueError("Kun schema-2 manifests kan skrives")
+        if manifest.schema_version not in {2, 3}:
+            raise ValueError("Kun schema-2 og schema-3 manifests kan skrives")
         if manifest.scope == "group" and not manifest.group_id:
             raise ValueError("Et gruppemanifest kræver group_id")
         if not manifest.game_locale.strip():

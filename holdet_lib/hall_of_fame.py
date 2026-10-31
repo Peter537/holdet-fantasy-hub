@@ -411,6 +411,8 @@ def build_live_hall_of_fame_events(
     events: list[HallOfFameEvent] = []
     for group in groups:
         if group.kind == "tournament" and group.tournament is not None:
+            if group.tournament.pairing_error is not None:
+                continue
             if group.tournament.template == "group_knockout":
                 events.append(
                     _standing_event(

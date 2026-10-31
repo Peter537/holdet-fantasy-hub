@@ -14,6 +14,8 @@ import pandas as pd
 import streamlit as st
 
 from website.navigation import PageId, page_link
+from website.preferences import tool_visible
+from website.history_charts import round_history_chart
 from website.presentation import (
     data_status_badges,
     data_status_label,
@@ -270,7 +272,7 @@ def manager_round_center(
         )
 
     target_round = latest.round_number if latest is not None else None
-    if target_round is not None and game_groups:
+    if target_round is not None and game_groups and tool_visible(paths, "stories"):
         _, manager_settings = _manager_settings(paths)
         story = build_round_story(
             game_groups,
@@ -467,34 +469,44 @@ def transfer_lab_panel(
             key=f"transfer-target-round:{context_key}",
         )
     )
+    scenario = TransferScenario(
+        initial_roster=roster,
+        available_players=statistics.entries,
+        sold_player_ids=tuple(sold),
+        bought_player_ids=tuple(bought),
+        starting_bank=team.overview.bank,
+        contracts_remaining=None if contracts is None else int(contracts),
+        target_round=target_round,
+        team_round=round_number,
+        player_round=statistics.round_number,
+        team_round_status=team_round_status,
+        player_round_status=statistics.round_status,
+    )
+    signature = (profile, scenario, player_snapshot.generated_at)
     if st.button(
         "Simulér scenarie",
         type="primary",
         icon=":material/science:",
         key=f"simulate-transfers:{context_key}",
     ):
-        scenario = TransferScenario(
-            initial_roster=roster,
-            available_players=statistics.entries,
-            sold_player_ids=tuple(sold),
-            bought_player_ids=tuple(bought),
-            starting_bank=team.overview.bank,
-            contracts_remaining=(
-                None if contracts is None else int(contracts)
-            ),
-            target_round=target_round,
-            team_round=round_number,
-            player_round=statistics.round_number,
-            team_round_status=team_round_status,
-            player_round_status=statistics.round_status,
-        )
         st.session_state[f"transfer-scenario:{context_key}"] = scenario
+        st.session_state[f"transfer-signature:{context_key}"] = signature
         st.session_state[f"transfer-result:{context_key}"] = simulate_transfers(
             profile, scenario
         )
     result = st.session_state.get(f"transfer-result:{context_key}")
+    changed = result is not None and st.session_state.get(
+        f"transfer-signature:{context_key}"
+    ) != signature
+    if changed:
+        for prefix in ("transfer-result", "transfer-scenario", "transfer-signature"):
+            st.session_state.pop(f"{prefix}:{context_key}", None)
+        result = None
     if result is None:
-        st.info("Vælg salg og køb, og simulér scenariet.")
+        st.info(
+            "Scenariet eller datagrundlaget er ændret. Simulér igen for at se resultatet."
+            if changed else "Vælg salg og køb, og simulér scenariet."
+        )
         return
     with st.container(horizontal=True):
         st.metric(
@@ -520,7 +532,7 @@ def transfer_lab_panel(
         )
     elif result.certainty == "unverified":
         st.warning(
-            "Kan ikke valideres endeligt pÅ grund af datarunder eller ukendte regler."
+            "Kan ikke valideres endeligt på grund af datarunder eller ukendte regler."
         )
     if result.status == "valid" and result.certainty == "final":
         st.success("Scenariet overholder regelprofilen med afsluttede rundedata.")
@@ -742,6 +754,7 @@ def history_panel(
     *,
     group: GroupDefinition | None = None,
     scope: str,
+    through_round: int | None = None,
 ) -> None:
     history = build_history_series(
         teams,
@@ -749,6 +762,8 @@ def history_panel(
         team_ids,
         group=group,
     )
+    if through_round is not None:
+        history = tuple(item for item in history if item.round_number <= through_round)
     if not history:
         st.info("Der findes endnu ingen rundehistorik for det valgte udsnit.")
         return
@@ -756,6 +771,8 @@ def history_panel(
         {
             "Runde": item.round_number,
             "Hold": item.team_name,
+            "Hold-ID": item.team_id,
+            "Enhed": (teams.newest(game, item.team_id).team.overview.unit if teams.newest(game, item.team_id) else "points"),
             "Værdi/point": item.total,
             "Rundevækst": item.round_growth,
             "Samlet placering": item.overall_rank,
@@ -764,6 +781,17 @@ def history_panel(
         }
         for item in history
     )
+    statuses = {}
+    captures = {}
+    for item in history:
+        source = teams.summary_for(game, item.team_id, item.round_number)
+        statuses[(item.team_id, item.round_number)] = (
+            "Mangler" if source is None else
+            {"complete": "Afsluttet", "in_progress": "Foreløbig"}.get(source[1].round_status, "Ikke verificeret")
+        )
+        captures[(item.team_id, item.round_number)] = None if source is None else source[0].generated_at
+    frame["Datastatus"] = [statuses[(item.team_id, item.round_number)] for item in history]
+    frame["Hentet"] = [captures[(item.team_id, item.round_number)] for item in history]
     labels = ["Værdi/point", "Rundevækst", "Samlet placering", "Rundeplacering"]
     if group is not None:
         labels.append("Grupperang")
@@ -776,19 +804,14 @@ def history_panel(
         if not tab.open:
             continue
         with tab:
-            is_rank = column in {"Samlet placering", "Rundeplacering", "Grupperang"}
-            chart = alt.Chart(frame).mark_line(point=True).encode(
-                x=alt.X("Runde:Q", title="Runde"),
-                y=alt.Y(
-                    f"{column}:Q",
-                    title=column,
-                    scale=alt.Scale(reverse=is_rank, zero=False if is_rank else alt.Undefined),
-                    axis=alt.Axis(format="d", tickMinStep=1) if is_rank else alt.Undefined,
-                ),
-                color=alt.Color("Hold:N", title="Hold"),
-                tooltip=("Runde:Q", "Hold:N", f"{column}:Q"),
-            )
-            st.altair_chart(chart)
+            change = False
+            if column == "Værdi/point":
+                view = st.segmented_control("Sammenlign udvikling", ("Niveau", "Ændring fra første runde"), default="Niveau", key=f"history-scale:{scope}")
+                change = view == "Ændring fra første runde"
+                st.caption("Ændring beregnes fra hvert holds første tilgængelige observation." if change else "Y-aksen er tilpasset værdierne, så forskellene kan aflæses. Manglende runder vises som huller.")
+            st.altair_chart(round_history_chart(frame, column, change=change), alt=f"{column} pr. faktisk runde for de valgte hold", key=f"history-chart:{scope}:{column}")
+            with st.expander("Vis historik som tabel"):
+                dataframe(frame[["Runde", "Hold", column, "Datastatus", "Hentet"]], key=f"history-table:{scope}:{column}", hide_index=True)
 
 
 def game_history_panel(
@@ -837,6 +860,8 @@ def game_history_panel(
 def group_history_panel(
     group: GroupDefinition,
     teams: SnapshotIndex,
+    *,
+    through_round: int | None = None,
 ) -> None:
     labels = {member.team_id: member.name for member in group.teams}
     selected_ids = st.multiselect(
@@ -855,6 +880,7 @@ def group_history_panel(
         tuple(selected_ids),
         group=group,
         scope=f"group:{group.group_id}",
+        through_round=through_round,
     )
 
 
@@ -964,6 +990,7 @@ def data_quality_panel(
         ),
         "missing": (data_status_label("missing"), "red", ":material/warning:"),
         "error": (data_status_label("error"), "red", ":material/error:"),
+        "stale": (data_status_label("stale"), "orange", ":material/history:"),
     }
     for manager_game in selected_games:
         rows = tuple(
@@ -995,7 +1022,10 @@ def data_quality_panel(
                         "Spillere",
                         data_status_label("ready" if latest.player_snapshot else "missing"),
                     )
-                    st.metric("Holdcache", _age(latest.newest_team_data))
+                    st.metric(
+                        "Ældste holdcache",
+                        _age(latest.oldest_team_data or latest.newest_team_data),
+                    )
                     st.metric("Spillercache", _age(latest.newest_player_data))
                 if latest.reasons:
                     st.caption(" · ".join(latest.reasons))
@@ -1427,6 +1457,8 @@ def render_tournament_bracket(
                         else f"{match.round_numbers[0]}-{match.round_numbers[-1]}"
                     )
                 )
+                if match.blocked and (match.conflict or state.pairing_conflicts or group.tournament.pairing_error):
+                    round_label += " · Afventer gennemgang"
                 highlight = selected is not None and selected in {
                     match.team_a_id, match.team_b_id, match.winner_id
                 }

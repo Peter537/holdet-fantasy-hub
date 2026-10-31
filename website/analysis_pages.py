@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from website.preferences import tool_visible
+from holdet_lib.hub_settings import HubFeature
+
 from datetime import datetime
 import pandas as pd
 import streamlit as st
@@ -789,6 +792,9 @@ def _experimental_panel(
         placeholder="Tomt felt bruger et deterministisk seed",
         key=f"model-seed-{manager_game.game.slug}",
     )
+    input_signature = repr((baseline, scenario, positions, vectors, seed_text.strip()))
+    if st.session_state.get(f"{result_key}:inputs") != input_signature:
+        st.session_state.pop(result_key, None)
     if st.button("Kør 10.000 scenarier", type="primary"):
         try:
             chosen_seed = None if not seed_text.strip() else int(seed_text)
@@ -797,6 +803,7 @@ def _experimental_panel(
         except ValueError:
             st.error("Seed skal være et ikke-negativt heltal.")
         else:
+            st.session_state[f"{result_key}:inputs"] = input_signature
             with st.spinner("Bootstrapper tre fremtidige runder …"):
                 st.session_state[result_key] = simulate_transfer_scenario(
                     vectors,
@@ -849,8 +856,21 @@ def player_detail_view(
     read_only: bool = False,
 ) -> None:
     index = PlayerStatisticsStore(paths.snapshot_dir).scan(manager_game.game)
-    analysis = build_player_decision_analysis(index, manager_game.game, player_key)
-    latest = index.newest(manager_game.game)
+    raw_round = str(st.query_params.get("round", ""))
+    round_number = int(raw_round) if raw_round.isdigit() else None
+    cutoff = None
+    raw_snapshot = st.query_params.get("snapshot")
+    if raw_snapshot:
+        try:
+            cutoff = datetime.fromisoformat(str(raw_snapshot))
+            if cutoff.utcoffset() is None:
+                raise ValueError
+        except ValueError:
+            st.warning("Snapshot-tidspunktet er ugyldigt; viser seneste lokale data for runden.")
+            cutoff = None
+    index = index.through(manager_game.game, round_number=round_number, generated_at=cutoff)
+    analysis = build_player_decision_analysis(index, manager_game.game, player_key, round_number=round_number, generated_at=cutoff)
+    latest = index.latest_round(manager_game.game)
     latest_entry = None
     if latest is not None:
         latest_entry = next(
@@ -861,6 +881,12 @@ def player_detail_view(
             ),
             None,
         )
+    if analysis is not None and latest_entry is None:
+        for observed in sorted(index.for_game(manager_game.game), key=lambda item: (item.statistics.round_number, item.generated_at), reverse=True):
+            candidate = next((item for item in observed.statistics.entries if player_identity(manager_game.game, item) == player_key), None)
+            if candidate is not None:
+                latest, latest_entry = observed, candidate
+                break
     if analysis is None or latest_entry is None:
         st.title("Spilleren blev ikke fundet")
         st.info("Spilleren findes ikke i de lokale snapshots for dette spil.")
@@ -870,6 +896,7 @@ def player_detail_view(
             locale=manager_game.game.locale,
             game=manager_game.game.slug,
             section="players",
+        round=round_number,
         )
         return
     st.title(analysis.name, anchor=f"spiller-{latest_entry.entry_id or latest_entry.source_index}")
@@ -877,6 +904,8 @@ def player_detail_view(
         f"{latest_entry.team} · {latest_entry.position} · "
         f"seneste lokale runde {latest.statistics.round_number}"
     )
+    if not analysis.present_in_selected_round:
+        st.warning("Spilleren er ikke i den valgte spillerliste. Viser sidste kendte observation, ikke en bekræftet aktuel pris.")
     with st.container(horizontal=True):
         st.metric(
             "Status",
@@ -887,7 +916,7 @@ def player_detail_view(
         st.metric(
             "Sikkerhed",
             data_status_label(
-                "final" if latest.statistics.round_status == "complete" else "preliminary"
+                analysis.metric_provenance("value").certainty
             ),
             border=True,
         )
@@ -926,18 +955,11 @@ def player_detail_view(
     _certainty(analysis.provenance)
     st.subheader("Runde-for-runde udvikling")
     if analysis.curve:
-        round_status = {
-            item.statistics.round_number: item.statistics.round_status
-            for item in index.for_game(manager_game.game)
-        }
+        round_status = {item.round_number: item.round_status for item in analysis.observations}
         value_column = "Pris" if latest.statistics.unit != "points" else "Point"
         frame = pd.DataFrame(analysis.curve, columns=("Runde", value_column))
         frame["Datastatus"] = frame["Runde"].map(
-            lambda round_number: data_status_label(
-                "final"
-                if round_status.get(round_number) == "complete"
-                else "preliminary"
-            )
+            lambda round_number: data_status_label(round_status.get(round_number))
         )
         if len(frame) >= 2:
             st.markdown(
@@ -960,15 +982,15 @@ def player_detail_view(
         )
         if any(value != "Aktuel" for value in frame["Datastatus"]):
             st.caption(
-                "Punkter fra en ikke-afsluttet runde er markeret som "
-                "Foreløbig i tabellen."
+                "Igangværende runder er markeret som Foreløbig. "
+                "Ukendt rundestatus er markeret som Ikke verificeret."
             )
     else:
         st.info("Der er ingen numeriske værdier at tegne endnu.")
-    st.subheader("Scouting")
-    render_player_scouting_detail(
-        manager_game.game, player_key, index, paths
-    )
+    if tool_visible(paths, HubFeature.SCOUTING):
+        with st.expander("Scouting", on_change="rerun") as scouting_details:
+            if scouting_details.open:
+                render_player_scouting_detail(manager_game.game, player_key, index, paths)
     st.subheader("Statushistorik")
     status_rows = []
     for snapshot in sorted(index.for_game(manager_game.game), key=lambda item: item.generated_at):
@@ -996,11 +1018,7 @@ def player_detail_view(
                 "Runde": snapshot.statistics.round_number,
                 "Hentet": snapshot.generated_at,
                 "Spillerstatus": " · ".join(states) if states else "Aktiv",
-                "Datastatus": (
-                    data_status_label("final")
-                    if snapshot.statistics.round_status == "complete"
-                    else data_status_label("preliminary")
-                ),
+                "Datastatus": data_status_label(snapshot.statistics.round_status),
             }
         )
     if status_rows:
@@ -1043,57 +1061,59 @@ def player_detail_view(
             )
     else:
         st.info("Der kræves mindst to lokale hentninger for en ændringsforklaring.")
-    st.subheader("Egne noter og tags")
-    settings_store = HubSettingsStore(paths.hub_settings_file)
-    settings = settings_store.load()
-    annotation = next(
-        (item for item in settings.player_annotations if item.player_key == player_key),
-        PlayerAnnotation(manager_game.game.locale, manager_game.game.slug, player_key),
-    )
-    with st.form(f"player-note-{player_key}"):
-        note = st.text_area(
-            "Note",
-            value=annotation.note,
-            max_chars=2_000,
-            placeholder="Hvorfor overvejer eller undgår du spilleren?",
+    if tool_visible(paths, HubFeature.SCOUTING):
+        st.subheader("Egne noter og tags")
+        settings_store = HubSettingsStore(paths.hub_settings_file)
+        settings = settings_store.load()
+        annotation = next(
+            (item for item in settings.player_annotations if item.player_key == player_key),
+            PlayerAnnotation(manager_game.game.locale, manager_game.game.slug, player_key),
         )
-        tags = st.text_input(
-            "Tags, adskilt med komma",
-            value=", ".join(annotation.tags),
-            help="Standard: " + ", ".join(DEFAULT_PLAYER_TAGS) + ". Egne tags er tilladt.",
+        with st.form(f"player-note-{player_key}"):
+            note = st.text_area(
+                "Note",
+                value=annotation.note,
+                max_chars=2_000,
+                placeholder="Hvorfor overvejer eller undgår du spilleren?",
+            )
+            tags = st.text_input(
+                "Tags, adskilt med komma",
+                value=", ".join(annotation.tags),
+                help="Standard: " + ", ".join(DEFAULT_PLAYER_TAGS) + ". Egne tags er tilladt.",
+            )
+            save_note = st.form_submit_button("Gem note og tags", disabled=read_only)
+        if save_note:
+            try:
+                updated_annotation = PlayerAnnotation(
+                    manager_game.game.locale.casefold(),
+                    manager_game.game.slug,
+                    player_key,
+                    note,
+                    tuple(item.strip() for item in tags.split(",") if item.strip()),
+                    datetime.now().astimezone(),
+                )
+                others = tuple(
+                    item for item in settings.player_annotations if item.player_key != player_key
+                )
+                settings_store.set_player_annotations(settings, (*others, updated_annotation))
+            except ValueError as exc:
+                st.error(str(exc))
+            else:
+                st.success("Noten og tags er gemt.")
+        st.subheader("Watchlist")
+        render_player_watchlist_editor(
+            manager_game.game,
+            latest_entry,
+            paths,
+            read_only=read_only,
         )
-        save_note = st.form_submit_button("Gem note og tags", disabled=read_only)
-    if save_note:
-        try:
-            updated_annotation = PlayerAnnotation(
-                manager_game.game.locale.casefold(),
-                manager_game.game.slug,
-                player_key,
-                note,
-                tuple(item.strip() for item in tags.split(",") if item.strip()),
-                datetime.now().astimezone(),
-            )
-            others = tuple(
-                item for item in settings.player_annotations if item.player_key != player_key
-            )
-            settings_store.set_player_annotations(settings, (*others, updated_annotation))
-        except ValueError as exc:
-            st.error(str(exc))
-        else:
-            st.success("Noten og tags er gemt.")
-    st.subheader("Watchlist")
-    render_player_watchlist_editor(
-        manager_game.game,
-        latest_entry,
-        paths,
-        read_only=read_only,
-    )
     page_link(
         PageId.GAME,
         "Tilbage til spillerstatistik",
         locale=manager_game.game.locale,
         game=manager_game.game.slug,
         section="players",
+        round=round_number,
     )
 
 

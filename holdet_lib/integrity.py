@@ -61,6 +61,7 @@ def _roots(paths: AppPaths) -> tuple[tuple[str, Path], ...]:
         ("config", paths.config_dir),
         ("data/snapshots", paths.snapshot_dir),
         ("data/manifests", paths.manifest_dir),
+        ("data/refresh-runs", paths.refresh_run_dir),
         ("data/group-revisions", paths.group_revision_dir),
         ("data/tournament-pairings", paths.tournament_pairing_dir),
         ("data/game-metadata", paths.game_metadata_dir),
@@ -77,6 +78,8 @@ def canonical_local_files(paths: AppPaths) -> tuple[tuple[str, Path], ...]:
         if not root.exists():
             continue
         for path in root.rglob("*"):
+            if prefix == "data/refresh-runs" and path.name != "run.json" and not (path.name.startswith("pending-") and path.suffix == ".json"):
+                continue
             if not path.is_file() or path.is_symlink():
                 continue
             resolved = path.resolve()

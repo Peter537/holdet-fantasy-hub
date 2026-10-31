@@ -43,6 +43,11 @@ from website.hub_pages import (
 )
 from website.navigation import PageId, go_to, page_link, relative_url
 from website.round_center_page import render_round_center
+from website.preferences import require_tool, settings_for, settings_readable, tool_visible, render_settings
+from holdet_lib.hub_settings import HubFeature, OwnTeamSelection, feature_enabled
+from holdet_lib.scopes import resolve_scope
+from website.workflows import render_scope_actions, render_global_update, render_run_progress, updates_running, start_manager_update
+from website.game_summary import scope_overview
 from website.scouting_page import (
     render_contextual_scouting_panel,
     render_contextual_watchlist_panel,
@@ -126,14 +131,12 @@ from holdet_lib import (
     player_display_rows,
     player_identity,
     parse_direct_team_url,
-    refresh_manager_game,
     refresh_group,
     resolve_paths,
 )
 from holdet_lib.refresh import (
     RefreshMode,
     RefreshPlan,
-    RefreshProgressEvent,
     build_refresh_plan,
 )
 from holdet_lib.storage import RefreshManifest
@@ -211,8 +214,16 @@ def _with_published_tournament_pairings(
     warnings: list[str] = []
     for group in groups:
         config = group.tournament
-        if config is None or config.template != "swiss":
+        if config is None:
             resolved.append(group)
+            continue
+        if config.template != "swiss":
+            try:
+                resolved.append(store.with_published_knockout_matches(group))
+            except (OSError, PayloadError, ValueError) as exc:
+                warnings.append(f"{group.name}: publicerede kampe kunne ikke læses: {exc}")
+                resolved.append(replace(group, tournament=replace(config,
+                    pairing_error="Den publicerede kampplan kunne ikke verificeres.")))
             continue
         try:
             published = store.load_for_tournament(
@@ -221,11 +232,12 @@ def _with_published_tournament_pairings(
                 config,
                 tuple(item.team_id for item in group.teams),
             )
-        except PayloadError as exc:
+        except (OSError, PayloadError, ValueError) as exc:
             warnings.append(
                 f"{group.name}: publicerede parringer kunne ikke l\u00e6ses: {exc}"
             )
-            resolved.append(group)
+            resolved.append(replace(group, tournament=replace(config,
+                pairing_error="De publicerede Swiss-parringer kunne ikke verificeres.")))
             continue
         existing = {
             (item.round_number, item.team_a_id, item.team_b_id)
@@ -254,7 +266,13 @@ def _with_published_tournament_pairings(
             group,
             tournament=replace(config, group_fixtures=fixtures),
         )
-        conflicts = build_swiss_pairing_conflicts(merged, index)
+        try:
+            conflicts = build_swiss_pairing_conflicts(merged, index)
+        except PayloadError as exc:
+            warnings.append(f"{group.name}: parringerne er bevaret, men kunne ikke kontrolleres: {exc}")
+            resolved.append(replace(merged, tournament=replace(merged.tournament,
+                pairing_error="De publicerede Swiss-parringer kunne ikke verificeres.")))
+            continue
         if conflicts:
             rounds = ", ".join(str(item.round_number) for item in conflicts)
             warnings.append(
@@ -262,6 +280,8 @@ def _with_published_tournament_pairings(
                 "afviger fra de korrigerede resultater. Opret en ny "
                 "turneringsrevision for at genberegne dem."
             )
+            merged = replace(merged, tournament=replace(merged.tournament,
+                pairing_error="Publicerede Swiss-parringer afviger fra korrigerede resultater."))
         resolved.append(merged)
     return tuple(resolved), tuple(warnings)
 
@@ -636,7 +656,7 @@ def _navigation_card(
         st.html(
             f"""<style>
             .st-key-nav-card-{card_key} button {{
-                background: linear-gradient(125deg, {color}, #20252d) !important;
+                background: #20252d !important;
                 color: {foreground} !important;
             }}
             </style>"""
@@ -722,14 +742,14 @@ def _styles() -> None:
             line-height: 1.55;
         }
         [class*="st-key-nav-card-"] button:hover {
-            transform: translateY(-3px); box-shadow: 0 14px 34px rgba(0,0,0,.25);
+            box-shadow: none;
             border-color: rgba(255,255,255,.28) !important;
         }
         [class*="st-key-nav-card-"] button:focus-visible {
             outline: 3px solid #ff4b4b; outline-offset: 3px;
         }
         [class*="st-key-home-game-slot-"] [class*="st-key-nav-card-"] button {
-            min-height: 190px;
+            min-height: 52px;
         }
         [class*="st-key-sticky-action-bar-"] {
             position: sticky;
@@ -787,7 +807,7 @@ def _styles() -> None:
                 padding: .45rem .5rem;
             }
             [class*="st-key-home-game-slot-"] [class*="st-key-nav-card-"] button {
-                min-height: 190px;
+                min-height: 52px;
             }
         }
         </style>
@@ -808,123 +828,51 @@ def _sidebar_group_button(
         ):
             _navigate("group", group=group.group_id)
 
-def _sidebar(
-    games: tuple[ManagerGame, ...],
-    groups: tuple[GroupDefinition, ...],
-    selected_game: ManagerGame | None,
-    selected_group: GroupDefinition | None,
-    view: str,
-) -> None:
-    active_games = _sorted_manager_games(
-        game for game in games if not game.is_archived
-    )
-    archived_selected = bool(selected_game and selected_game.is_archived)
+def _sidebar(games, groups, selected_game, selected_group, view) -> None:
+    active_games = _sorted_manager_games(game for game in games if not game.is_archived)
     with st.sidebar:
         st.markdown("## HOLDET FANTASY HUB")
-        if st.button(
-            "Mine managerspil",
-            icon=":material/home:",
-            width="stretch",
-            type="primary" if view == "home" else "secondary",
-        ):
+        if st.button("Mine managerspil", icon=":material/home:", width="stretch", type="primary" if view == "home" else "secondary"):
             _navigate("home")
-
-        if st.button(
-            "Tilføj managerspil",
-            key="add-manager-game-sidebar",
-            icon=":material/add:",
-            type="tertiary",
-            width="content",
-        ):
-            _navigate("manage-games")
-        if st.button(
-            "Spillerstatistik",
-            key="standalone-player-statistics-sidebar",
-            icon=":material/query_stats:",
-            width="stretch",
-            type="primary" if view == "players" else "secondary",
-        ):
-            _navigate("players")
-        if st.button(
-            "Scouting",
-            key="scouting-sidebar",
-            icon=":material/travel_explore:",
-            width="stretch",
-            type="primary" if view == "scouting" else "secondary",
-        ):
-            _navigate("scouting")
-        if st.button(
-            "Holdstatistik",
-            key="standalone-team-statistics-sidebar",
-            icon=":material/groups:",
-            width="stretch",
-            type="primary" if view == "teams" else "secondary",
-        ):
-            _navigate("teams")
-        unread_alerts = _unread_alert_counts()
         st.caption("MANAGERSPIL")
-        for game in active_games:
+        unread = _unread_alert_counts() if tool_visible(APP_PATHS, HubFeature.ALERTS) else {}
+        visible_games = list(active_games)
+        if selected_game is not None and selected_game.is_archived:
+            st.caption("Det åbne arkiverede spil vises skrivebeskyttet.")
+            visible_games.append(selected_game)
+        for game in visible_games:
             active = selected_game is not None and game.identity == selected_game.identity
-            unread_count = unread_alerts.get(game.identity, 0)
-            game_label = (
-                f"{game.name} ({unread_count} ulæste)"
-                if unread_count
-                else game.name
-            )
-            if st.button(
-                game_label,
-                key=f"nav-game-{game.game.locale}-{game.game.slug}",
-                width="stretch",
-                type="primary" if active else "secondary",
-            ):
-                _navigate(
-                    "game",
-                    locale=game.game.locale,
-                    game=game.game.slug,
-                    section="round-center",
-                )
+            label = game.name + (" · Arkiv" if game.is_archived else "")
+            if unread.get(game.identity):
+                label += f" ({unread[game.identity]} ulæste)"
+            if st.button(label, key=f"nav-game-{game.game.locale}-{game.game.slug}", width="stretch", type="primary" if active else "secondary"):
+                _navigate("game", locale=game.game.locale, game=game.game.slug, section="round-center")
             if active:
                 for group in groups:
-                    if _game_identity(group.game) != game.identity:
-                        continue
-                    _sidebar_group_button(group, selected_group)
-
+                    if _game_identity(group.game) == game.identity:
+                        _sidebar_group_button(group, selected_group)
+        if st.button("Tilføj managerspil", key="add-manager-game-sidebar", icon=":material/add:", type="tertiary"):
+            _navigate("manage-games")
+        with st.expander("Værktøjer", expanded=view in {"players", "teams", "scouting", "managers", "calendar"}):
+            for label, target, icon, feature in (
+                ("Spillerstatistik", "players", "query_stats", None),
+                ("Holdstatistik", "teams", "groups", None),
+                ("Scouting", "scouting", "travel_explore", HubFeature.SCOUTING),
+                ("Managers", "managers", "military_tech", HubFeature.MANAGERS),
+                ("Kalender", "calendar", "calendar_month", HubFeature.CALENDAR),
+            ):
+                if feature is None or tool_visible(APP_PATHS, feature):
+                    if st.button(label, key=f"tool-nav-{target}", icon=f":material/{icon}:", width="stretch", type="primary" if view == target else "secondary"):
+                        _navigate(target)
+            page_link(PageId.SETTINGS, "Vælg flere værktøjer", icon=":material/tune:")
         st.divider()
-        if st.button(
-            "Arkiverede managerspil",
-            icon=":material/archive:",
-            width="stretch",
-            type="primary" if view == "archive" or archived_selected else "secondary",
-        ):
+        if st.button("Arkiverede managerspil", icon=":material/archive:", width="stretch", type="primary" if view == "archive" else "secondary"):
             _navigate("archive")
-
-        st.divider()
-        if st.button(
-            "Managers",
-            key="managers-sidebar",
-            icon=":material/military_tech:",
-            width="stretch",
-            type="primary" if view in {"managers", "hall-of-fame"} else "secondary",
-        ):
-            _navigate("managers")
-        if st.button(
-            "Kalender",
-            key="calendar-sidebar",
-            icon=":material/calendar_month:",
-            width="stretch",
-            type="primary" if view == "calendar" else "secondary",
-        ):
-            _navigate("calendar")
-
-        if st.button(
-            "Data og lager",
-            icon=":material/database:",
-            width="stretch",
-            type="primary" if view == "data" else "secondary",
-        ):
-            _navigate("data")
-        st.caption("Uofficielt værktøj til Holdet.dk. Data hentes aldrig automatisk.")
+        if st.button("Indstillinger", icon=":material/settings:", width="stretch", type="primary" if view == "settings" else "secondary"):
+            _navigate("settings")
+        st.caption("Data hentes kun efter dit klik.")
         st.caption(f"Version {VERSION}")
+
 
 
 def _warning_panel(index: SnapshotIndex) -> None:
@@ -1061,81 +1009,57 @@ def _manager_game_card(
     )
 
 
-def _home(
-    games: tuple[ManagerGame, ...],
-    groups: tuple[GroupDefinition, ...],
-    index: SnapshotIndex,
-) -> None:
-    with st.container(
-        key="home-header",
-        horizontal=True,
-        horizontal_alignment="distribute",
-        vertical_alignment="center",
-    ):
+def _home(games, groups, index) -> None:
+    with st.container(horizontal=True, horizontal_alignment="distribute", vertical_alignment="center"):
         st.title("Mine managerspil", anchor="mine-managerspil")
-        with st.container(horizontal=True):
-            if st.button(
-                "Spillerstatistik",
-                key="standalone-player-statistics-home",
-                icon=":material/query_stats:",
-                width="content",
-            ):
-                _navigate("players")
-            if st.button(
-                "Scouting",
-                key="scouting-home",
-                icon=":material/travel_explore:",
-                width="content",
-            ):
-                _navigate("scouting")
-            if st.button(
-                "Holdstatistik",
-                key="standalone-team-statistics-home",
-                icon=":material/groups:",
-                width="content",
-            ):
-                _navigate("teams")
-            if st.button(
-                "Tilføj managerspil",
-                key="add-manager-game-home",
-                icon=":material/add:",
-                type="primary",
-                width="content",
-            ):
-                _navigate("manage-games")
-    st.caption("Grupper og turneringer samlet efter managerspil.")
-    home_data_slot = st.container()
-    with home_data_slot:
-        with st.skeleton(height=120):
-            player_index = PlayerStatisticsStore(OUTPUT_DIR).scan()
-            metadata_values, _ = GameMetadataStore(
-                APP_PATHS.game_metadata_dir
-            ).scan()
-            metadata_by_identity = {
-                item.identity: item for item in metadata_values
-            }
-            active_alerts = _active_alert_counts()
-    if games:
-        with st.container(horizontal=True, gap="medium", key="home-game-grid"):
-            for manager_game in _sorted_manager_games(games):
-                with st.container(
-                    width=520,
-                    key=(
-                        f"home-game-slot-{manager_game.game.locale}-"
-                        f"{manager_game.game.slug}"
-                    ),
-                ):
-                    _manager_game_card(
-                        manager_game,
-                        groups,
-                        index,
-                        player_index,
-                        metadata_by_identity,
-                        active_alerts,
-                    )
-    else:
-        st.info("Du har ingen managerspil endnu. Tilføj dit første managerspil.")
-
+        render_global_update(APP_PATHS, games)
+    render_run_progress(APP_PATHS)
+    if not games:
+        saved = get_ui_context().games
+        if saved:
+            st.info("Du har ingen aktive managerspil. Dine tidligere spil ligger i arkivet.")
+            page_link(PageId.ARCHIVE, f"Vis arkiv · {len(saved)} spil", icon=":material/archive:")
+        else:
+            st.info("Tilføj dit første managerspil for at følge ligaer, turneringer og spillere.")
+        page_link(PageId.MANAGE_GAMES, "Tilføj managerspil", icon=":material/add:")
+        return
+    players = PlayerStatisticsStore(OUTPUT_DIR).scan()
+    metadata_values, _ = GameMetadataStore(APP_PATHS.game_metadata_dir).scan()
+    metadata_map = {item.identity: item for item in metadata_values}
+    settings = settings_for(APP_PATHS)
+    st.caption(f"{count_label(len(games), 'aktivt spil', 'aktive spil')} · Opdater alle indhenter også manglende historik.")
+    rows = []
+    ordered_games = _sorted_manager_games(games)
+    for manager_game in ordered_games:
+        scope = resolve_scope(manager_game, groups, index, settings)
+        metadata = metadata_map.get(manager_game.identity)
+        summary = scope_overview(scope, index, players, metadata, settings)
+        rows.append({
+            "Managerspil": manager_game.name,
+            "Konkurrencer": len(scope.groups),
+            "Hold": len(scope.team_references),
+            "Gemt runde": _format_number(summary.round_number),
+            "Datastatus": summary.status,
+            "Ældste data": format_relative_precise(summary.oldest_capture) if summary.oldest_capture else "Ingen data",
+            "Næste frist": next_schedule_action(metadata),
+        })
+    def open_game():
+        click = st.session_state.get("open-manager-game")
+        if click is not None:
+            manager = ordered_games[click.row]
+            _navigate("game", locale=manager.game.locale, game=manager.game.slug)
+    with st.container(key="compact-game-list"):
+        dataframe(rows, key="manager-game-overview", hide_index=True, height="content", row_height=48,
+            column_config={
+                "Managerspil": st.column_config.ButtonColumn("Managerspil", width=270, type="tertiary", alignment="left", key="open-manager-game", on_click=open_game),
+                "Konkurrencer": st.column_config.NumberColumn(width=100, format="%d"),
+                "Hold": st.column_config.NumberColumn(width=60, format="%d"),
+                "Gemt runde": st.column_config.TextColumn(width=100),
+                "Datastatus": st.column_config.TextColumn(width=200),
+                "Ældste data": st.column_config.TextColumn(width=245),
+                "Næste frist": st.column_config.TextColumn(width=330),
+            }, alt="Aktive managerspil med konkurrencer, datastatus og næste frist. Åbn et spil med knappen i første kolonne.")
+    page_link(PageId.MANAGE_GAMES, "Tilføj managerspil", icon=":material/add:")
 
 def _archive_date(manager_game: ManagerGame) -> str:
     if manager_game.archived_at is None:
@@ -1262,11 +1186,13 @@ def _player_decision_analysis_batch(
     player_index,
     game: GameUrl,
     player_keys: tuple[str, ...],
+    round_number: int | None = None,
+    generated_at: datetime | None = None,
 ):
     """Cache pure derived statistics by immutable snapshot inputs."""
 
     return tuple(
-        build_player_decision_analysis(player_index, game, player_key)
+        build_player_decision_analysis(player_index, game, player_key, round_number=round_number, generated_at=generated_at)
         for player_key in player_keys
     )
 
@@ -1335,30 +1261,31 @@ def _fetch_player_statistics(game: GameUrl, round_number: int | None) -> None:
                         settings = HubSettingsStore(
                             APP_PATHS.hub_settings_file
                         ).load()
-                        alerts = build_watchlist_alerts(
-                            previous,
-                            current,
-                            settings.watchlist,
-                            prior=next(
-                                (
-                                    snapshot
-                                    for snapshot in before_index.for_game(game)
-                                    if previous is not None
-                                    and snapshot.generated_at < previous.generated_at
+                        if feature_enabled(settings, HubFeature.ALERTS):
+                            alerts = build_watchlist_alerts(
+                                previous,
+                                current,
+                                settings.watchlist,
+                                prior=next(
+                                    (
+                                        snapshot
+                                        for snapshot in before_index.for_game(game)
+                                        if previous is not None
+                                        and snapshot.generated_at < previous.generated_at
+                                    ),
+                                    None,
                                 ),
-                                None,
-                            ),
-                            previous_forms=(
-                                watch_form_signals(alert_index, previous)
-                                if previous is not None
-                                else None
-                            ),
-                            current_forms=watch_form_signals(alert_index, current),
-                        )
-                        AnalysisInboxStore(
-                            APP_PATHS.analysis_inbox_file
-                        ).merge(alerts)
-                        alert_count = len(alerts)
+                                previous_forms=(
+                                    watch_form_signals(alert_index, previous)
+                                    if previous is not None
+                                    else None
+                                ),
+                                current_forms=watch_form_signals(alert_index, current),
+                            )
+                            AnalysisInboxStore(
+                                APP_PATHS.analysis_inbox_file
+                            ).merge(alerts)
+                            alert_count = len(alerts)
                 except (OSError, PayloadError, ValueError) as exc:
                     alert_warning = str(exc)
     except Exception as exc:
@@ -1849,7 +1776,9 @@ def _reset_player_filters(scope: str) -> None:
             st.session_state.pop(key, None)
 
 
-def _player_export_controls(statistics, query, selected, scope: str) -> None:
+def _player_export_controls(
+    statistics, query, selected, scope: str, *, ordered_entries=None
+) -> None:
     format_labels = {
         "txt": "TXT",
         "json": "JSON",
@@ -1892,6 +1821,8 @@ def _player_export_controls(statistics, query, selected, scope: str) -> None:
             build_scouting_metrics(
                 PlayerStatisticsStore(OUTPUT_DIR).scan(statistics.game),
                 statistics.game,
+                round_number=statistics.round_number,
+                generated_at=selected.generated_at,
             )
             if selected_computed
             else ()
@@ -1910,6 +1841,7 @@ def _player_export_controls(statistics, query, selected, scope: str) -> None:
                 replace(query, computed_player_column_ids=selected_computed),
                 generated_at=datetime.now().astimezone(),
                 source_generated_at=selected.generated_at,
+                ordered_entries=ordered_entries,
                 computed_columns=computed_columns,
                 computed_contexts={
                     entry.source_index: {
@@ -1953,203 +1885,122 @@ def _player_export_controls(statistics, query, selected, scope: str) -> None:
             )
 
 
-def _player_export_section(statistics, query, selected, scope: str) -> None:
+def _player_export_section(
+    statistics, query, selected, scope: str, *, ordered_entries=None
+) -> None:
     with st.expander(
         "Eksport",
         icon=":material/file_export:",
     ):
-        _player_export_controls(statistics, query, selected, scope)
+        _player_export_controls(
+            statistics, query, selected, scope, ordered_entries=ordered_entries
+        )
 
 
 
 @st.fragment
 def _player_list_panel(selected, empty_label: str) -> None:
-    statistics = selected.statistics
-    game = statistics.game
+    statistics, game = selected.statistics, selected.statistics.game
     scope = f"player-filter-{game.locale}-{game.slug}"
     applied_key = f"{scope}-applied-query"
-    applied_query = st.session_state.get(applied_key, PlayerStatisticsQuery())
-    active_chips = _player_filter_chips(statistics, applied_query)
-    with st.container(
-        key=f"sticky-action-bar-player-{game.locale}-{game.slug}",
-        horizontal=True,
-        vertical_alignment="center",
-        gap="small",
-    ):
-        with st.popover(
-            f"Filtre · {len(active_chips)}",
-            icon=":material/filter_alt:",
-            key=f"{scope}-filter-panel",
-        ):
-            settings_store, settings = _player_filter_profile_manager(
-                statistics, scope
-            )
-            with st.form(f"{scope}-filters", border=False):
-                try:
-                    query = _player_filter_query(statistics, scope)
-                except ValueError as exc:
-                    st.error(str(exc))
-                    return
-                submitted = st.form_submit_button(
-                    "Anvend filtre",
-                    icon=":material/filter_alt:",
-                    type="primary",
-                )
-            _save_player_filter_profile(
-                statistics,
-                scope,
-                query,
-                settings_store,
-                settings,
-            )
-        for chip in active_chips[:6]:
-            st.badge(chip, color="gray")
-        if len(active_chips) > 6:
-            st.badge(f"+{len(active_chips) - 6} filtre", color="gray")
-        st.button(
-            "Nulstil",
-            icon=":material/filter_alt_off:",
-            key=f"{scope}-reset-filters",
-            on_click=_reset_player_filters,
-            args=(scope,),
-            disabled=not active_chips,
-        )
+    applied = st.session_state.get(applied_key, PlayerStatisticsQuery())
+    settings = settings_for(APP_PATHS)
+    with st.popover("Flere filtre og kolonner", icon=":material/filter_alt:", key=f"{scope}-filter-panel"):
+        settings_store, settings = _player_filter_profile_manager(statistics, scope)
+        with st.form(f"{scope}-filters", border=False):
+            invalid = False
+            try:
+                query = _player_filter_query(statistics, scope)
+            except ValueError as exc:
+                st.error(str(exc))
+                query, invalid = applied, True
+            submitted = st.form_submit_button("Anvend filtre", type="primary") and not invalid
+        _save_player_filter_profile(statistics, scope, query, settings_store, settings)
+        extra_options = ("Vækst pr. mio.", "Form 3", "Form 5", "Stabilitet", "Sikkerhed", "Snapshotalder", "Snapshot", "Grundlag", "Tags")
+        extra_columns = st.multiselect("Ekstra kolonner", extra_options, default=(), key=f"{scope}-derived-columns")
     if submitted:
         st.session_state[applied_key] = query
+        applied = query
+    signature = repr(applied)
+    if st.session_state.get(f"{scope}-quick-signature") != signature:
+        st.session_state[f"{scope}-quick-search"] = applied.search
+        st.session_state[f"{scope}-quick-positions"] = list(applied.positions)
+        st.session_state[f"{scope}-quick-price"] = applied.max_value
+        st.session_state[f"{scope}-quick-sort"] = applied.sort_field if applied.sort_field in {"value", "total_growth", "round_growth", "name", "team", "position", "source"} else "value"
+        st.session_state[f"{scope}-quick-signature"] = signature
+    controls = st.columns((3, 2, 2, 2))
+    with controls[0]:
+        search = st.text_input("Søg spillere", key=f"{scope}-quick-search", placeholder="Navn eller klub")
+    with controls[1]:
+        positions = st.multiselect("Position", sorted({entry.position for entry in statistics.entries}), key=f"{scope}-quick-positions")
+    with controls[2]:
+        maximum = st.number_input("Maksimum point" if statistics.unit == "points" else "Maksimum pris", min_value=0, value=None, step=1 if statistics.unit == "points" else 100000, key=f"{scope}-quick-price")
+    sort_labels = {"value": "Point" if statistics.unit == "points" else "Pris", "total_growth": "Totalvækst", "round_growth": "Rundevækst", "form_3": "Form 3", "form_5": "Form 5", "growth_per_million": "Vækst pr. mio.", "name": "Navn", "team": "Klub", "position": "Position", "source": "Oprindelig rækkefølge"}
+    with controls[3]:
+        sort_field = st.selectbox("Sortering", tuple(sort_labels), format_func=sort_labels.get, key=f"{scope}-quick-sort")
+    if st.button("Nulstil", key=f"{scope}-reset-filters", icon=":material/filter_alt_off:"):
+        _reset_player_filters(scope)
+        for suffix in ("quick-search", "quick-positions", "quick-price", "quick-sort", "quick-signature", "derived-columns"):
+            st.session_state.pop(f"{scope}-{suffix}", None)
         st.rerun()
-    st.session_state.setdefault(applied_key, query)
-    applied_query = st.session_state[applied_key]
-    entries = filter_player_statistics(statistics, applied_query)
-    with st.container(
-        horizontal=True,
-        horizontal_alignment="distribute",
-        vertical_alignment="center",
-    ):
-        st.caption(
-            f"{len(entries)} af {len(statistics.entries)} spillere · runde "
-            f"{statistics.round_number} · {format_relative_precise(selected.generated_at)}"
-        )
-    if entries:
-        results_slot = st.container()
-        with results_slot:
-            with st.skeleton(height=180):
-                rows, integer_columns = _player_statistics_rows(
-                    statistics, applied_query
-                )
-                player_index = PlayerStatisticsStore(OUTPUT_DIR).scan(game)
-                player_keys = tuple(
-                    player_identity(game, entry) for entry in entries
-                )
-                analyses = _player_decision_analysis_batch(
-                    player_index,
-                    game,
-                    player_keys,
-                )
-                annotations = {
-                    item.player_key: item
-                    for item in settings.player_annotations
-                    if item.game_locale.casefold() == game.locale.casefold()
-                    and item.game_slug == game.slug
-                }
-                for row, entry, key, analysis in zip(
-                    rows,
-                    entries,
-                    player_keys,
-                    analyses,
-                    strict=True,
-                ):
-                    if statistics.unit != "points":
-                        row["Vækst pr. mio."] = (
-                            "–"
-                            if analysis is None or analysis.growth_per_million is None
-                            else f"{analysis.growth_per_million:.1f}".replace(".", ",")
-                        )
-                    row["Form 3"] = (
-                        "–"
-                        if analysis is None or analysis.form_3 is None
-                        else f"{analysis.form_3:.1f}".replace(".", ",")
-                    )
-                    row["Form 5"] = (
-                        "–"
-                        if analysis is None or analysis.form_5 is None
-                        else f"{analysis.form_5:.1f}".replace(".", ",")
-                    )
-                    row["Stabilitet"] = (
-                        "–"
-                        if analysis is None or analysis.stability_score is None
-                        else f"{analysis.stability_score}/100 · {analysis.stability_label}"
-                    )
-                    row["Sikkerhed"] = data_status_label(
-                        "unverified"
-                        if analysis is None
-                        else analysis.provenance.certainty
-                    )
-                    row["Snapshotalder"] = format_relative_precise(selected.generated_at)
-                    row["Snapshot"] = selected.generated_at
-                    row["Grundlag"] = (
-                        0 if analysis is None else analysis.provenance.sample_size
-                    )
-                    row["Tags"] = (
-                        " · ".join(annotations[key].tags)
-                        if key in annotations
-                        else "–"
-                    )
-                    row["Detaljer"] = relative_url(
-                        PageId.PLAYER,
-                        locale=game.locale,
-                        game=game.slug,
-                        player=key,
-                        round=statistics.round_number,
-                    )
-            event = dataframe(
-                _style_integer_columns(rows, integer_columns),
-                hide_index=True,
-                width="stretch",
-                on_select="rerun",
-                selection_mode="multi-row",
-                column_config={
-                    "Detaljer": st.column_config.LinkColumn(
-                        "Detaljer", display_text="Åbn spiller"
-                    ),
-                    "Form 3": st.column_config.Column(
-                        "Form 3",
-                        help="Gennemsnitlig udvikling over de seneste tre runder.",
-                    ),
-                    "Form 5": st.column_config.Column(
-                        "Form 5",
-                        help="Gennemsnitlig udvikling over de seneste fem runder.",
-                    ),
-                    "Vækst pr. mio.": st.column_config.Column(
-                        "Vækst pr. mio.",
-                        help="Historisk vækst divideret med den aktuelle pris i millioner.",
-                    ),
-                },
-                key=(
-                    f"player-statistics:{game.locale}:{game.slug}:v1"
-                ),
-            )
-        selected_keys = tuple(
-            player_keys[index]
-            for index in event.selection.rows
-            if 0 <= index < len(player_keys)
-        )
-        with st.expander(
-            f"Bulkhandlinger · {len(selected_keys)} valgt",
-            icon=":material/checklist:",
-            key=f"player-list-bulk:{game.locale}:{game.slug}",
-            on_change="rerun",
-        ) as bulk_expander:
-            if bulk_expander.open:
-                render_player_bulk_controls(
-                    scope=f"player-list:{game.locale}:{game.slug}",
-                    selected_keys=selected_keys,
-                    game=game,
-                    entries={key: entry for key, entry in zip(player_keys, entries, strict=True)},
-                    paths=APP_PATHS,
-                )
-        _player_export_section(statistics, applied_query, selected, scope)
-    else:
-        st.info("Ingen spillere matcher de valgte filtre.")
+    try:
+        applied = replace(applied, search=search, positions=tuple(positions), max_value=maximum,
+                          sort_field=sort_field if sort_field in PLAYER_SORT_FIELDS else "source")
+    except ValueError as exc:
+        st.warning(str(exc))
+        return
+    entries = tuple(filter_player_statistics(statistics, applied))
+    player_index = PlayerStatisticsStore(OUTPUT_DIR).scan(game)
+    analyses = _player_decision_analysis_batch(player_index, game, tuple(player_identity(game, entry) for entry in entries), statistics.round_number, selected.generated_at)
+    if sort_field not in PLAYER_SORT_FIELDS:
+        paired = list(zip(entries, analyses, strict=True))
+        present = [pair for pair in paired if getattr(pair[1], sort_field, None) is not None]
+        missing = [pair for pair in paired if getattr(pair[1], sort_field, None) is None]
+        present.sort(key=lambda pair: getattr(pair[1], sort_field), reverse=applied.sort_order == "desc")
+        paired = present + missing
+        entries = tuple(pair[0] for pair in paired)
+        analyses = tuple(pair[1] for pair in paired)
+    st.caption(f"{len(entries)} af {len(statistics.entries)} spillere · runde {statistics.round_number} · {format_relative_precise(selected.generated_at)}")
+    if not entries:
+        st.info("Ingen spillere matcher filtrene. Nulstil eller udvid dem.")
+        return
+    visible_statistics = replace(statistics, entries=entries)
+    display_query = replace(applied, sort_field="source", columns=applied.columns)
+    rows = []
+    integer_columns = ()
+    for entry in entries:
+        entry_rows, integer_columns = _player_statistics_rows(replace(statistics, entries=(entry,)), display_query)
+        rows.extend(entry_rows)
+    player_keys = tuple(player_identity(game, entry) for entry in entries)
+    annotations = {item.player_key: item for item in settings.player_annotations}
+    for row, entry, key, analysis in zip(rows, entries, player_keys, analyses, strict=True):
+        if analysis is not None:
+            values = {"Vækst pr. mio.": analysis.growth_per_million if statistics.unit != "points" else None,
+                      "Form 3": analysis.form_3, "Form 5": analysis.form_5,
+                      "Stabilitet": analysis.stability_score,
+                      "Sikkerhed": data_status_label(analysis.provenance.certainty),
+                      "Grundlag": analysis.provenance.sample_size}
+        else:
+            values = {name: None for name in extra_options}
+        values.update({"Snapshotalder": format_relative_precise(selected.generated_at), "Snapshot": selected.generated_at,
+                       "Tags": " · ".join(annotations[key].tags) if key in annotations else None})
+        row.update({name: values.get(name) for name in extra_columns})
+        row["Detaljer"] = relative_url(PageId.PLAYER, locale=game.locale, game=game.slug, player=key, round=statistics.round_number, snapshot=selected.generated_at.isoformat())
+    event = dataframe(_style_integer_columns(rows, integer_columns), hide_index=True, width="stretch", on_select="rerun", selection_mode="multi-row",
+        column_config={"Detaljer": st.column_config.LinkColumn("Detaljer", display_text="Åbn spiller"),
+                       "Form 3": st.column_config.NumberColumn(help="Tre seneste tilgængelige afsluttede observationer; huller kan forekomme.", format="localized"),
+                       "Form 5": st.column_config.NumberColumn(help="Fem seneste tilgængelige afsluttede observationer; huller kan forekomme.", format="localized"),
+                       "Vækst pr. mio.": st.column_config.NumberColumn(help="Historisk vækst divideret med pris i millioner. Ikke en prognose.", format="localized")},
+        key=f"player-statistics:{game.locale}:{game.slug}:v1")
+    selected_keys = tuple(player_keys[position] for position in event.selection.rows if 0 <= position < len(player_keys))
+    if tool_visible(APP_PATHS, HubFeature.SCOUTING):
+        with st.expander(f"Bulkhandlinger · {len(selected_keys)} valgt", key=f"player-list-bulk:{game.locale}:{game.slug}", on_change="rerun") as bulk:
+            if bulk.open:
+                render_player_bulk_controls(scope=f"player-list:{game.locale}:{game.slug}", selected_keys=selected_keys, game=game,
+                    entries=dict(zip(player_keys, entries, strict=True)), paths=APP_PATHS,
+                    read_only=get_ui_context().read_only or updates_running(APP_PATHS))
+    _player_export_section(statistics, applied, selected, scope, ordered_entries=entries)
+
 
 
 def _player_statistics_panel(
@@ -2230,91 +2081,93 @@ def _player_statistics_panel(
             for warning in index.warnings:
                 st.code(warning)
 
-    st.caption(
-        "Data hentes kun, når du trykker på en henteknap. Tidligere runder "
-        "vises direkte fra den lokale cache."
-    )
-    if st.button(
-        "Hent seneste spillerstatistik",
-        type="primary",
-        icon=":material/download:",
-        key=f"fetch-latest-players-{game.locale}-{game.slug}-{empty_label}",
-        disabled=read_only,
-        help="Gendan managerspillet for at hente data." if read_only else None,
-    ):
-        _fetch_player_statistics(game, None)
-
-    if not read_only:
-        with st.expander("Hent manglende runder"):
+    with st.container(horizontal=True, vertical_alignment="bottom", gap="small", key=f"player-source-controls:{game.locale}:{game.slug}"):
+        with st.popover("Hent og opdater spillerdata", icon=":material/refresh:"):
             st.caption(
-                "Henter kun runder, der ikke allerede er gemt, i stigende "
-                "r\u00e6kkef\u00f8lge. En enkelt fejl stopper ikke resten."
+                "Data hentes kun, når du trykker på en henteknap. Tidligere runder "
+                "vises direkte fra den lokale cache."
             )
-            interval = st.columns(2)
-            with interval[0]:
-                from_round = int(
-                    st.number_input(
-                        "Fra runde",
-                        min_value=1,
-                        value=1,
-                        step=1,
-                        key=f"batch-from-{game.locale}-{game.slug}-{empty_label}",
-                    )
-                )
-            with interval[1]:
-                to_round = int(
-                    st.number_input(
-                        "Til runde",
-                        min_value=1,
-                        value=max(rounds, default=1),
-                        step=1,
-                        key=f"batch-to-{game.locale}-{game.slug}-{empty_label}",
-                    )
-                )
             if st.button(
-                "Hent manglende runder",
+                "Hent seneste spillerstatistik",
+                type="primary",
                 icon=":material/download:",
-                key=f"batch-fetch-{game.locale}-{game.slug}-{empty_label}",
-                disabled=to_round < from_round,
+                key=f"fetch-latest-players-{game.locale}-{game.slug}-{empty_label}",
+                disabled=read_only,
+                help="Gendan managerspillet for at hente data." if read_only else None,
             ):
-                with st.spinner(
-                    f"Henter manglende runder {from_round}-{to_round} ..."
-                ):
-                    result = _fetch_missing_player_rounds(
-                        game,
-                        from_round,
-                        to_round,
-                        store=store,
-                    )
-                st.session_state.setdefault(
-                    "player_statistics_batch_results", {}
-                )[identity] = result
-                st.rerun()
+                _fetch_player_statistics(game, None)
 
-    rounds = index.rounds_for(game)
-    if not rounds:
-        st.info(_local_data_status(None))
-        return
-    latest_known_round = max(rounds)
-    selected_round = _round_selectbox(
-        "Runde",
-        tuple(range(latest_known_round, 0, -1)) or (0,),
-        key=f"player-round-{game.locale}-{game.slug}-{empty_label}",
-        default=latest_known_round,
-    )
-    selected = index.newest(game, selected_round)
-    action_label = (
-        f"Opdater runde {selected_round}" if selected is not None
-        else f"Hent runde {selected_round}"
-    )
-    if st.button(
-        action_label,
-        icon=":material/refresh:" if selected is not None else ":material/download:",
-        key=f"fetch-player-round-{game.locale}-{game.slug}-{empty_label}",
-        disabled=read_only,
-        help="Gendan managerspillet for at hente data." if read_only else None,
-    ):
-        _fetch_player_statistics(game, selected_round)
+            if not read_only:
+                with st.expander("Hent manglende runder"):
+                    st.caption(
+                        "Henter kun runder, der ikke allerede er gemt, i stigende "
+                        "r\u00e6kkef\u00f8lge. En enkelt fejl stopper ikke resten."
+                    )
+                    interval = st.columns(2)
+                    with interval[0]:
+                        from_round = int(
+                            st.number_input(
+                                "Fra runde",
+                                min_value=1,
+                                value=1,
+                                step=1,
+                                key=f"batch-from-{game.locale}-{game.slug}-{empty_label}",
+                            )
+                        )
+                    with interval[1]:
+                        to_round = int(
+                            st.number_input(
+                                "Til runde",
+                                min_value=1,
+                                value=max(rounds, default=1),
+                                step=1,
+                                key=f"batch-to-{game.locale}-{game.slug}-{empty_label}",
+                            )
+                        )
+                    if st.button(
+                        "Hent manglende runder",
+                        icon=":material/download:",
+                        key=f"batch-fetch-{game.locale}-{game.slug}-{empty_label}",
+                        disabled=to_round < from_round,
+                    ):
+                        with st.spinner(
+                            f"Henter manglende runder {from_round}-{to_round} ..."
+                        ):
+                            result = _fetch_missing_player_rounds(
+                                game,
+                                from_round,
+                                to_round,
+                                store=store,
+                            )
+                        st.session_state.setdefault(
+                            "player_statistics_batch_results", {}
+                        )[identity] = result
+                        st.rerun()
+
+        rounds = index.rounds_for(game)
+        if not rounds:
+            st.info(_local_data_status(None))
+            return
+        latest_known_round = max(rounds)
+        selected_round = _round_selectbox(
+            "Runde",
+            tuple(range(latest_known_round, 0, -1)) or (0,),
+            key=f"player-round-{game.locale}-{game.slug}-{empty_label}",
+            default=latest_known_round,
+        )
+        selected = index.newest(game, selected_round)
+        action_label = (
+            f"Opdater runde {selected_round}" if selected is not None
+            else f"Hent runde {selected_round}"
+        )
+        if st.button(
+            action_label,
+            icon=":material/refresh:" if selected is not None else ":material/download:",
+            key=f"fetch-player-round-{game.locale}-{game.slug}-{empty_label}",
+            disabled=read_only,
+            help="Gendan managerspillet for at hente data." if read_only else None,
+        ):
+            _fetch_player_statistics(game, selected_round)
     if selected is None:
         st.info(
             f"Runde {selected_round} findes ikke i den lokale cache."
@@ -2341,46 +2194,27 @@ def _player_statistics_panel(
             f"{status_text}. Hent runden igen for at bekr\u00e6fte den, "
             "f\u00f8r data kan give turneringspoint."
         )
-    player_tabs = _stateful_tabs(
-        (
-            "Spillerliste",
-            "Scouting",
-            "Sammenligning",
-            "Watchlist",
-            "Ændringer",
-        ),
-        ("list", "scouting", "compare", "watchlist", "changes"),
-        key=(
-            f"player-panels-{game.locale}-{game.slug}-{empty_label}"
-        ),
-        parameter="panel",
-    )
-    list_tab, scouting_tab, compare_tab, watchlist_tab, changes_tab = player_tabs
-    if list_tab.open:
-        with list_tab:
-            _player_list_panel(selected, empty_label)
-    if scouting_tab.open:
-        with scouting_tab:
-            render_contextual_scouting_panel(game, index, APP_PATHS)
-    if compare_tab.open:
-        with compare_tab:
-            player_compare_panel(
-                game,
-                index,
-                APP_PATHS,
-                int(selected_round),
-            )
-    if watchlist_tab.open:
-        with watchlist_tab:
-            render_contextual_watchlist_panel(game, index, APP_PATHS)
-    if changes_tab.open:
-        with changes_tab:
-            player_changes_panel(
-                game,
-                index,
-                _scan_snapshots(str(OUTPUT_DIR.resolve())),
-                int(selected_round),
-            )
+    requested_panel = str(st.query_params.get("panel", "list"))
+    panels = [("Spillerliste", "list"), ("Sammenligning", "compare"), ("Ændringer", "changes")]
+    if tool_visible(APP_PATHS, HubFeature.SCOUTING) or requested_panel in {"scouting", "watchlist"}:
+        panels.extend((("Scouting", "scouting"), ("Watchlist", "watchlist")))
+    player_tabs = _stateful_tabs(tuple(label for label, _ in panels), tuple(slug for _, slug in panels), key=f"player-panels-{game.locale}-{game.slug}-{empty_label}", parameter="panel")
+    for tab, (_, slug) in zip(player_tabs, panels, strict=True):
+        if not tab.open:
+            continue
+        with tab:
+            if slug == "list":
+                _player_list_panel(selected, empty_label)
+            elif slug == "compare":
+                player_compare_panel(game, index.through(game, round_number=selected_round, generated_at=selected.generated_at), APP_PATHS, int(selected_round))
+            elif slug == "changes":
+                player_changes_panel(game, index.through(game, round_number=selected_round, generated_at=selected.generated_at), _scan_snapshots(str(OUTPUT_DIR.resolve())), int(selected_round))
+            elif require_tool(APP_PATHS, HubFeature.SCOUTING, read_only=read_only):
+                scoped_index = index.through(game, round_number=selected_round, generated_at=selected.generated_at)
+                if slug == "scouting":
+                    render_contextual_scouting_panel(game, scoped_index, APP_PATHS, read_only=read_only)
+                else:
+                    render_contextual_watchlist_panel(game, scoped_index, APP_PATHS, read_only=read_only)
 
 def _player_statistics_tab(
     manager_game: ManagerGame, *, read_only: bool = False
@@ -2547,25 +2381,13 @@ def _refresh_preview_rows(plan: RefreshPlan) -> list[dict[str, object]]:
     return rows
 
 
-def _refresh_event_label(event: RefreshProgressEvent) -> str:
-    labels = {
-        "running": "arbejder",
-        "fetched": "hentet",
-        "reused_current": "aktuel cache genbrugt",
-        "reused_after_error": "cache genbrugt efter fejl",
-        "failed_no_cache": "fejlet uden cache",
-        "skipped_unavailable": "ikke tilgængelig",
-    }
-    return labels[event.status]
-
-
 @st.dialog("Forhåndsvis opdatering", width="large")
 def _manager_game_refresh_dialog(
     manager_game: ManagerGame,
     game_groups: tuple[GroupDefinition, ...],
     retry_manifest: RefreshManifest | None = None,
 ) -> None:
-    """Preview and run the only network-writing Rundecenter interaction."""
+    """Preview and enqueue the shared durable refresh workflow."""
 
     retry = retry_manifest is not None
     identity = f"{manager_game.game.locale}:{manager_game.game.slug}"
@@ -2654,6 +2476,8 @@ def _manager_game_refresh_dialog(
         previous_manifest=(retry_manifest if retry else latest_manifest),
         include_metadata=True,
         include_postprocess=True,
+        settings=settings_for(APP_PATHS),
+        catch_up=True,
     )
     configured_team_count = sum(
         step.source == "team" and step.available for step in plan.steps
@@ -2700,7 +2524,7 @@ def _manager_game_refresh_dialog(
             "Start opdatering",
             type="primary",
             icon=":material/sync:",
-            disabled=not plan.selected_steps,
+            disabled=not plan.selected_steps or updates_running(APP_PATHS),
             key=f"refresh-start:{identity}:{plan.retry_of or mode.value}",
         )
     if close_requested:
@@ -2708,219 +2532,10 @@ def _manager_game_refresh_dialog(
     if not start_requested:
         return
 
-    settings_error: str | None = None
-    try:
-        settings = HubSettingsStore(APP_PATHS.hub_settings_file).load()
-    except (OSError, PayloadError, ValueError) as exc:
-        settings = None
-        settings_error = str(exc)
-        st.warning(
-            "Statusalarmer kan ikke beregnes i denne kørsel, fordi de lokale "
-            f"indstillinger ikke kunne læses: {exc}"
-        )
-    inbox_store = AnalysisInboxStore(APP_PATHS.analysis_inbox_file)
-    completed_teams = 0
-    after_errors: set[str] = set()
-    after_warnings: set[str] = set()
-    published_count = 0
-    if settings_error is not None:
-        after_errors.add(
-            "Statusalarmer: kunne ikke beregnes: " + settings_error
-        )
-
-    def collect_pairing_messages(messages: Iterable[str]) -> None:
-        for message in messages:
-            if "afviger fra de korrigerede resultater" in message:
-                after_warnings.add(message)
-            else:
-                after_errors.add(message)
-
-    def run_postprocess() -> None:
-        nonlocal published_count
-        _invalidate_snapshot_index()
-        refreshed_index = _scan_snapshots(str(OUTPUT_DIR.resolve()))
-        resolved_groups, pairing_errors = _with_published_tournament_pairings(
-            game_groups, refreshed_index
-        )
-        collect_pairing_messages(pairing_errors)
-        for game_group in resolved_groups:
-            try:
-                published = _publish_next_swiss_round(
-                    game_group, refreshed_index
-                )
-            except (OSError, PayloadError, ValueError) as exc:
-                after_errors.add(f"{game_group.name}: {exc}")
-            else:
-                published_count += published is not None
-        resolved_groups, pairing_errors = _with_published_tournament_pairings(
-            game_groups, refreshed_index
-        )
-        collect_pairing_messages(pairing_errors)
-        st.session_state.pop("hall_of_fame_freeze_warning", None)
-        _freeze_complete_hall_of_fame(
-            resolved_groups,
-            include_round_wins=True,
-        )
-        if warning := st.session_state.pop(
-            "hall_of_fame_freeze_warning", None
-        ):
-            after_errors.add(f"Hall of Fame: {warning}")
-        if after_errors:
-            raise PayloadError(" | ".join(sorted(after_errors)))
-
-    with st.status(
-        "Opdatering kører",
-        expanded=True,
-        state="running",
-    ) as operation:
-        progress_bar = st.progress(0.0, text="Forbereder datakilder")
-        current_step = st.empty()
-
-        def on_progress(event: RefreshProgressEvent) -> None:
-            nonlocal completed_teams
-            if event.step.source == "team" and event.status != "running":
-                completed_teams += 1
-            if event.step.source == "team" and configured_team_count:
-                detail = (
-                    f"Hold {completed_teams}/op til {configured_team_count} "
-                    f"· {event.step.label}"
-                )
-            else:
-                detail = event.step.label
-            current_step.write(f"**{detail}** · {_refresh_event_label(event)}")
-            if event.status != "running":
-                icon = "⚠️" if event.error else "✅"
-                operation.write(
-                    f"{icon} {event.step.label}: {_refresh_event_label(event)}"
-                    + (f" · {event.error}" if event.error else "")
-                )
-                if event.completed_steps == event.total_steps:
-                    current_step.write("**Manifest** · gemmes lokalt")
-            fraction = (
-                event.completed_steps / (event.total_steps + 1)
-                if event.total_steps
-                else 0.0
-            )
-            progress_bar.progress(
-                min(1.0, max(0.0, fraction)),
-                text=f"Datakilder {event.completed_steps}/{event.total_steps}",
-            )
-
-        try:
-            result = refresh_manager_game(
-                manager_game,
-                game_groups,
-                _client(),
-                snapshot_store,
-                player_store,
-                manifest_store,
-                settings=settings,
-                inbox_store=inbox_store,
-                metadata_store=metadata_store,
-                plan=plan,
-                progress=on_progress,
-                postprocess=run_postprocess,
-            )
-        except holdet.ManifestWriteError as exc:
-            st.session_state[pending_manifest_key] = exc.manifest
-            operation.update(
-                label="Data gemt, men manifest mangler",
-                state="error",
-                expanded=True,
-            )
-            st.error(
-                "Datakilder kan allerede være gemt. Genprøv manifestet uden "
-                "netværk via knappen i denne dialog."
-            )
-            if st.button(
-                "Prøv manifest igen",
-                type="primary",
-                icon=":material/save:",
-                key=f"manifest-write-retry-now:{exc.manifest.run_id}",
-            ):
-                try:
-                    manifest_path = manifest_store.write(exc.manifest)
-                except Exception as retry_exc:
-                    st.error(
-                        f"Manifestet kunne stadig ikke gemmes: {retry_exc}"
-                    )
-                else:
-                    st.session_state.pop(pending_manifest_key, None)
-                    st.session_state["game_refresh_notice"] = {
-                        "severity": (
-                            "warning" if exc.manifest.failures else "success"
-                        ),
-                        "message": (
-                            "Manifestet blev gemt uden nye netværkskald: "
-                            f"{manifest_path.name}."
-                        ),
-                    }
-                    st.rerun()
-            return
-        except Exception as exc:
-            operation.update(
-                label="Opdateringen kunne ikke gennemføres",
-                state="error",
-                expanded=True,
-            )
-            st.error(str(exc))
-            return
-        finally:
-            _invalidate_snapshot_index()
-
-        progress_bar.progress(1.0, text="Alle planlagte trin behandlet")
-        operation.write(f"✅ Manifest gemt: {result.manifest_path.name}")
-
-        failed_steps = (
-            () if result.manifest is None else result.manifest.failures
-        )
-        partial = bool(failed_steps)
-        operation.update(
-            label=(
-                "Opdatering delvist gennemført"
-                if partial
-                else "Opdatering gennemført"
-            ),
-            state="error" if partial else "complete",
-            expanded=partial,
-        )
-        fetched = sum(
-            step.status == "fetched"
-            for step in (() if result.manifest is None else result.manifest.steps)
-        )
-        reused = sum(
-            step.reused_cache
-            for step in (() if result.manifest is None else result.manifest.steps)
-        )
-        notice = (
-            f"{fetched} datakilder hentet · {reused} cachede kilder genbrugt. "
-            f"Manifest: {result.manifest_path.name}."
-        )
-        if published_count:
-            notice += f" {published_count} Swiss-runder publiceret."
-        if failed_steps:
-            notice += (
-                f" {len(failed_steps)} trin fejlede og kan forsøges igen "
-                "fra manifestpanelet."
-            )
-        if after_errors:
-            notice += " Efterbehandling: " + " | ".join(sorted(after_errors))
-        if after_warnings:
-            notice += " Turneringsadvarsel: " + " | ".join(
-                sorted(after_warnings)
-            )
-        severity = (
-            "error"
-            if failed_steps and fetched == 0 and reused == 0
-            else "warning"
-            if partial or after_warnings
-            else "success"
-        )
-        st.session_state["game_refresh_notice"] = {
-            "severity": severity,
-            "message": notice,
-        }
-    st.rerun()
+    start_manager_update(
+        APP_PATHS, manager_game, force=mode == RefreshMode.ALL,
+        retry_manifest=retry_manifest,
+    )
 
 
 
@@ -2981,32 +2596,120 @@ def _game_round_center_tab(
         _manager_game_refresh_dialog(manager_game, resolved_groups)
 
 
-def _game_groups_tab(
-    manager_game: ManagerGame,
-    groups: tuple[GroupDefinition, ...],
-    index: SnapshotIndex,
-    *,
-    read_only: bool = False,
-) -> None:
-    game_groups = tuple(
-        group
-        for group in groups
-        if _game_identity(group.game) == manager_game.identity
-    )
-    group_count, team_count, latest_round = _game_statistics(
-        manager_game, groups, index
-    )
-    with st.container(horizontal=True):
-        st.metric("Grupper", group_count, border=True)
-        st.metric("Unikke hold", team_count, border=True)
-        st.metric("Seneste datarunde", latest_round or "–", border=True)
-    if game_groups:
-        columns = st.columns(2)
-        for position, group in enumerate(game_groups):
-            with columns[position % 2]:
-                _group_card(group, index)
-    else:
-        st.info("Managerspillet har ingen grupper endnu.")
+def _game_groups_tab(manager_game, groups, index, *, read_only=False) -> None:
+    game_groups = tuple(group for group in groups if _game_identity(group.game) == manager_game.identity)
+    with st.container(horizontal=True, horizontal_alignment="distribute", vertical_alignment="center"):
+        st.header("Ligaer og turneringer")
+        if not read_only and st.button("Opret liga eller turnering", key="create-competition-shortcut", icon=":material/add:"):
+            _navigate("game", locale=manager_game.game.locale, game=manager_game.game.slug, section="administration")
+    if not game_groups:
+        st.info("Tilføj en liga eller turnering for at følge dine hold samlet.")
+        return
+    widths = [3, 2, 1, 1]
+    for column, label in zip(st.columns(widths), ("Konkurrence", "Format", "Hold", "Seneste runde")):
+        column.markdown(f"**{label}**")
+    for group in game_groups:
+        columns = st.columns(widths, vertical_alignment="center")
+        with columns[0]:
+            page_link(PageId.GROUP, group.name, group=group.group_id, icon=":material/leaderboard:")
+        with columns[1]:
+            st.write(_competition_format(group))
+        columns[2].write(str(len(group.teams)))
+        rounds = index.rounds_for(group.game, tuple(member.team_id for member in group.teams))
+        columns[3].write(str(rounds[0]) if rounds else "–")
+
+
+def _competition_format(group):
+    if group.tournament is None:
+        return "Liga"
+    return {"league": "Liga med kampplan", "swiss": "Schweizersystem", "group_knockout": "Gruppespil + knockout", "double_elimination": "Double elimination"}.get(group.tournament.template, "Turnering")
+
+
+def _game_metadata(game):
+    try:
+        return GameMetadataStore(APP_PATHS.game_metadata_dir).load(game)
+    except (OSError, PayloadError, ValueError):
+        return None
+
+
+def _entity_header(manager_game, groups, index, *, group=None, read_only=False, game_menu=False):
+    with st.container(horizontal=True, gap="small"):
+        page_link(PageId.HOME, "Mine managerspil", icon=":material/arrow_back:")
+        if group is not None:
+            st.markdown("/", width="content")
+            page_link(PageId.GAME, manager_game.name, locale=manager_game.game.locale, game=manager_game.game.slug)
+    def extra_actions():
+        options = {"teams": "Holdstatistik", "history": "Historik", "administration": "Administration", "settings": "Indstillinger"}
+        if tool_visible(APP_PATHS, HubFeature.ALERTS):
+            options["alerts"] = "Statusalarmer"
+        if tool_visible(APP_PATHS, HubFeature.ANALYSIS):
+            options["analysis"] = "Analyse"
+        selected = st.menu_button("Flere funktioner", tuple(options), format_func=options.get, icon=":material/more_horiz:", key=f"game-extra:{manager_game.identity}")
+        if selected is not None:
+            _navigate("game", locale=manager_game.game.locale, game=manager_game.game.slug, section=selected)
+    title, actions = st.columns([3, 2], vertical_alignment="center")
+    with title:
+        st.title(group.name if group else manager_game.name, anchor=f"gruppe-{group.group_id}" if group else f"managerspil-{manager_game.game.slug}")
+    with actions:
+        render_scope_actions(APP_PATHS, manager_game, groups, index, competition_id=group.group_id if group else None, read_only=read_only, extra_actions=extra_actions if game_menu else None)
+    if group is not None:
+        st.caption(f"{_competition_format(group)} · {len(group.teams)} hold")
+        if group.official_url:
+            st.link_button("Åbn officiel gruppe", group.official_url, icon=":material/open_in_new:", type="tertiary")
+    render_run_progress(APP_PATHS)
+
+
+def _game_overview(manager_game, groups, index, *, read_only=False):
+    settings = settings_for(APP_PATHS)
+    players = PlayerStatisticsStore(OUTPUT_DIR).scan(manager_game.game)
+    metadata = _game_metadata(manager_game.game)
+    scope = resolve_scope(manager_game, groups, index, settings)
+    summary = scope_overview(scope, index, players, metadata, settings)
+    round_column, players_column, deadline_column = st.columns([1, 1, 2])
+    round_column.metric("Senest gemte runde", summary.round_number if summary.round_number is not None else "–")
+    players_column.metric("Spillere", format_integer(summary.player_count))
+    with deadline_column:
+        st.markdown("**Næste frist**")
+        st.write(next_schedule_action(metadata))
+    st.caption(summary.status + (" · Ældste data: " + format_relative_precise(summary.oldest_capture) if summary.oldest_capture else " · Hent data for at se resultater."))
+    own = next((item for item in settings.own_teams if (item.game_locale.casefold(), item.game_slug) == manager_game.identity), None)
+    with st.container(horizontal=True, vertical_alignment="center"):
+        if own is None:
+            st.write("Dit eget hold er ikke valgt.")
+            page_link(PageId.GAME, "Vælg mit hold", locale=manager_game.game.locale, game=manager_game.game.slug, section="settings")
+        else:
+            snapshot = index.newest(manager_game.game, own.team_id)
+            st.write(f"**Mit hold:** {snapshot.team.team_name if snapshot else f'Hold {own.team_id}'}")
+            page_link(PageId.GAME, "Åbn mit hold", locale=manager_game.game.locale, game=manager_game.game.slug, section="teams", team=own.team_id)
+    st.header("Stillinger og kampe")
+    if not scope.groups:
+        st.info("Opret en liga eller turnering for at se dine stillinger her.")
+        page_link(PageId.GAME, "Opret liga eller turnering", locale=manager_game.game.locale, game=manager_game.game.slug, section="administration")
+    for group in scope.groups:
+        with st.container(border=True):
+            with st.container(horizontal=True, vertical_alignment="center", horizontal_alignment="distribute"):
+                page_link(PageId.GROUP, group.name, group=group.group_id, icon=":material/leaderboard:")
+                st.caption(_competition_format(group))
+            if group.tournament is not None:
+                state = build_tournament_state(group, index, latest_tournament_round(group, index))
+                st.write(f"{state.phase} · Runde {state.as_of_round} · {len(group.teams)} hold")
+                if state.champion_id is not None:
+                    champion = next((row.team_name for row in state.standings if row.team_id == state.champion_id), "–")
+                    st.write(f"Vinder: {champion}")
+                elif state.next_matches:
+                    match = state.next_matches[0]
+                    label = "Afventer resultat" if _match_round(match) <= state.as_of_round else "Næste kamp"
+                    st.caption(f"{label}: {match.team_a_name or 'Afventer'} – {match.team_b_name or 'Afventer'} · Runde {_match_round(match)}")
+            else:
+                rounds = index.rounds_for(group.game, tuple(member.team_id for member in group.teams))
+                if not rounds:
+                    st.caption("Ingen gemte resultater endnu.")
+                else:
+                    rows = build_standings(group, index, rounds[0], "overall")[:3]
+                    dataframe([{"Placering": row.rank, "Hold": row.team_name, "Værdi / point": row.total} for row in rows], key=f"overview-standing:{group.group_id}", hide_index=True, height="content", alt=f"De tre førende hold i {group.name}")
+    with st.expander("Datadetaljer og rundecenter", key=f"round-details:{manager_game.identity}", on_change="rerun") as details:
+        if details.open:
+            _game_round_center_tab(manager_game, groups, index, read_only=read_only)
 
 def _game_settings_tab(
     manager_game: ManagerGame,
@@ -3031,6 +2734,33 @@ def _game_settings_tab(
 
     if st.session_state.get("pending_archive_manager_game") == manager_game.identity:
         _confirm_archive_manager_game(store, manager_game, game_groups)
+    settings_store = HubSettingsStore(APP_PATHS.hub_settings_file)
+    settings = settings_for(APP_PATHS)
+    can_save_settings = settings_readable(APP_PATHS)
+    own_team = next((item for item in settings.own_teams if (item.game_locale.casefold(), item.game_slug) == manager_game.identity), None)
+    st.subheader("Mit hold")
+    st.caption("Dit valgte hold indgår i Opdater alle og spillets samlede JSON, også uden medlemskab af en liga. Valget henter ingen data.")
+    with st.form(f"own-team:{manager_game.identity}"):
+        own_source = st.text_input("Team-ID eller Holdet-URL", value=str(own_team.team_id) if own_team else "", help="Lad feltet være tomt for at fjerne valget.")
+        save_own = st.form_submit_button("Gem mit hold", disabled=not can_save_settings)
+    if save_own and settings_readable(APP_PATHS):
+        try:
+            settings = settings_store.load()
+            members = _parse_direct_lines(own_source, manager_game.game)
+            if len(members) > 1:
+                raise ValueError("Vælg ét eget hold.")
+            if members:
+                settings_store.set_own_team(settings, OwnTeamSelection(manager_game.game.locale.casefold(), manager_game.game.slug, members[0].team_id))
+            else:
+                settings_store.save(replace(settings, own_teams=tuple(item for item in settings.own_teams if (item.game_locale.casefold(), item.game_slug) != manager_game.identity)))
+        except (OSError, PayloadError, ValueError) as exc:
+            st.error(str(exc))
+        else:
+            st.session_state[f"own-team-saved:{manager_game.identity}"] = True
+            st.rerun()
+    if st.session_state.pop(f"own-team-saved:{manager_game.identity}", False):
+        st.success("Dit valg af eget hold er gemt.")
+    st.subheader("Spilindstillinger")
     if st.button("Hent spilinfo", icon=":material/event:", key="fetch-manager-game-info"):
         try:
             with st.spinner("Henter officielt navn og runder …"):
@@ -3084,113 +2814,36 @@ def _game_settings_tab(
 
 
 
-def _game_view(
-    manager_game: ManagerGame,
-    groups: tuple[GroupDefinition, ...],
-    index: SnapshotIndex,
-    store: GroupStore,
-    *,
-    read_only: bool = False,
-) -> None:
-    color, _ = _colors(manager_game.game.slug)
-    st.markdown(
-        f'<div style="height:6px;border-radius:6px;background:{color};margin-bottom:1rem"></div>',
-        unsafe_allow_html=True,
-    )
-    st.title(manager_game.name, anchor=f"managerspil-{manager_game.game.slug}")
-    st.caption(manager_game.game.slug)
-    game_groups = tuple(
-        group
-        for group in groups
-        if _game_identity(group.game) == manager_game.identity
-    )
-    active_alerts = _active_alert_counts().get(manager_game.identity, 0)
-    alert_tab_label = f"Statusalarmer · {active_alerts}"
-    group_tab_label = f"Grupper · {len(game_groups)}"
-    tabs = _stateful_tabs(
-        (
-            "Rundecenter",
-            group_tab_label,
-            "Spillerstatistik",
-            alert_tab_label,
-            "Holdstatistik",
-            "Historik",
-            "Analyse",
-            "Administration",
-            "Indstillinger",
-        ),
-        (
-            "round-center",
-            "groups",
-            "players",
-            "alerts",
-            "teams",
-            "history",
-            "analysis",
-            "administration",
-            "settings",
-        ),
-        key=f"game-tabs-{manager_game.game.locale}-{manager_game.game.slug}",
-        parameter="section",
-    )
-    (
-        round_center_tab,
-        groups_tab,
-        players_tab,
-        alerts_tab,
-        teams_tab,
-        history_tab,
-        analysis_tab,
-        manage_tab,
-        settings_tab,
-    ) = tabs
-    if round_center_tab.open:
-        with round_center_tab:
-            _game_round_center_tab(
-                manager_game, groups, index, read_only=read_only
-            )
-    if groups_tab.open:
-        with groups_tab:
-            _game_groups_tab(
-                manager_game, groups, index, read_only=read_only
-            )
-    if players_tab.open:
-        with players_tab:
-            _player_statistics_tab(manager_game, read_only=read_only)
-    if alerts_tab.open:
-        with alerts_tab:
-            alerts_view(
-                APP_PATHS,
-                manager_game.game,
-                read_only=read_only,
-            )
-    if teams_tab.open:
-        with teams_tab:
-            _team_statistics_game_tab(
-                manager_game, groups, index, read_only=read_only
-            )
-    if history_tab.open:
-        with history_tab:
+def _game_view(manager_game, groups, index, store, *, read_only=False) -> None:
+    _entity_header(manager_game, groups, index, read_only=read_only, game_menu=True)
+    game_groups = tuple(group for group in groups if _game_identity(group.game) == manager_game.identity)
+    requested = str(st.query_params.get("section", "round-center"))
+    if requested in {"alerts", "analysis", "teams", "history", "administration", "settings"}:
+        page_link(PageId.GAME, "Tilbage til overblik", locale=manager_game.game.locale, game=manager_game.game.slug, section="round-center")
+        if requested == "alerts" and require_tool(APP_PATHS, HubFeature.ALERTS, read_only=read_only):
+            alerts_view(APP_PATHS, manager_game.game, read_only=read_only)
+        elif requested == "analysis" and require_tool(APP_PATHS, HubFeature.ANALYSIS, read_only=read_only):
+            analysis_panel(manager_game, groups, index, APP_PATHS, read_only=read_only)
+        elif requested == "teams":
+            _team_statistics_game_tab(manager_game, groups, index, read_only=read_only)
+        elif requested == "history":
             game_history_panel(manager_game, groups, index)
-    if analysis_tab.open:
-        with analysis_tab:
-            analysis_panel(
-                manager_game,
-                groups,
-                index,
-                APP_PATHS,
-                read_only=read_only,
-            )
-    if manage_tab.open:
-        with manage_tab:
-            _manage_game(
-                manager_game, game_groups, index, store, read_only=read_only
-            )
-    if settings_tab.open:
-        with settings_tab:
-            _game_settings_tab(
-                manager_game, game_groups, store, read_only=read_only
-            )
+        elif requested == "administration":
+            _manage_game(manager_game, game_groups, index, store, read_only=read_only)
+        elif requested == "settings":
+            _game_settings_tab(manager_game, game_groups, store, read_only=read_only)
+        return
+    tabs = _stateful_tabs(("Overblik", "Ligaer og turneringer", "Spillere"), ("round-center", "groups", "players"), key=f"game-tabs-{manager_game.game.locale}-{manager_game.game.slug}", parameter="section")
+    if tabs[0].open:
+        with tabs[0]:
+            _game_overview(manager_game, groups, index, read_only=read_only)
+    if tabs[1].open:
+        with tabs[1]:
+            _game_groups_tab(manager_game, groups, index, read_only=read_only)
+    if tabs[2].open:
+        with tabs[2]:
+            _player_statistics_tab(manager_game, read_only=read_only)
+
 
 def _standing_warning(row: StandingRow) -> str | None:
     notices = []
@@ -3269,6 +2922,8 @@ def _round_story_panel(
     except (OSError, PayloadError, ValueError) as exc:
         st.warning(f"Rundens historie kunne ikke l\u00e6ses: {exc}")
         return
+    if not feature_enabled(settings, HubFeature.STORIES):
+        return
     story = build_round_story(
         (group,),
         index,
@@ -3291,19 +2946,14 @@ def _round_story_panel(
 
 
 def _standings_group_view(group: GroupDefinition, index: SnapshotIndex) -> None:
-    color, _ = _colors(group.game.slug)
-    st.markdown(
-        f'<div style="height:6px;border-radius:6px;background:{color};margin-bottom:1rem"></div>',
-        unsafe_allow_html=True,
-    )
-    st.title(group.name, anchor=f"gruppe-{group.group_id}")
-    if group.official_url:
-        st.link_button(
-            "Åbn officiel gruppe",
-            group.official_url,
-            icon=":material/open_in_new:",
-        )
-    st.caption(f"{group.game.slug} · {len(group.teams)} faste hold")
+    context = get_ui_context()
+    if context.selected_game is not None:
+        _entity_header(context.selected_game, context.groups, index, group=group, read_only=context.read_only or updates_running(APP_PATHS))
+    else:
+        st.title(group.name, anchor=f"gruppe-{group.group_id}")
+    snapshots = tuple(index.newest(group.game, member.team_id) for member in group.teams)
+    captures = [item.generated_at for item in snapshots if item is not None]
+    st.caption("Ældste holddata: " + format_relative_precise(min(captures)) if captures else "Der er ingen lokale holddata endnu.")
     if not group.teams:
         st.info("Gruppen har ingen hold endnu.")
         return
@@ -3389,10 +3039,14 @@ def _round_data_label(status: str) -> str:
 
 
 def _tournament_standings_table(
-    group: GroupDefinition, state: TournamentState, round_number: int
+    group: GroupDefinition, state: TournamentState, round_number: int, *, compact: bool = False
 ) -> None:
+    if group.tournament is not None and group.tournament.pairing_error:
+        st.info("Stillingen afventer gennemgang af kampplanen. Holdenes rå data er stadig tilgængelige.")
+        return
     rows = [
         {
+            "Pulje": row.group_index + 1,
             "Plac.": row.rank,
             "Manager": row.owner_name,
             "Hold": row.team_name,
@@ -3408,6 +3062,11 @@ def _tournament_standings_table(
         }
         for row in state.standings
     ]
+    if compact:
+        visible = ("Plac.", "Hold", "Point")
+        if len({row.group_index for row in state.standings}) > 1:
+            visible = ("Pulje", *visible)
+        rows = [{key: value for key, value in row.items() if key in (*visible, "Hold-ID")} for row in rows]
     st.caption("Klik p\u00e5 en r\u00e6kke for at \u00e5bne holdet")
     event = dataframe(
         _style_integer_columns(rows, ("For", "Imod", "Forskel")),
@@ -3415,7 +3074,7 @@ def _tournament_standings_table(
         width="stretch",
         on_select="rerun",
         selection_mode="single-row",
-        key=f"tournament-standing-{group.group_id}-v1",
+        key=f"tournament-standing-{group.group_id}-{'overview' if compact else 'full'}",
         column_config={"Hold-ID": None},
     )
     if event.selection.rows:
@@ -3428,45 +3087,43 @@ def _tournament_standings_table(
         )
 
 
-def _tournament_overview(
-    group: GroupDefinition, state: TournamentState
-) -> None:
-    champion = next(
-        (
-            row.team_name
-            for row in state.standings
-            if row.team_id == state.champion_id
-        ),
-        None,
-    )
-    with st.container(horizontal=True):
-        st.metric("Fase", state.phase, border=True)
-        st.metric("Aktive hold", len(state.active_team_ids), border=True)
-        st.metric("Eliminerede", len(state.eliminated_team_ids), border=True)
-        st.metric("Mester", champion or "–", border=True)
-    if state.next_matches:
-        st.subheader("Næste opgør")
-        for match in state.next_matches:
-            if isinstance(match, GroupMatch):
-                label = f"{match.team_a_name} – {match.team_b_name}"
-            else:
-                label = (
-                    f"{match.team_a_name or 'Afventer'} – "
-                    f"{match.team_b_name or 'Afventer'}"
-                )
-            st.markdown(f"**Runde {_match_round(match)}:** {label}")
-    elif champion is not None:
-        st.success(f"{champion} har vundet turneringen.")
-    else:
-        st.info("Der er ingen fastlagt næste kamp endnu.")
-    for warning in state.warnings:
-        st.warning(warning)
+def _tournament_overview(group: GroupDefinition, state: TournamentState) -> None:
+    champion = next((row.team_name for row in state.standings if row.team_id == state.champion_id), None)
+    summary_columns = st.columns(3)
+    summary_columns[0].metric("Fase", state.phase)
+    blocked = group.tournament is not None and group.tournament.pairing_error is not None
+    summary_columns[1].metric("Aktive hold", "–" if blocked else len(state.active_team_ids))
+    summary_columns[2].metric("Afsluttede kampe", "–" if blocked else sum(match.complete for match in (*state.group_matches, *state.knockout_matches)))
+    standings, matches = st.columns([3, 2], gap="large")
+    with standings:
+        st.header("Stilling")
+        _tournament_standings_table(group, state, state.as_of_round, compact=True)
+    with matches:
+        if blocked:
+            st.header("Kampe afventer gennemgang")
+            st.info("Resultater og videre kvalifikation vises, når den gemte kampplan kan verificeres.")
+        elif champion is not None:
+            st.header("Vinder")
+            st.success(f"{champion} har vundet turneringen.")
+        elif state.next_matches:
+            earliest = _match_round(state.next_matches[0])
+            pending = earliest <= state.as_of_round
+            st.header("Afventer resultat" if pending else "Næste opgør")
+            st.caption(f"Runde {earliest}" + (" · Afsluttende data mangler" if pending else ""))
+            for match in state.next_matches:
+                with st.container(border=True):
+                    st.markdown(f"**{match.team_a_name or 'Afventer'}** – **{match.team_b_name or 'Afventer'}**")
+                    if match.team_a_change is not None or match.team_b_change is not None:
+                        st.caption(f"Foreløbig score: {_format_number(match.team_a_change)} – {_format_number(match.team_b_change)}")
+        else:
+            st.header("Kampe")
+            st.info("Der er ingen fastlagt næste kamp endnu.")
 
 
 def _tournament_head_to_head(
     group: GroupDefinition, state: TournamentState, index: SnapshotIndex
 ) -> None:
-    st.subheader("Indbyrdes sammenligning")
+    st.header("Indbyrdes sammenligning")
     if len(group.teams) < 2:
         st.info("H2H kræver mindst to hold.")
         return
@@ -3517,7 +3174,9 @@ def _tournament_head_to_head(
         return
     rows: list[dict[str, object]] = []
     for match in summary.matches:
-        if not match.complete:
+        if match.blocked:
+            status = "Afventer gennemgang"
+        elif not match.complete:
             status = _round_data_label(
                 _round_data_state(
                     index,
@@ -3556,14 +3215,16 @@ def _tournament_matches(
 ) -> None:
     _tournament_head_to_head(group, state, index)
     st.divider()
-    st.subheader(
+    st.header(
         "Alle gruppespilskampe"
         if group.tournament is not None and group.tournament.template == "group_knockout"
         else "Alle kampe"
     )
     rows: list[dict[str, object]] = []
     for match in state.group_matches:
-        if match.fixture.is_bye:
+        if group.tournament is not None and group.tournament.pairing_error:
+            status = "Afventer gennemgang"
+        elif match.fixture.is_bye:
             status = "Sidder over"
         elif match.complete:
             status = "Uafgjort" if match.winner_id is None else "Færdig"
@@ -3596,7 +3257,9 @@ def _tournament_matches(
                 for team_id in (match.team_a_id, match.team_b_id)
                 if team_id is not None
             )
-            if match.complete:
+            if match.blocked:
+                status = "Afventer gennemgang" if state.pairing_conflicts or group.tournament.pairing_error else "Afventer tidligere kamp eller publicering"
+            elif match.complete:
                 status = "Færdig" if len(participants) == 2 else "Automatisk videre"
             elif len(participants) < 2:
                 status = "Afventer tidligere kamp"
@@ -3700,53 +3363,40 @@ def _tournament_data_status(
                 required[match.team_b_id].add(round_number)
 
     status_rows: list[dict[str, object]] = []
-    has_missing = False
-    has_in_progress = False
-    has_unknown = False
+    metadata = _game_metadata(group.game)
+    now = datetime.now().astimezone()
+    ends = {} if metadata is None else {item.round_number: item.end for item in metadata.rounds}
+    pending = False
     for member in group.teams:
-        missing: list[int] = []
-        in_progress: list[int] = []
-        unknown: list[int] = []
+        missing, preliminary, ended, unknown = [], [], [], []
         for round_number in sorted(required[member.team_id]):
-            located = index.summary_for(
-                group.game, member.team_id, round_number
-            )
+            located = index.summary_for(group.game, member.team_id, round_number)
             if located is None:
                 missing.append(round_number)
             elif located[1].round_status == "in_progress":
-                in_progress.append(round_number)
+                (ended if round_number in ends and ends[round_number] <= now else preliminary).append(round_number)
             elif located[1].round_status == "unknown":
                 unknown.append(round_number)
-        has_missing = has_missing or bool(missing)
-        has_in_progress = has_in_progress or bool(in_progress)
-        has_unknown = has_unknown or bool(unknown)
+        pending = pending or bool(missing or preliminary or ended or unknown)
         newest = index.newest(group.game, member.team_id)
-        status_rows.append(
-            {
-                "Hold": newest.team.team_name if newest else member.name,
-                "Datakilde": _snapshot_data_status(newest),
-                "Runde i gang": ", ".join(map(str, in_progress)) or "\u2013",
-                "Rundestatus ukendt": ", ".join(map(str, unknown)) or "\u2013",
-                "Mangler data": ", ".join(map(str, missing)) or "\u2013",
-            }
-        )
-    pending = has_missing or has_in_progress or has_unknown
-    with st.expander("Datastatus", expanded=pending):
-        if has_missing:
-            st.warning("Mangler data til en eller flere planlagte kampe.")
-        if has_in_progress:
-            st.warning(
-                "Runde i gang. Data vises, men turneringspoint gives ikke, "
-                "f\u00f8r runden er afsluttet og hentet igen."
-            )
-        if has_unknown:
-            st.warning(
-                "Rundestatus ukendt. Data vises, men turneringspoint holdes "
-                "tilbage, indtil en manuel genhentning bekr\u00e6fter runden."
-            )
-        if not pending:
-            st.success("Alle n\u00f8dvendige runder er komplette.")
-        st.table(pd.DataFrame(status_rows), border="horizontal")
+        status_rows.append({
+            "Hold": newest.team.team_name if newest else member.name,
+            "Seneste hentning": format_relative_precise(newest.generated_at) if newest else "Mangler",
+            "Afventer afsluttende data": ", ".join(map(str, ended)) or "–",
+            "Foreløbige data": ", ".join(map(str, preliminary)) or "–",
+            "Ukendt rundestatus": ", ".join(map(str, unknown)) or "–",
+            "Manglende runder": ", ".join(map(str, missing)) or "–",
+        })
+    with st.expander("Datastatus", expanded=False):
+        if pending:
+            st.warning("Gemte rundedata er foreløbige eller mangler. Opdater data for at få bekræftede resultater; turneringspoint afventer afsluttende data.")
+        else:
+            st.success("Alle nødvendige runder er komplette.")
+        if group.tournament is not None and group.tournament.published_matches is None and group.tournament.template in {"group_knockout", "double_elimination"}:
+            st.caption("Kampplanen beskyttes mod senere rettelser ved næste opdatering. Opdateringen gemmer de eksisterende deltagere, før nye resultater hentes.")
+        for warning in dict.fromkeys(state.warnings):
+            st.warning(warning)
+        st.table(pd.DataFrame(status_rows), border="horizontal", alt="Datagrundlag pr. hold og runde")
 
 
 def _tournament_view(
@@ -3757,90 +3407,13 @@ def _tournament_view(
     read_only: bool = False,
 ) -> None:
     assert group.tournament is not None
-    color, _ = _colors(group.game.slug)
     latest_round = latest_tournament_round(group, index)
-    st.markdown(
-        f'<div style="height:6px;border-radius:6px;background:{color};margin-bottom:1rem"></div>',
-        unsafe_allow_html=True,
-    )
-    st.title(group.name, anchor=f"gruppe-{group.group_id}")
-    if group.official_url:
-        st.link_button(
-            "Åbn officiel gruppe",
-            group.official_url,
-            icon=":material/open_in_new:",
-        )
-    st.caption(f"{group.game.slug} · Turnering · {len(group.teams)} faste hold")
-
     round_key = f"tournament-round-{group.group_id}"
-    if st.button(
-        "Opdater turnering",
-        type="primary",
-        width="stretch",
-        disabled=read_only,
-        help="Gendan managerspillet for at opdatere turneringen." if read_only else None,
-    ):
-        with st.spinner(f"Henter alle {len(group.teams)} deltagere …"):
-            _save_game_metadata_if_available(group.game)
-
-            result = refresh_group(
-                group,
-                _client(),
-                SnapshotStore(OUTPUT_DIR),
-                ManifestStore(MANIFEST_DIR),
-            )
-        _invalidate_snapshot_index()
-        refreshed_index = _scan_snapshots(str(OUTPUT_DIR.resolve()))
-        pairing_notice: tuple[str, str] | None = None
-        try:
-            published_pairing = _publish_next_swiss_round(
-                group,
-                refreshed_index,
-            )
-        except (OSError, PayloadError, ValueError) as exc:
-            pairing_notice = ("error", str(exc))
-        else:
-            if published_pairing is not None:
-                pairing_notice = (
-                    "success",
-                    "N\u00e6ste Swiss-runde blev publiceret.",
-                )
-        resolved_groups, pairing_warnings = _with_published_tournament_pairings(
-            (group,),
-            refreshed_index,
-        )
-        resolved_group = resolved_groups[0]
-        freeze_groups = tuple(
-            resolved_group
-            if item.group_id == group.group_id
-            else item
-            for item in all_groups
-            if _game_identity(item.game) == _game_identity(group.game)
-        )
-        _freeze_complete_hall_of_fame(
-            freeze_groups,
-            include_round_wins=True,
-        )
-        if pairing_warnings and pairing_notice is None:
-            pairing_notice = ("error", pairing_warnings[0])
-
-
-        successes = sum(item.status == "success" for item in result.teams)
-        fallbacks = sum(item.status == "cached_fallback" for item in result.teams)
-        failures = tuple(item for item in result.teams if item.status == "failed")
-        st.session_state[f"tournament-refresh-notice-{group.group_id}"] = {
-            "successes": successes,
-            "fallbacks": fallbacks,
-            "failures": tuple((item.team_name, item.error) for item in failures),
-            "manifest": result.manifest_path.name,
-            "pairing": pairing_notice,
-        }
-        st.session_state[round_key] = max(
-            group.tournament.start_round,
-            min(group.tournament.final_round, result.round_number),
-        )
-        st.rerun()
-
+    context = get_ui_context()
+    if context.selected_game is not None:
+        _entity_header(context.selected_game, context.groups, index, group=group, read_only=context.read_only or updates_running(APP_PATHS))
+    else:
+        st.title(group.name, anchor=f"gruppe-{group.group_id}")
     notice = st.session_state.pop(
         f"tournament-refresh-notice-{group.group_id}", None
     )
@@ -3861,15 +3434,16 @@ def _tournament_view(
     rounds = list(range(group.tournament.start_round, group.tournament.final_round + 1))
     if round_key not in st.session_state or st.session_state[round_key] not in rounds:
         st.session_state[round_key] = latest_round
-    round_number = int(
-        st.selectbox(
-            "Vis turneringen til og med runde",
-            rounds,
-            key=round_key,
-        )
-    )
+    controls = st.columns([1, 3], vertical_alignment="bottom")
+    with controls[0]:
+        round_number = int(st.selectbox("Vis turneringen til og med runde", rounds, key=round_key))
     state = build_tournament_state(group, index, round_number)
-    _tournament_data_status(group, state, index)
+    with controls[1]:
+        st.caption(f"Senest korrigerede resultater til og med runde {round_number}. Afventer resultat betyder, at de gemte data endnu ikke er afsluttende.")
+    if group.tournament.pairing_error:
+        st.error("Kampplanen kan ikke verificeres. Officielle resultater afventer gennemgang; de gemte data er bevaret.")
+    elif state.pairing_conflicts:
+        st.warning("Kampplanen kræver gennemgang efter en resultatkorrektion. Se Datastatus; eksisterende deltagere er bevaret.")
     has_bracket = group.tournament.template in {
         "group_knockout",
         "double_elimination",
@@ -3915,7 +3489,9 @@ def _tournament_view(
             _tournament_bracket(group, state)
     if history_tab.open:
         with history_tab:
-            group_history_panel(group, index)
+            group_history_panel(group, index, through_round=round_number)
+    _tournament_data_status(group, state, index)
+
 
 def _team_status(entry) -> str:
     labels = {
@@ -4116,27 +3692,13 @@ def _render_team_snapshot(
             f"{status_text}. Hent holdet igen for at bekr\u00e6fte runden; "
             "turneringspoint holdes tilbage."
         )
-    tabs = _stateful_tabs(
-        (
-            "Overblik",
-            "Holdopstilling",
-            "Transferlaboratorium",
-            "Historik",
-            "Ændringer",
-            "Eksport",
-        ),
-        ("overview", "roster", "transfer", "history", "changes", "export"),
-        key=f"team-tabs-{team.reference.game.slug}-{team.reference.team_id}",
-        parameter="panel",
-    )
-    (
-        overview_tab,
-        roster_tab,
-        transfer_tab,
-        history_tab,
-        changes_tab,
-        export_tab,
-    ) = tabs
+    panels = [("Overblik", "overview"), ("Holdopstilling", "roster"), ("Historik", "history"), ("Ændringer", "changes"), ("Eksport", "export")]
+    if tool_visible(APP_PATHS, HubFeature.ANALYSIS) or st.query_params.get("panel") == "transfer":
+        panels.insert(2, ("Transferlaboratorium", "transfer"))
+    tabs = _stateful_tabs(tuple(label for label, _ in panels), tuple(slug for _, slug in panels), key=f"team-tabs-{team.reference.game.slug}-{team.reference.team_id}", parameter="panel")
+    by_slug = dict(zip((slug for _, slug in panels), tabs, strict=True))
+    overview_tab, roster_tab, history_tab, changes_tab, export_tab = (by_slug[slug] for slug in ("overview", "roster", "history", "changes", "export"))
+    transfer_tab = by_slug.get("transfer")
     if overview_tab.open:
         with overview_tab:
             if summary is None:
@@ -4213,7 +3775,7 @@ def _render_team_snapshot(
                         f"{team.reference.team_id}:roster"
                     ),
                 )
-    if transfer_tab.open:
+    if transfer_tab is not None and transfer_tab.open:
         with transfer_tab:
             if roster_snapshot is None:
                 st.info(
@@ -4223,6 +3785,8 @@ def _render_team_snapshot(
                 player_snapshot = PlayerStatisticsStore(OUTPUT_DIR).scan(
                     team.reference.game
                 ).newest(team.reference.game, round_number)
+                if not require_tool(APP_PATHS, HubFeature.ANALYSIS, read_only=get_ui_context().read_only):
+                    return
                 transfer_lab_panel(
                     roster_snapshot,
                     player_snapshot,
@@ -4855,70 +4419,71 @@ def _manage_game(
                 rounds_per_tie = int(st.selectbox(
                     "Runder pr. knockoutopgør", (1, 2),
                 ))
-            rule_labels = {
-                "Tilfældig": "random",
-                "Manuel rækkefølge": "manual",
-                "Aktuel Elo": "elo",
-            }
-            rule_label = st.selectbox(
-                "Seedning",
-                tuple(rule_labels),
-                key="create-tournament-seed-rule",
-            )
-            seed_rule = rule_labels[rule_label]
-            point_columns = st.columns(3)
-            with point_columns[0]:
-                win_points = int(st.number_input(
-                    "Point for sejr", min_value=1, value=3, step=1,
-                ))
-            with point_columns[1]:
-                draw_points = int(st.number_input(
-                    "Point for uafgjort", min_value=0, value=1, step=1,
-                ))
-            with point_columns[2]:
-                loss_points = int(st.number_input(
-                    "Point for nederlag", min_value=0, value=0, step=1,
-                ))
-            standing_options = {
-                "Scoreforskel": "score_difference",
-                "Opnået score": "score_for",
-                "Indbyrdes": "head_to_head",
-                "Buchholz": "buchholz",
-                "Seed": "entry_seed",
-            }
-            selected_standing_rules = st.multiselect(
-                "Tie-breakers i stillingen (i rækkefølge)",
-                tuple(standing_options),
-                default=("Scoreforskel", "Opnået score", "Indbyrdes", "Seed"),
-            )
-            knockout_options = {
-                "Sidste rundes vækst": "last_round_growth",
-                "Samlet Holdet-total": "overall_total",
-            }
-            selected_knockout_rules = st.multiselect(
-                "Tie-breakers i knockout",
-                tuple(knockout_options),
-                default=tuple(knockout_options),
-                help="Højere seed anvendes altid som sidste sportslige reservekriterium.",
-            )
-            definition_options = {
-                "match_points": (win_points, draw_points, loss_points),
-                "seed_rule": seed_rule,
-                "standings_tiebreakers": tuple(
-                    standing_options[item] for item in selected_standing_rules
-                ),
-                "knockout_tiebreakers": (
-                    *(knockout_options[item] for item in selected_knockout_rules),
-                    "higher_seed",
-                ),
-            }
+            with st.expander("Avancerede regler og seedning"):
+                rule_labels = {
+                    "Tilfældig": "random",
+                    "Manuel rækkefølge": "manual",
+                    "Aktuel Elo": "elo",
+                }
+                rule_label = st.selectbox(
+                    "Seedning",
+                    tuple(rule_labels),
+                    key="create-tournament-seed-rule",
+                )
+                seed_rule = rule_labels[rule_label]
+                point_columns = st.columns(3)
+                with point_columns[0]:
+                    win_points = int(st.number_input(
+                        "Point for sejr", min_value=1, value=3, step=1,
+                    ))
+                with point_columns[1]:
+                    draw_points = int(st.number_input(
+                        "Point for uafgjort", min_value=0, value=1, step=1,
+                    ))
+                with point_columns[2]:
+                    loss_points = int(st.number_input(
+                        "Point for nederlag", min_value=0, value=0, step=1,
+                    ))
+                standing_options = {
+                    "Scoreforskel": "score_difference",
+                    "Opnået score": "score_for",
+                    "Indbyrdes": "head_to_head",
+                    "Buchholz": "buchholz",
+                    "Seed": "entry_seed",
+                }
+                selected_standing_rules = st.multiselect(
+                    "Tie-breakers i stillingen (i rækkefølge)",
+                    tuple(standing_options),
+                    default=("Scoreforskel", "Opnået score", "Indbyrdes", "Seed"),
+                )
+                knockout_options = {
+                    "Sidste rundes vækst": "last_round_growth",
+                    "Samlet Holdet-total": "overall_total",
+                }
+                selected_knockout_rules = st.multiselect(
+                    "Tie-breakers i knockout",
+                    tuple(knockout_options),
+                    default=tuple(knockout_options),
+                    help="Højere seed anvendes altid som sidste sportslige reservekriterium.",
+                )
+                definition_options = {
+                    "match_points": (win_points, draw_points, loss_points),
+                    "seed_rule": seed_rule,
+                    "standings_tiebreakers": tuple(
+                        standing_options[item] for item in selected_standing_rules
+                    ),
+                    "knockout_tiebreakers": (
+                        *(knockout_options[item] for item in selected_knockout_rules),
+                        "higher_seed",
+                    ),
+                }
             if template == "league":
                 definition_options["league_legs"] = int(st.selectbox(
                     "Indbyrdes kampe", (1, 2),
                 ))
             elif template == "swiss":
                 definition_options["swiss_rounds"] = int(st.number_input(
-                    "Schweizerrunder", min_value=1, value=3, step=1,
+                    "Schweizerrunder", min_value=1, value=max(1, (max(2, len(selected)) - 1).bit_length()), step=1,
                 ))
             elif template == "group_knockout":
                 group_count = int(st.number_input(
@@ -5085,12 +4650,20 @@ def _manage_game(
                 "valideres ved det afsluttende submit."
             )
 
+        preview_members = list(same_game[key].member for key in selected)
+        try:
+            if game is not None:
+                preview_members.extend(_parse_direct_lines(direct, game))
+            preview_count = len({member.team_id for member in preview_members})
+        except (ValueError, PayloadError) as exc:
+            preview_count = len({member.team_id for member in preview_members})
+            st.error(str(exc))
         with st.form("create-group-review", border=True):
             st.markdown("#### 4. Gennemse og opret")
             st.caption(
                 f"{group_type or 'Gruppestilling'} · "
                 f"{name.strip() or 'Navn mangler'} · "
-                f"{len(selected)} valgte hold"
+                f"{preview_count} valgte hold"
             )
             create_group = st.form_submit_button(
                 "Opret gruppe",
@@ -5103,12 +4676,13 @@ def _manage_game(
                     raise game_error or PayloadError("Vælg eller indtast et spil.")
                 members = tuple(same_game[key].member for key in selected)
                 members += _parse_direct_lines(direct, game)
+                members = tuple({member.team_id: member for member in members}.values())
                 if not members:
                     raise PayloadError("Vælg mindst ét hold.")
                 if group_type == "Turnering":
                     if not isinstance(final_round_value, int):
                         raise PayloadError("Hent spilinfo før turneringen oprettes.")
-                    store.create_tournament(
+                    created_group = store.create_tournament(
                         name, game, members, start_round=start_round,
                         final_round=final_round_value,
                         rounds_per_tie=rounds_per_tie,
@@ -5117,13 +4691,13 @@ def _manage_game(
                         definition_options=definition_options,
                     )
                 else:
-                    store.create(name, game, members)
+                    created_group = store.create(name, game, members)
             except (PayloadError, ValueError) as exc:
                 st.error(str(exc))
             else:
                 st.session_state.pop(draw_seed_key, None)
-                st.success("Gruppen blev oprettet.")
-                st.rerun()
+                st.session_state["created-group-notice"] = "Gruppen blev oprettet."
+                _navigate("group", group=created_group.group_id)
 
     for group in groups:
         type_label = "Turnering" if group.kind == "tournament" else "Gruppestilling"
@@ -5337,7 +4911,7 @@ def _manage_game(
                             int(st.number_input(
                                 "Direkte kvalificerede pr. gruppe",
                                 min_value=0,
-                                value=group.tournament.qualifiers_per_group or 1,
+                                value=1 if group.tournament.qualifiers_per_group is None else group.tournament.qualifiers_per_group,
                                 step=1,
                             ))
                             if group_count > 1
@@ -5622,6 +5196,8 @@ def render_sidebar(context: UiContext, page_id: PageId) -> None:
 
 
 def render_shared_shell(context: UiContext, page_id: PageId) -> None:
+    if notice := st.session_state.pop("created-group-notice", None):
+        st.success(notice)
     _warning_panel(context.index)
     for warning in (*context.configuration_warnings, *context.pairing_warnings):
         st.warning(warning)
@@ -5644,7 +5220,12 @@ def render_page(page_id: PageId) -> None:
     index = context.index
     selected_game = context.selected_game
     group = context.group
-    read_only = context.read_only
+    busy = updates_running(APP_PATHS)
+    read_only = context.read_only or busy
+    if busy and (page_id in {PageId.MANAGE_GAMES, PageId.SETTINGS, PageId.DATA, PageId.SCOUTING, PageId.MANAGERS} or (page_id is PageId.GAME and st.query_params.get("section") in {"administration", "settings"})):
+        st.info("En opdatering er i gang. Administration er tilgængelig igen, når den er afsluttet. Du kan stadig se spil, stillinger og spillere.")
+        render_run_progress(APP_PATHS)
+        return
 
     if page_id is PageId.HOME:
         _home(context.active_games, groups, index)
@@ -5661,9 +5242,13 @@ def render_page(page_id: PageId) -> None:
             read_only=read_only,
         )
     elif page_id is PageId.MANAGERS:
-        managers_view(groups, index, APP_PATHS)
+        if require_tool(APP_PATHS, HubFeature.MANAGERS):
+            managers_view(groups, index, APP_PATHS)
     elif page_id is PageId.CALENDAR:
-        calendar_view(groups, APP_PATHS, index)
+        if require_tool(APP_PATHS, HubFeature.CALENDAR):
+            calendar_view(groups, APP_PATHS, index)
+    elif page_id is PageId.SETTINGS:
+        render_settings(APP_PATHS)
     elif page_id is PageId.DATA:
         data_storage_view(
             context.account_store,
@@ -5679,7 +5264,8 @@ def render_page(page_id: PageId) -> None:
     elif page_id is PageId.PLAYERS:
         _standalone_player_statistics(games)
     elif page_id is PageId.SCOUTING:
-        render_scouting_page(games, APP_PATHS)
+        if require_tool(APP_PATHS, HubFeature.SCOUTING):
+            render_scouting_page(games, APP_PATHS)
     elif page_id is PageId.TEAMS:
         _standalone_team_statistics(games, groups, index)
     elif page_id is PageId.GROUP and group is not None:

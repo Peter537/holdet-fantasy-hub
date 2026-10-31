@@ -26,6 +26,7 @@ from .hub_settings import HubSettings
 from .models import GameUrl, ScrapedTeam
 from .output import sanitize_path_component
 from .persistence import aware_local
+from .scopes import resolve_scope
 from .storage import (
     ManifestStore,
     PlayerStatisticsIndex,
@@ -59,6 +60,7 @@ RefreshProgressStatus = Literal[
     "reused_after_error",
     "failed_no_cache",
     "skipped_unavailable",
+    "cancelled",
 ]
 
 
@@ -76,6 +78,7 @@ class RefreshStep:
     team_name: str | None = None
     current_generated_at: datetime | None = None
     available: bool = True
+    requested_round: int | None = None
 
     def __post_init__(self) -> None:
         if self.source not in {"metadata", "players", "team", "postprocess"}:
@@ -92,6 +95,12 @@ class RefreshStep:
             raise ValueError("Et utilgængeligt refreshstep må ikke vælges")
         if self.team_id is not None and self.team_id < 0:
             raise ValueError("Et holdstep må ikke have negativt team_id")
+        if self.requested_round is not None and (
+            isinstance(self.requested_round, bool)
+            or not isinstance(self.requested_round, int)
+            or self.requested_round < 0
+        ):
+            raise ValueError("En ønsket spillerrunde skal være et ikke-negativt heltal")
         if (
             self.current_generated_at is not None
             and self.current_generated_at.utcoffset() is None
@@ -112,6 +121,9 @@ class RefreshPlan:
     origin_run_id: str | None = None
     previous_manifest: RefreshManifest | None = None
     include_postprocess: bool = False
+    catch_up: bool = False
+    competition_id: str | None = None
+    warnings: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "mode", RefreshMode(self.mode))
@@ -222,6 +234,9 @@ class GameRefreshResult:
     metadata: MetadataRefresh | None = None
     plan: RefreshPlan | None = None
     manifest: RefreshManifest | None = None
+    historical_players: tuple[PlayerRefresh, ...] = ()
+    cancelled: bool = False
+    warnings: tuple[str, ...] = ()
 
     @property
     def failures(self) -> tuple[TeamRefresh, ...]:
@@ -248,21 +263,26 @@ def _game_identity(game: GameUrl) -> tuple[str, str]:
 def _members_for_game(
     manager_game: ManagerGame,
     groups: tuple[GroupDefinition, ...],
+    teams: SnapshotIndex | None = None,
+    settings: HubSettings | None = None,
+    *,
+    competition_id: str | None = None,
 ) -> tuple[tuple[GroupDefinition, ...], dict[int, GroupTeam]]:
-    selected_groups = tuple(
-        group
-        for group in groups
-        if _game_identity(group.game) == manager_game.identity
+    scope = resolve_scope(
+        manager_game,
+        groups,
+        teams if teams is not None else SnapshotIndex(()),
+        settings,
+        competition_id=competition_id,
     )
-    members: dict[int, GroupTeam] = {}
-    for group in selected_groups:
-        for member in group.teams:
-            existing = members.get(member.team_id)
-            if existing is None or (
-                existing.account_key == "direct" and member.account_key != "direct"
-            ):
-                members[member.team_id] = member
-    return selected_groups, members
+    return scope.groups, {
+        reference.team_id: GroupTeam(
+            reference.team_id, reference.team_name, reference.source_url,
+            reference.account_key, reference.account_label,
+            reference.account_user_id, reference.profile_url,
+        )
+        for reference in scope.team_references
+    }
 
 
 def _instant(value: datetime) -> datetime:
@@ -387,6 +407,102 @@ def _apply_manifest_failure(
     return True, "Seneste opdatering fejlede uden brugbar cache"
 
 
+def _known_player_target_round(
+    target_round: int, metadata: GameMetadata | None,
+) -> int | None:
+    if target_round or (
+        metadata is not None and any(item.round_number == 0 for item in metadata.rounds)
+    ):
+        return target_round
+    return None
+
+
+def _requested_player_round(
+    step: RefreshManifestStep, fallback: int | None = None,
+) -> int | None:
+    if step.requested_round is not None:
+        return step.requested_round
+    if step.step_id == "players" and step.retryable and fallback is not None:
+        # Older latest-source failures stored the fallback cache's round here.
+        return fallback
+    return step.round_number if step.round_number is not None else fallback
+
+
+def _historical_player_steps(
+    manager_game: ManagerGame,
+    players: PlayerStatisticsIndex,
+    metadata: GameMetadata | None,
+    mode: RefreshMode,
+    previous_manifest: RefreshManifest | None,
+    current: datetime,
+) -> tuple[tuple[RefreshStep, ...], tuple[str, ...]]:
+    """Recover absent or unfinished completed rounds, preserving valid history."""
+
+    previous = {
+        item.step_id: item
+        for item in (() if previous_manifest is None else previous_manifest.steps)
+        if item.source == "players" and item.step_id != "players"
+    }
+    rounds = {
+        item.round_number: item
+        for item in (() if metadata is None else metadata.rounds)
+        if item.round_number >= 0 and _instant(item.end) <= _instant(current)
+    }
+    requested = set(rounds)
+    discovering_history = bool(
+        previous_manifest is not None and any(
+            item.source == "metadata" and item.retryable
+            for item in previous_manifest.steps
+        )
+    )
+    if mode == RefreshMode.RETRY_FAILED:
+        requested = {
+            _requested_player_round(item)
+            for item in previous.values()
+            if _requested_player_round(item) is not None
+        }
+        if discovering_history:
+            requested.update(rounds)
+    steps: list[RefreshStep] = []
+    for round_number in sorted(requested):
+        snapshot = players.newest(manager_game.game, round_number)
+        scheduled = rounds.get(round_number)
+        missing = snapshot is None
+        unfinished = snapshot is not None and (
+            snapshot.statistics.round_status != "complete"
+            or (
+                scheduled is not None
+                and _instant(snapshot.generated_at) < _instant(scheduled.end)
+            )
+        )
+        step_id = f"players:round:{round_number}"
+        prior = previous.get(step_id)
+        selected = (
+            (prior is not None and prior.retryable)
+            or (prior is None and discovering_history and (missing or unfinished))
+            if mode == RefreshMode.RETRY_FAILED
+            else missing or unfinished
+        )
+        reason = (
+            f"Spillerdata for afsluttet runde {round_number} mangler"
+            if missing
+            else f"Afsluttet runde {round_number} mangler endelige spillerdata"
+            if unfinished
+            else f"Endelige spillerdata for runde {round_number} findes allerede"
+        )
+        steps.append(RefreshStep(
+            step_id, "players", f"Spillere · runde {round_number}",
+            selected, missing or unfinished, reason,
+            current_generated_at=None if snapshot is None else snapshot.generated_at,
+            requested_round=round_number,
+        ))
+    warnings = (
+        ("Historiske runder kan ikke verificeres uden en gyldig tidsplan.",)
+        if metadata is None or not metadata.rounds else ()
+    )
+    return tuple(steps), warnings
+
+
 def build_refresh_plan(
     manager_game: ManagerGame,
     groups: tuple[GroupDefinition, ...],
@@ -398,16 +514,22 @@ def build_refresh_plan(
     previous_manifest: RefreshManifest | None = None,
     include_metadata: bool = True,
     include_postprocess: bool = False,
+    settings: HubSettings | None = None,
+    catch_up: bool = False,
+    competition_id: str | None = None,
     now: datetime | None = None,
 ) -> RefreshPlan:
     """Build a cache-only refresh preview; no files or network are touched."""
 
     selected_mode = RefreshMode(mode)
     current = aware_local(now)
-    selected_groups, members = _members_for_game(manager_game, groups)
+    selected_groups, members = _members_for_game(
+        manager_game, groups, teams, settings, competition_id=competition_id
+    )
     del selected_groups
     if previous_manifest is not None and (
-        previous_manifest.scope != "game"
+        previous_manifest.scope != ("group" if competition_id is not None else "game")
+        or previous_manifest.group_id != competition_id
         or previous_manifest.game_slug != manager_game.game.slug
         or (
             previous_manifest.game_locale
@@ -538,8 +660,29 @@ def build_refresh_plan(
             current_generated_at=(
                 None if player_snapshot is None else player_snapshot.generated_at
             ),
+            requested_round=(
+                next(
+                    (
+                        _requested_player_round(
+                            item, _known_player_target_round(target_round, metadata)
+                        )
+                        for item in previous_manifest.steps
+                        if item.step_id == "players"
+                    ),
+                    _known_player_target_round(target_round, metadata),
+                )
+                if selected_mode == RefreshMode.RETRY_FAILED
+                and previous_manifest is not None
+                else None
+            ),
         )
     )
+    warnings: tuple[str, ...] = ()
+    if catch_up:
+        history, warnings = _historical_player_steps(
+            manager_game, players, metadata, selected_mode, previous_manifest, current
+        )
+        steps.extend(history)
     for team_id, member in sorted(members.items()):
         located = (
             teams.summary_for(manager_game.game, team_id, target_round)
@@ -687,6 +830,9 @@ def build_refresh_plan(
         ),
         previous_manifest=previous_manifest,
         include_postprocess=include_postprocess,
+        catch_up=catch_up,
+        competition_id=competition_id,
+        warnings=warnings,
     )
 
 
@@ -698,10 +844,11 @@ def _revalidate_stale_plan_after_metadata(
     metadata: GameMetadata,
     *,
     now: datetime,
+    settings: HubSettings | None = None,
 ) -> RefreshPlan:
     """Rebuild stale-only upstream choices against newly fetched schedule data."""
 
-    if plan.mode != RefreshMode.STALE_ONLY:
+    if plan.mode != RefreshMode.STALE_ONLY and not plan.catch_up:
         return plan
     rebuilt = build_refresh_plan(
         plan.manager_game,
@@ -713,6 +860,9 @@ def _revalidate_stale_plan_after_metadata(
         previous_manifest=plan.previous_manifest,
         include_metadata=True,
         include_postprocess=plan.include_postprocess,
+        settings=settings,
+        catch_up=plan.catch_up,
+        competition_id=plan.competition_id,
         now=now,
     )
     completed_metadata = next(
@@ -954,15 +1104,30 @@ def refresh_manager_game(
     plan: RefreshPlan | None = None,
     progress: RefreshProgressCallback | None = None,
     postprocess: Callable[[], None] | None = None,
+    cancelled: Callable[[], bool] | None = None,
+    alerts_enabled: bool | None = None,
+    catch_up: bool = False,
     now: datetime | None = None,
 ) -> GameRefreshResult:
     """Refresh a previewed subset while retaining the legacy call contract."""
 
+    if manager_game.is_archived:
+        raise ValueError("Et arkiveret managerspil kan ikke opdateres")
     started_at = aware_local(now)
     run_id = str(uuid4())
-    selected_groups, members = _members_for_game(manager_game, groups)
     before_teams = snapshot_store.scan()
     before_players = player_store.scan(manager_game.game)
+    selected_groups, members = _members_for_game(
+        manager_game, groups, before_teams, settings,
+        competition_id=None if plan is None else plan.competition_id,
+    )
+    from .hub_settings import feature_enabled
+
+    evaluate_alerts = bool(
+        settings is not None
+        and feature_enabled(settings, "alerts")
+        and alerts_enabled is not False
+    )
     metadata_load_error: str | None = None
     if metadata_store is None:
         before_metadata = None
@@ -983,8 +1148,10 @@ def refresh_manager_game(
             include_metadata=metadata_store is not None,
             include_postprocess=(
                 postprocess is not None
-                or (settings is not None and inbox_store is not None)
+                or (evaluate_alerts and inbox_store is not None)
             ),
+            settings=settings,
+            catch_up=catch_up,
             now=started_at,
         )
     elif metadata_load_error is not None and plan.mode == RefreshMode.STALE_ONLY:
@@ -1008,7 +1175,7 @@ def refresh_manager_game(
         )
     if (
         not plan.include_postprocess
-        and settings is not None
+        and evaluate_alerts
         and inbox_store is not None
         and any(
             item.source == "players" and item.selected
@@ -1054,6 +1221,9 @@ def refresh_manager_game(
     team_results: list[TeamRefresh] = []
     player_result: PlayerRefresh | None = None
     metadata_result: MetadataRefresh | None = None
+    historical_results: list[PlayerRefresh] = []
+    was_cancelled = False
+    warnings = list(plan.warnings)
     changes: tuple[RefreshMetadataChange, ...] = ()
 
     alert_snapshot_reference: str | None = None
@@ -1088,30 +1258,36 @@ def refresh_manager_game(
         if current_index is None:
             return None, None, None
         current_snapshot = snapshots[current_index]
-        previous_snapshot = next(
+        previous_snapshot = max(
             (
                 item
-                for item in snapshots[current_index + 1 :]
-                if item.statistics.round_number
-                <= current_snapshot.statistics.round_number
+                for item in before_players.for_game(manager_game.game)
+                if item.statistics.round_number <= current_snapshot.statistics.round_number
+                and _instant(item.generated_at) < _instant(current_snapshot.generated_at)
             ),
-            None,
+            key=lambda item: (item.statistics.round_number, _instant(item.generated_at)),
+            default=None,
         )
-        prior_snapshot = next(
+        prior_snapshot = max(
             (
                 item
-                for item in snapshots[current_index + 1 :]
+                for item in before_players.for_game(manager_game.game)
                 if previous_snapshot is not None
                 and item.generated_at < previous_snapshot.generated_at
+                and item.statistics.round_number <= previous_snapshot.statistics.round_number
             ),
-            None,
+            key=lambda item: (item.statistics.round_number, _instant(item.generated_at)),
+            default=None,
         )
         return prior_snapshot, previous_snapshot, current_snapshot
 
     def merge_player_alerts(reference: str | None) -> int:
         """Derive alerts for one immutable, explicitly referenced transition."""
 
-        if reference is None or settings is None or inbox_store is None:
+        if (
+            reference is None or not evaluate_alerts
+            or settings is None or inbox_store is None
+        ):
             return 0
         prior_snapshot, previous_snapshot, current_snapshot = referenced_player_snapshot(
             reference
@@ -1197,6 +1373,7 @@ def refresh_manager_game(
             cache_generated_at=cache_generated_at,
             error=error,
             origin_run_id=run_id,
+            requested_round=step.requested_round,
         )
         emit(
             step,
@@ -1212,6 +1389,21 @@ def refresh_manager_game(
         step_index += 1
         if not step.selected:
             continue
+        if cancelled is not None and cancelled():
+            was_cancelled = True
+            for pending in plan.steps[step_index - 1 :]:
+                if pending.selected and pending.step_id not in manifest_steps:
+                    manifest_steps[pending.step_id] = RefreshManifestStep(
+                        pending.step_id, pending.source, pending.label,
+                        "cancelled", False,
+                        reason="Opdateringen blev afbrudt før dette trin",
+                        team_id=pending.team_id, team_name=pending.team_name,
+                        requested_round=pending.requested_round,
+                        error="Trinnet er ikke udført og kan genoptages",
+                        origin_run_id=run_id,
+                    )
+                    emit(pending, "cancelled")
+            break
         step_started = aware_local(now)
         emit(step, "running", started=step_started)
         if step.source == "metadata":
@@ -1242,7 +1434,9 @@ def refresh_manager_game(
                     before_players,
                     fetched,
                     now=step_started,
+                    settings=settings,
                 )
+                warnings = list(plan.warnings)
                 total_steps = completed_steps + 1 + sum(
                     item.selected and item.source != "metadata"
                     for item in plan.steps
@@ -1287,13 +1481,46 @@ def refresh_manager_game(
             continue
         if step.source == "players":
             try:
-                statistics = client.fetch_players(manager_game.game)
-                player_path = player_store.save(statistics, now=started_at)
-                alert_snapshot_reference = _relative_reference(
-                    player_store.snapshot_dir,
-                    player_path,
-                    "snapshots",
+                statistics = (
+                    client.fetch_players(manager_game.game)
+                    if step.requested_round is None
+                    else client.fetch_players(
+                        manager_game.game, round_number=step.requested_round
+                    )
                 )
+                if (
+                    step.requested_round is not None
+                    and statistics.round_number != step.requested_round
+                ):
+                    raise PayloadError(
+                        f"Holdet returnerede runde {statistics.round_number} "
+                        f"i stedet for runde {step.requested_round}."
+                    )
+                scheduled_round = next(
+                    (
+                        item for item in (
+                            () if before_metadata is None else before_metadata.rounds
+                        )
+                        if item.round_number == statistics.round_number
+                    ),
+                    None,
+                )
+                if (
+                    plan.catch_up and scheduled_round is not None
+                    and _instant(scheduled_round.end) <= _instant(step_started)
+                    and statistics.round_status != "complete"
+                ):
+                    raise PayloadError(
+                        f"Runde {statistics.round_number} er afsluttet, "
+                        "men kilden returnerede ikke endelige spillerdata."
+                    )
+                player_path = player_store.save(statistics, now=started_at)
+                if step.step_id == "players" and step.requested_round is None:
+                    previous_rounds = before_players.rounds_for(manager_game.game)
+                    if not previous_rounds or statistics.round_number >= max(previous_rounds):
+                        alert_snapshot_reference = _relative_reference(
+                            player_store.snapshot_dir, player_path, "snapshots"
+                        )
                 alert_count = 0
                 alert_error = None
                 if not plan.include_postprocess:
@@ -1303,13 +1530,17 @@ def refresh_manager_game(
                         )
                     except Exception as exc:
                         alert_error = f"Statusalarmer: {exc}"
-                player_result = PlayerRefresh(
+                fetched_player = PlayerRefresh(
                     "success",
                     statistics.round_number,
                     player_path,
                     alert_count,
                     alert_error,
                 )
+                if step.step_id == "players":
+                    player_result = fetched_player
+                else:
+                    historical_results.append(fetched_player)
                 finish(
                     step,
                     "fetched",
@@ -1322,22 +1553,65 @@ def refresh_manager_game(
                     ),
                     error=alert_error,
                 )
+                if step.step_id == "players" and plan.catch_up:
+                    history, history_warnings = _historical_player_steps(
+                        manager_game, player_store.scan(manager_game.game),
+                        before_metadata, plan.mode, plan.previous_manifest,
+                        aware_local(now),
+                    )
+                    history = tuple(
+                        replace(
+                            item, selected=False,
+                            reason="Runden blev hentet med den aktuelle spillerkilde",
+                        )
+                        if item.requested_round == statistics.round_number else item
+                        for item in history
+                    )
+                    main = tuple(item for item in plan.steps if item.step_id == "players")
+                    plan = replace(
+                        plan,
+                        steps=(
+                            *(item for item in plan.steps if item.source == "metadata"),
+                            *main, *history,
+                            *(item for item in plan.steps if item.source not in {"metadata", "players"}),
+                        ),
+                        warnings=history_warnings,
+                    )
+                    warnings = list(history_warnings)
+                    total_steps = completed_steps + sum(
+                        item.selected and item.step_id not in manifest_steps
+                        for item in plan.steps
+                    )
             except Exception as exc:
                 error = str(exc)
                 cached_rounds = before_players.rounds_for(manager_game.game)
-                previous = (
-                    before_players.newest(manager_game.game, max(cached_rounds))
-                    if cached_rounds
-                    else None
+                previous = before_players.newest(
+                    manager_game.game,
+                    step.requested_round if step.requested_round is not None
+                    else max(cached_rounds, default=0),
                 )
-                player_result = PlayerRefresh(
+                failed_player = PlayerRefresh(
                     "cached_fallback" if previous is not None else "failed",
                     None if previous is None else previous.statistics.round_number,
                     None if previous is None else previous.path,
                     error=error,
                 )
+                if step.step_id == "players":
+                    player_result = failed_player
+                else:
+                    historical_results.append(failed_player)
+                failed_step = (
+                    replace(
+                        step,
+                        requested_round=_known_player_target_round(
+                            plan.target_round, before_metadata
+                        ),
+                    )
+                    if step.step_id == "players" and step.requested_round is None
+                    else step
+                )
                 finish(
-                    step,
+                    failed_step,
                     "reused_after_error" if previous is not None else "failed_no_cache",
                     step_started=step_started,
                     round_number=(
@@ -1536,7 +1810,12 @@ def refresh_manager_game(
                 origin_run_id=carried_origin or run_id,
             )
         elif step.source == "players":
-            current_player = after_players.newest(manager_game.game)
+            current_player = after_players.newest(
+                manager_game.game,
+                step.requested_round if step.requested_round is not None else max(
+                    after_players.rounds_for(manager_game.game), default=0
+                ),
+            )
             carried_reference = (
                 None
                 if previous_step is None
@@ -1587,6 +1866,7 @@ def refresh_manager_game(
                     else current_player.generated_at
                 ),
                 origin_run_id=carried_origin or run_id,
+                requested_round=step.requested_round,
             )
         elif step.source == "team" and step.team_id is not None:
             if not step.available:
@@ -1681,9 +1961,23 @@ def refresh_manager_game(
         _group_refresh_state(group, after_teams) for group in selected_groups
     )
     completed_at = aware_local(now)
+    attempted_team_ids = tuple(
+        step.team_id for step in plan.steps
+        if step.source == "team" and step.team_id is not None
+        and manifest_steps[step.step_id].attempted
+    )
+    skipped_team_ids = tuple(
+        step.team_id for step in plan.steps
+        if step.source == "team" and step.team_id is not None
+        and not manifest_steps[step.step_id].attempted
+    )
     manifest = RefreshManifest(
-        schema_version=2,
-        scope="game",
+        schema_version=(
+            3 if plan.catch_up or was_cancelled
+            or any(step.requested_round is not None for step in manifest_steps.values())
+            else 2
+        ),
+        scope="group" if plan.competition_id is not None else "game",
         run_id=run_id,
         started_at=started_at,
         completed_at=completed_at,
@@ -1694,9 +1988,10 @@ def refresh_manager_game(
         game_locale=manager_game.game.locale.casefold(),
         game_name=manager_game.name,
         game_url=manager_game.game.original,
-        attempted_team_ids=plan.attempted_team_ids,
-        skipped_team_ids=plan.skipped_team_ids,
+        attempted_team_ids=attempted_team_ids,
+        skipped_team_ids=skipped_team_ids,
         groups=group_states,
+        group_id=plan.competition_id,
         retry_of=plan.retry_of,
         origin_run_id=plan.origin_run_id or run_id,
         metadata_changes=changes,
@@ -1711,13 +2006,75 @@ def refresh_manager_game(
         round_number,
         started_at,
         tuple(team_results),
-        plan.attempted_team_ids,
-        plan.skipped_team_ids,
+        attempted_team_ids,
+        skipped_team_ids,
         manifest_path,
         player_result,
         metadata_result,
         plan,
         manifest,
+        tuple(historical_results),
+        was_cancelled,
+        tuple(warnings),
+    )
+
+
+def catch_up_manager_game(
+    manager_game: ManagerGame,
+    groups: tuple[GroupDefinition, ...],
+    client: HoldetClient,
+    snapshot_store: SnapshotStore,
+    player_store: PlayerStatisticsStore,
+    manifest_store: ManifestStore,
+    *,
+    settings: HubSettings | None = None,
+    inbox_store: AnalysisInboxStore | None = None,
+    metadata_store: GameMetadataStore | None = None,
+    plan: RefreshPlan | None = None,
+    progress: RefreshProgressCallback | None = None,
+    postprocess: Callable[[], None] | None = None,
+    cancelled: Callable[[], bool] | None = None,
+    alerts_enabled: bool = False,
+    now: datetime | None = None,
+) -> GameRefreshResult:
+    """Catch up one local scope with the normal, sequential refresh executor.
+
+    The coordinator owns iteration over games and any local preflight freezing.
+    Cancellation is cooperative: each completed source is retained and remaining
+    selected steps are recorded in the child manifest for an explicit retry.
+    """
+
+    if manager_game.is_archived:
+        raise ValueError("Et arkiveret managerspil kan ikke opdateres")
+    if plan is None or not plan.catch_up:
+        metadata = None
+        if metadata_store is not None:
+            try:
+                metadata = metadata_store.load(manager_game.game)
+            except (OSError, PayloadError, ValueError):
+                pass
+        if plan is not None and plan.manager_game.identity != manager_game.identity:
+            raise ValueError("Refresh-planen tilhører et andet managerspil")
+        plan = build_refresh_plan(
+            manager_game, groups, snapshot_store.scan(),
+            player_store.scan(manager_game.game), metadata=metadata,
+            mode=RefreshMode.STALE_ONLY if plan is None else plan.mode,
+            previous_manifest=None if plan is None else plan.previous_manifest,
+            include_metadata=metadata_store is not None,
+            include_postprocess=(
+                postprocess is not None
+                or (plan is not None and plan.include_postprocess)
+                or (alerts_enabled and inbox_store is not None)
+            ),
+            settings=settings, catch_up=True,
+            competition_id=None if plan is None else plan.competition_id,
+            now=now,
+        )
+    return refresh_manager_game(
+        manager_game, groups, client, snapshot_store, player_store, manifest_store,
+        settings=settings, inbox_store=inbox_store, metadata_store=metadata_store,
+        plan=plan, progress=progress, postprocess=postprocess,
+        cancelled=cancelled, alerts_enabled=alerts_enabled, catch_up=True, now=now,
     )
 
 

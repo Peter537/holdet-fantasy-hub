@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from datetime import datetime
+from enum import StrEnum
 import json
 from math import isfinite
 from pathlib import Path
@@ -25,7 +26,28 @@ from .player_exports import (
 )
 
 
-HUB_SETTINGS_SCHEMA_VERSION = 4
+HUB_SETTINGS_SCHEMA_VERSION = 5
+
+
+class HubFeature(StrEnum):
+    SCOUTING = "scouting"
+    ALERTS = "alerts"
+    ANALYSIS = "analysis"
+    MANAGERS = "managers"
+    CALENDAR = "calendar"
+    STORIES = "stories"
+
+
+def _normalized_features(features: Iterable[HubFeature | str]) -> tuple[HubFeature, ...]:
+    if isinstance(features, (str, bytes)):
+        raise ValueError("Tilvalgsfunktioner skal være en samling af funktions-id'er")
+    try:
+        selected = {HubFeature(feature) for feature in features}
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Ukendt tilvalgsfunktion") from exc
+    return tuple(feature for feature in HubFeature if feature in selected)
+
+
 DEFAULT_PLAYER_TAGS = ("overvej", "undgå", "kaptajn", "langsigtet")
 WATCHLIST_REASONS = (
     "kaptajnkandidat",
@@ -234,8 +256,12 @@ class HubSettings:
     own_teams: tuple[OwnTeamSelection, ...] = ()
     experimental_games: tuple[tuple[str, str], ...] = ()
     computed_player_columns: tuple[ComputedPlayerColumn, ...] = ()
+    enabled_features: tuple[HubFeature, ...] = ()
 
     def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "enabled_features", _normalized_features(self.enabled_features)
+        )
         per_game: dict[tuple[str, str], list[ComputedPlayerColumn]] = {}
         for column in self.computed_player_columns:
             per_game.setdefault(
@@ -247,6 +273,10 @@ class HubSettings:
             ids = [column.column_id for column in values]
             if len(ids) != len(set(ids)):
                 raise ValueError("Beregnede kolonne-ID'er skal være entydige pr. spil")
+
+
+def feature_enabled(settings: HubSettings, feature: HubFeature | str) -> bool:
+    return HubFeature(feature) in settings.enabled_features
 
 
 def effective_manager_profiles(settings: HubSettings) -> tuple[ManagerProfile, ...]:
@@ -447,7 +477,17 @@ def player_identity(game: GameUrl, entry: PlayerEntry) -> str:
     return f"{game_key}:legacy:{legacy}"
 
 
-def watchlist_entry(game: GameUrl, entry: PlayerEntry) -> WatchlistEntry:
+def watchlist_entry(
+    game: GameUrl,
+    entry: PlayerEntry,
+    settings: HubSettings | None = None,
+    *,
+    alerts_enabled: bool | None = None,
+) -> WatchlistEntry:
+    """Create a bookmark, retaining the legacy default only for settings-free callers."""
+
+    if alerts_enabled is None:
+        alerts_enabled = settings is None or feature_enabled(settings, HubFeature.ALERTS)
     return WatchlistEntry(
         game.locale.casefold(),
         game.slug,
@@ -457,7 +497,7 @@ def watchlist_entry(game: GameUrl, entry: PlayerEntry) -> WatchlistEntry:
         entry.name,
         entry.team,
         entry.position,
-        rules=(DEFAULT_STATUS_WATCH_RULE,),
+        rules=(DEFAULT_STATUS_WATCH_RULE,) if alerts_enabled else (),
     )
 
 
@@ -607,7 +647,7 @@ def _validate_manager_profiles(
 def _settings_from_dict(payload: object) -> HubSettings:
     root = _require_object(payload, "Hub-indstillinger")
     source_schema_version = root.get("schema_version")
-    if source_schema_version not in {1, 2, 3, HUB_SETTINGS_SCHEMA_VERSION}:
+    if source_schema_version not in {1, 2, 3, 4, HUB_SETTINGS_SCHEMA_VERSION}:
         raise PayloadError("ukendt skema for Hub-indstillinger")
     raw_watchlist = root.get("watchlist", [])
     raw_aliases = root.get("manager_aliases", [])
@@ -664,7 +704,7 @@ def _settings_from_dict(payload: object) -> HubSettings:
             )
         )
     profiles: list[ManagerProfile] = []
-    if source_schema_version in {2, 3, HUB_SETTINGS_SCHEMA_VERSION}:
+    if source_schema_version >= 2:
         raw_profiles = root.get("manager_profiles", [])
         if not isinstance(raw_profiles, list):
             raise PayloadError("manager_profiles skal være en liste")
@@ -701,7 +741,7 @@ def _settings_from_dict(payload: object) -> HubSettings:
     own_teams: list[OwnTeamSelection] = []
     experimental_games: list[tuple[str, str]] = []
     computed_columns: list[ComputedPlayerColumn] = []
-    if source_schema_version in {3, HUB_SETTINGS_SCHEMA_VERSION}:
+    if source_schema_version >= 3:
         raw_annotations = root.get("player_annotations", [])
         raw_filters = root.get("saved_player_filters", [])
         raw_teams = root.get("own_teams", [])
@@ -808,6 +848,9 @@ def _settings_from_dict(payload: object) -> HubSettings:
                 )
             except ValueError as exc:
                 raise PayloadError(f"Ugyldig beregnet kolonne: {exc}") from exc
+    enabled_features = root.get("enabled_features", []) if source_schema_version >= 5 else []
+    if not isinstance(enabled_features, list):
+        raise PayloadError("enabled_features skal være en liste")
     filter_names: set[tuple[str, str, str]] = set()
     for item in filters:
         key = (item.game_locale, item.game_slug, item.name.casefold())
@@ -827,6 +870,7 @@ def _settings_from_dict(payload: object) -> HubSettings:
             tuple(own_teams),
             tuple(dict.fromkeys(experimental_games)),
             tuple(computed_columns),
+            tuple(enabled_features),
         )
     except ValueError as exc:
         raise PayloadError(f"Ugyldige Hub-indstillinger: {exc}") from exc
@@ -837,6 +881,7 @@ def _settings_to_dict(settings: HubSettings) -> dict[str, object]:
     profiles = effective_manager_profiles(settings)
     return {
         "schema_version": HUB_SETTINGS_SCHEMA_VERSION,
+        "enabled_features": [feature.value for feature in settings.enabled_features],
         "watchlist": [
             {
                 "game_locale": item.game_locale,
@@ -951,6 +996,17 @@ class HubSettingsStore:
             self.path,
             json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
         )
+
+    def set_enabled_features(
+        self,
+        settings: HubSettings,
+        features: Iterable[HubFeature | str],
+    ) -> HubSettings:
+        """Save visibility preferences without changing any feature's stored records."""
+
+        updated = replace(settings, enabled_features=_normalized_features(features))
+        self.save(updated)
+        return updated
 
     def set_watchlist(
         self, settings: HubSettings, watchlist: tuple[WatchlistEntry, ...]

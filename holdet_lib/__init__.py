@@ -660,3 +660,17 @@ __all__ += [
     "build_peer_comparison", "build_player_change_explanation",
     "build_scouting_metrics", "build_smart_lists", "find_similar_players",
 ]
+
+from .hub_settings import HubFeature, feature_enabled
+from .scopes import ResolvedScope, resolve_scope
+from .scope_exports import build_scope_export, serialize_scope_export
+from .refresh import catch_up_manager_game
+from .refresh_runs import RefreshRunCoordinator, RefreshRunResult, RefreshRunBusyError, exclusive_data_operation
+from .tournament import PublishedKnockoutMatch, published_knockout_candidates, SwissPairingSearchLimitError
+
+__all__ += [
+    "HubFeature", "feature_enabled", "ResolvedScope", "resolve_scope",
+    "build_scope_export", "serialize_scope_export", "catch_up_manager_game",
+    "RefreshRunCoordinator", "RefreshRunResult", "RefreshRunBusyError", "exclusive_data_operation",
+    "PublishedKnockoutMatch", "published_knockout_candidates", "SwissPairingSearchLimitError",
+]

@@ -225,7 +225,7 @@ class PlayerPayloadTests(unittest.TestCase):
         self.assertEqual(
             json_requests,
             [
-                "https://www.holdet.dk/api/season/cartridges/"
+                "https://www.holdet.dk/api/fantasy/cartridges/"
                 "football-fantasy-2026"
             ],
         )

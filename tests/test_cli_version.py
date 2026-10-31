@@ -38,13 +38,14 @@ class VersionAndDispatchTests(unittest.TestCase):
         self.assertNotIn("HH-mm-ss-ffff", corpus)
         self.assertIn("data-round<round>_<MMDD>_<HHmmss>[_N]", corpus)
         self.assertIn("team-round<round>_<MMDD>_<HHmmss>[_N]", corpus)
-        self.assertIn("py -3.14 .\\scripts\\install_locked_dependencies.py", corpus)
+        self.assertIn("py -3.14 -m venv .venv", corpus)
+        self.assertIn(".\\.venv\\Scripts\\python.exe .\\scripts\\install_locked_dependencies.py", corpus)
         self.assertIn(
-            "py -3.14 -m pip install --no-deps --no-build-isolation -e .",
+            ".\\.venv\\Scripts\\python.exe -m pip install --no-deps --no-build-isolation --no-index -e .",
             corpus,
         )
-        self.assertIn("py -3.14 .\\scripts\\refresh_dependency_lock.py --check", corpus)
-        self.assertIn("py -3.14 -m pytest tests -q", corpus)
+        self.assertIn(".\\.venv\\Scripts\\python.exe .\\scripts\\refresh_dependency_lock.py --check", corpus)
+        self.assertIn(".\\.venv\\Scripts\\python.exe -m pytest tests -q", corpus)
         self.assertNotIn("py -3.14 -m unittest discover", corpus)
 
         required_documentation = {

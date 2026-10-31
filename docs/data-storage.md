@@ -16,6 +16,7 @@ Mutable, personlige og voksende data ligger i Windows AppData og ikke i reposito
 ├── data\
 │   ├── snapshots\
 │   ├── manifests\
+│   ├── refresh-runs\
 │   ├── group-revisions\
 │   ├── fixtures\
 │   ├── game-metadata\
@@ -44,6 +45,7 @@ Der findes ikke implicitte `cache`- eller `logs`-mapper i `AppPaths`.
 | `config/seasons.json` | Manuelle sæsondefinitioner og arkivstatus |
 | `data/snapshots` | Komplette kanoniske spiller- og teamsnapshots |
 | `data/manifests` | Uforanderlige `RefreshManifest`-resultater pr. datakilde fra eksplicitte gruppe- og managerspilopdateringer |
+| `data/refresh-runs` | Lokale journaler for samlede opdateringer, genoptagelse og eventuelle ventende manifestskrivninger |
 | `data/group-revisions` | Uforanderlige arkiverede turneringsrevisioner |
 | `data/game-metadata` | Schedule, deadlines, format og hentetid pr. spil |
 | `data/fixtures` | Eksplicit cachede, offentligt verificerede fixtures og kildeprovenance |
@@ -100,7 +102,7 @@ Produktversion `0.1.0` er uafhængig af lokale dataformater. Aktuelle formater e
 - `seasons.json` schema 1;
 - turneringsparringer schema 1;
 - `GameMetadata` schema 2 og fixturecache schema 1;
-- `RefreshManifest` schema 2, turneringsrevisioner og `integrity-index.json` schema 1 samt `backup-manifest.json` schema 2. Manifest-store læser fortsat refresh-manifest schema 1, og restore læser fortsat backup schema 1.
+- `RefreshManifest` schema 2 og 3, turneringsrevisioner og `integrity-index.json` schema 1 samt `backup-manifest.json` schema 2. Manifest-store læser fortsat refresh-manifest schema 1, og restore læser fortsat backup schema 1.
 
 Spillersnapshot schema 4 bevarer valgfrie popularitets-, trend-, indeks-, `stats`- og `total_stats`-felter. Schema 1–3 indlæses uden omskrivning. Manglende rundestatus bliver `unknown` og giver foreløbige beregninger, indtil en manuel genhentning bekræfter `complete`. Defekte eller inkompatible snapshots ignoreres med en synlig advarsel.
 
@@ -108,7 +110,11 @@ Flere immutable snapshots med samme rundenummer bevares og sorteres kronologisk 
 
 Spillereksport schema 3 fryser både de valgte beregnede kolonnedefinitioner, deres celleværdier og antal formelfejl. Eksporten er afledt og ændrer aldrig snapshots eller `hub-settings.json`.
 
-Refresh-manifest schema 2 forklarer udfald, cachegenbrug, fejl og retryrelation pr. trin. Schema 1 og 2 dual-reades uden implicit migration; schema 1 får `not_recorded` for datakilder, det gamle format ikke registrerede. Se den brugerrettede statusordbog i [Rundecenter og daglig arbejdsgang](round-center.md).
+Refresh-manifest schema 2 forklarer udfald, cachegenbrug, fejl og retryrelation pr. trin. Schema 1 får `not_recorded` for datakilder, det gamle format ikke registrerede. Se den brugerrettede statusordbog i [Rundecenter og daglig arbejdsgang](round-center.md).
+
+Schema 3 bevarer desuden den ønskede runde for hvert trin og kan registrere afbrudte trin, der ikke blev forsøgt. Schema 1–3 læses uden omskrivning. Ved en samlet opdatering gemmes en separat journal i `refresh-runs`, så et afbrudt eller delvist forsøg kan identificeres og genoptages. Et gemt snapshot er ikke i sig selv bevis for, at hele opdateringen blev fuldført.
+
+En metadatarevision er en uforanderlig indsamling, mens den aktuelle metadatafil viser den værdi, der er anvendt. Revisionen skrives før den aktuelle fil; hvis den sidste skrivning fejler, bevares den tidligere aktuelle værdi. En revision nyere end den aktuelle fil er ikke bekræftet som anvendt, og for ældre revisioner kan anvendelse ikke dokumenteres ud fra revisionen alene. Revisioner er derfor ikke en fuldstændig log over anvendte værdier.
 
 ## Backup og gendannelse
 
@@ -131,7 +137,9 @@ Der er ingen automatisk eller cloud-baseret backup. ZIP-backup er altid en manue
 
 **Data og lager → Overblik** viser datastatus og eksakt lagerforbrug pr. managerspil og kategori. **Integritet og oprydning** tilbyder hurtig metadata-/schemakontrol, fuld streamet SHA-256-kontrol og et preview af en indeksreparation. Reparation erstatter kun `integrity-index.json`; korrupte data ændres eller skjules aldrig.
 
-Retention bevarer den nyeste gyldige spillerfil pr. `(locale, spil, runde)` og den nyeste gyldige holdfil pr. `(locale, spil, hold, runde)`. Korrupte og uklassificerbare filer vælges aldrig automatisk. Arkivering opretter og validerer først en ZIP; oprindelige filer fjernes derefter. Sletning er begrænset til valgte afledte eksporter, gamle backups og eksisterende arkiver. Alle handlinger er manuelle, viser preview og kræver bekræftelse.
+Retention bevarer den nyeste gyldige spillerfil pr. `(locale, spil, runde)` og den nyeste gyldige holdfil pr. `(locale, spil, hold, runde)`. Snapshotreferencer i læsbare manifester bevares også; ved ældre manifester og fejl i efterbehandling bevares flere snapshots, som kan være nødvendige til historik eller genforsøg. En uafsluttet eller ulæselig opdateringsjournal og ulæselige manifester standser retention konservativt. Korrupte og uklassificerbare filer vælges aldrig automatisk. Arkivering opretter og validerer først en ZIP og kontrollerer igen, at de valgte filer må fjernes. Eksisterende mellemversionsarkiver udelades fra sletning, hvis de indeholder refererede snapshots, eller hvis sikker sletning ikke kan fastslås. Alle handlinger er manuelle, viser preview og kræver bekræftelse.
+
+Arkivering og sletning tager samme lokale lås som en samlet opdatering. En handling afvises, mens en anden ejer låsen; prøv igen, når den igangværende handling er færdig. Preview tager ikke låsen og skriver ikke filer.
 
 ## Overrides
 

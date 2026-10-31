@@ -142,13 +142,14 @@ class DataQualityRound:
     game_name: str = ""
     missing_team_names: tuple[str, ...] = ()
     player_round_status: RoundStatus | None = None
-    readiness: Literal["ready", "preliminary", "missing", "error"] = "missing"
+    readiness: Literal["ready", "preliminary", "missing", "error", "stale"] = "missing"
     reasons: tuple[str, ...] = ()
     newest_team_data: datetime | None = None
     newest_player_data: datetime | None = None
     last_success: datetime | None = None
     last_error: datetime | None = None
     last_error_message: str | None = None
+    oldest_team_data: datetime | None = None
 
 
     @property
@@ -570,20 +571,15 @@ def _manifest_status(
     )
     for manifest in manifests:
         generated = manifest.completed_at
-        if any(
+        if not manifest.failures and any(
             step.status in {"fetched", "reused_current"}
             for step in manifest.steps
         ) and (success is None or generated > success):
             success = generated
-        errors = tuple(
-            step.error
-            for step in manifest.steps
-            if step.status in {"reused_after_error", "failed_no_cache"}
-            and step.error
-        )
-        if errors and (failure is None or generated > failure):
+        errors = tuple(step.error for step in manifest.failures if step.error)
+        if manifest.failures and (failure is None or generated > failure):
             failure = generated
-            failure_message = errors[0]
+            failure_message = errors[0] if errors else "Seneste opdatering blev ikke fuldført"
     warnings = tuple(
         (
             f"{Path(source).name}: {detail.replace(source, Path(source).name)}"
@@ -605,9 +601,18 @@ def build_data_quality_report(
     manifest_dir: Path | str,
     include_archived: bool = False,
     now: datetime | None = None,
+    metadata_dir: Path | str | None = None,
 ) -> DataQualityReport:
     """Report cached coverage only; it never invokes Holdet."""
 
+    from .game_metadata import GameMetadataStore
+    from .refresh import RefreshMode, build_refresh_plan
+    from .errors import PayloadError
+
+    current = now or datetime.now().astimezone()
+    metadata_store = GameMetadataStore(
+        metadata_dir if metadata_dir is not None else Path(manifest_dir).parent / "game-metadata"
+    )
     selected_games = tuple(
         game for game in games if include_archived or not game.is_archived
     )
@@ -638,6 +643,27 @@ def build_data_quality_report(
         )
         manifest_warnings.extend(game_warnings)
         game_health.append((game_success, game_failure, game_error))
+        try:
+            metadata = metadata_store.load(manager_game.game)
+        except (OSError, ValueError, PayloadError) as exc:
+            metadata = None
+            manifest_warnings.append(f"Spilinfo kunne ikke læses: {exc}")
+        latest_manifest = manifest_store.load_latest(
+            manager_game.game.slug,
+            game_locale=manager_game.game.locale,
+            scope="game",
+        )
+        plan = build_refresh_plan(
+            manager_game, game_groups, teams, players,
+            metadata=metadata, mode=RefreshMode.STALE_ONLY,
+            previous_manifest=latest_manifest, include_metadata=True, now=current,
+        )
+        if plan.target_round > 0:
+            rounds.add(plan.target_round)
+        stale_steps = tuple(step for step in plan.steps if step.stale)
+        unresolved_failure = game_failure is not None and (
+            game_success is None or game_failure >= game_success
+        )
         for round_number in sorted(rounds, reverse=True):
             located = [
                 teams.summary_for(manager_game.game, team_id, round_number)
@@ -653,12 +679,9 @@ def build_data_quality_report(
             )
             reasons: list[str] = []
             readiness: Literal[
-                "ready", "preliminary", "missing", "error"
+                "ready", "preliminary", "missing", "error", "stale"
             ]
-            if (
-                game_failure is not None
-                and (game_success is None or game_failure > game_success)
-            ):
+            if unresolved_failure:
                 readiness = "error"
                 reasons.append(game_error or "Seneste opdatering mislykkedes")
             elif missing_ids or player_snapshot is None:
@@ -677,6 +700,11 @@ def build_data_quality_report(
                 reasons.append(
                     "Runden er i gang eller endnu ikke bekræftet ved genhentning"
                 )
+                if round_number == plan.target_round and stale_steps:
+                    reasons.append(f"{len(stale_steps)} datakilder er forældede eller kan ikke verificeres")
+            elif round_number == plan.target_round and stale_steps:
+                readiness = "stale"
+                reasons.append(f"{len(stale_steps)} datakilder er forældede eller kan ikke verificeres")
             else:
                 readiness = "ready"
             rows.append(
@@ -718,7 +746,11 @@ def build_data_quality_report(
                     ),
                     last_success=game_success,
                     last_error=game_failure,
-                    last_error_message=game_error,
+                    last_error_message=game_error if unresolved_failure else None,
+                    oldest_team_data=min(
+                        (item[0].generated_at for item in located if item is not None),
+                        default=None,
+                    ),
                 )
             )
     success = max(
@@ -732,7 +764,7 @@ def build_data_quality_report(
     )
     failure, error = failure_row[1], failure_row[2]
     return DataQualityReport(
-        now or datetime.now().astimezone(),
+        current,
         tuple(rows),
         max((item.generated_at for item in teams.snapshots), default=None),
         max((item.generated_at for item in players.snapshots), default=None),

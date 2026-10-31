@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime
 from uuid import uuid4
@@ -34,6 +35,9 @@ from holdet_lib import (
     watchlist_entry,
 )
 from website.navigation import PageId, page_link, relative_url
+from website.preferences import settings_for, settings_readable, tool_visible
+from holdet_lib.errors import PayloadError
+from holdet_lib.hub_settings import feature_enabled
 from website.presentation import (
     data_status_label,
     dataframe,
@@ -78,12 +82,20 @@ def _player_status(entry: PlayerEntry | None) -> str:
 
 
 def _settings(paths: AppPaths) -> tuple[HubSettingsStore, HubSettings]:
-    store = HubSettingsStore(paths.hub_settings_file)
+    return HubSettingsStore(paths.hub_settings_file), settings_for(paths)
+
+
+def _save_settings(
+    store: HubSettingsStore, apply: Callable[[HubSettings], object]
+) -> bool:
+    """Apply an explicit edit to readable current settings, never fallback defaults."""
+
     try:
-        return store, store.load()
-    except Exception as exc:
-        st.error(f"Scoutingindstillinger kunne ikke læses: {exc}")
-        return store, HubSettings()
+        apply(store.load())
+    except (OSError, PayloadError, ValueError) as exc:
+        st.error(f"Ændringerne blev ikke gemt: {exc}")
+        return False
+    return True
 
 
 def _latest_entries(index: PlayerStatisticsIndex) -> dict[str, tuple[GameUrl, object]]:
@@ -206,21 +218,23 @@ def _bulk_controls(
     entries: dict[str, object],
     store: HubSettingsStore,
     settings: HubSettings,
+    read_only: bool = False,
 ) -> None:
+    if read_only:
+        st.caption("Watchlist og noter kan kun ændres, når spillet er aktivt og indstillingerne kan læses.")
+        return
+    alerts_enabled = feature_enabled(settings, "alerts")
+    actions = (
+        "add_watchlist", "remove_watchlist", "add_tags", "remove_tags",
+        "set_reasons", "clear_reasons", "set_rule", "clear_rules",
+    )
+    if not alerts_enabled:
+        actions = tuple(action for action in actions if action not in {"set_rule", "clear_rules"})
     st.caption(f"{len(selected_keys)} spillere valgt til én atomisk handling.")
     with st.form(f"bulk-scouting:{scope}", border=True):
         action = st.selectbox(
             "Handling",
-            (
-                "add_watchlist",
-                "remove_watchlist",
-                "add_tags",
-                "remove_tags",
-                "set_reasons",
-                "clear_reasons",
-                "set_rule",
-                "clear_rules",
-            ),
+            actions,
             format_func={
                 "add_watchlist": "Føj til watchlist",
                 "remove_watchlist": "Fjern fra watchlist",
@@ -255,11 +269,13 @@ def _bulk_controls(
             tuple(_RULE_LABELS),
             format_func=_RULE_LABELS.get,
             key=f"bulk-rule-kind:{scope}",
+            disabled=not alerts_enabled,
         )
         threshold = st.number_input(
             "Tærskel",
             value=1.0,
             key=f"bulk-rule-threshold:{scope}",
+            disabled=not alerts_enabled,
         )
         threshold_unit = st.segmented_control(
             "Pristærskel",
@@ -267,6 +283,7 @@ def _bulk_controls(
             default="absolute",
             format_func={"absolute": "Beløb", "percent": "Procent"}.get,
             key=f"bulk-rule-unit:{scope}",
+            disabled=not alerts_enabled,
         )
         submitted = st.form_submit_button(
             "Anvend på valgte",
@@ -276,16 +293,19 @@ def _bulk_controls(
         )
     if not submitted:
         return
-    try:
+    def apply(settings: HubSettings) -> None:
+        alerts_enabled = feature_enabled(settings, "alerts")
         if any(key not in entries for key in selected_keys):
             raise ValueError("Mindst én valgt spiller findes ikke i det aktuelle snapshot")
+        if action in {"set_rule", "clear_rules"} and not alerts_enabled:
+            raise ValueError("Aktivér Statusalarmer i Indstillinger for at redigere regler")
         watch_by_key = {item.player_key: item for item in settings.watchlist}
         annotation_by_key = {
             item.player_key: item for item in settings.player_annotations
         }
         if action == "add_watchlist":
             for key in selected_keys:
-                watch_by_key.setdefault(key, watchlist_entry(game, entries[key]))  # type: ignore[arg-type]
+                watch_by_key.setdefault(key, watchlist_entry(game, entries[key], settings))  # type: ignore[arg-type]
         elif action == "remove_watchlist":
             for key in selected_keys:
                 watch_by_key.pop(key, None)
@@ -330,9 +350,7 @@ def _bulk_controls(
             watchlist=tuple(watch_by_key.values()),
             annotations=tuple(annotation_by_key.values()),
         )
-    except (OSError, ValueError) as exc:
-        st.error(f"Bulkhandlingen blev ikke gemt: {exc}")
-    else:
+    if _save_settings(store, apply):
         st.toast("Alle valgte spillere blev opdateret samlet.")
         st.rerun()
 
@@ -344,10 +362,12 @@ def render_player_bulk_controls(
     game: GameUrl,
     entries: dict[str, object],
     paths: AppPaths,
+    read_only: bool = False,
 ) -> None:
     """Public UI adapter shared by player lists and the scouting table."""
 
     store, settings = _settings(paths)
+    read_only = read_only or not settings_readable(paths)
     _bulk_controls(
         scope=scope,
         selected_keys=selected_keys,
@@ -355,6 +375,7 @@ def render_player_bulk_controls(
         entries=entries,
         store=store,
         settings=settings,
+        read_only=read_only,
     )
 
 
@@ -438,12 +459,15 @@ def render_contextual_scouting_panel(
     game: GameUrl,
     index: PlayerStatisticsIndex,
     paths: AppPaths,
+    *,
+    read_only: bool = False,
 ) -> None:
     latest = index.newest(game)
     if latest is None:
         st.info("Der findes endnu intet lokalt spillersnapshot.")
         return
     store, settings = _settings(paths)
+    read_only = read_only or not settings_readable(paths)
     metrics = build_scouting_metrics(
         index,
         game,
@@ -552,6 +576,7 @@ def render_contextual_scouting_panel(
                 entries=entries,
                 store=store,
                 settings=settings,
+                read_only=read_only,
             )
     _scatter(chart_rows, x="Pris", y="Form 3-værdi", title="Pris mod Form 3", scope=scope)
     _scatter(
@@ -568,12 +593,16 @@ def render_contextual_watchlist_panel(
     game: GameUrl,
     index: PlayerStatisticsIndex,
     paths: AppPaths,
+    *,
+    read_only: bool = False,
 ) -> None:
     latest = index.newest(game)
     if latest is None:
         st.info("Der findes endnu intet lokalt spillersnapshot.")
         return
     store, settings = _settings(paths)
+    readable = settings_readable(paths)
+    read_only = read_only or not readable
     entries = {
         player_identity(game, entry): entry for entry in latest.statistics.entries
     }
@@ -583,14 +612,17 @@ def render_contextual_watchlist_panel(
         if item.game_identity == (game.locale.casefold(), game.slug)
     )
     if not watched:
-        st.info("Watchlisten er tom. Vælg spillere under Scouting.")
+        if not readable:
+            st.info("Watchlisten kan ikke vises, før indstillingerne er gendannet.")
+            return
+        st.info("Watchlisten er tom. Vælg spillere i spillerlisten, og føj dem til watchlisten.")
         page_link(
-            PageId.SCOUTING,
-            "Åbn global scouting",
-            icon=":material/travel_explore:",
+            PageId.PLAYERS,
+            "Åbn spillerlisten",
+            icon=":material/query_stats:",
             game=game.slug,
             locale=game.locale,
-            view="watchlist",
+            panel="list",
         )
         return
     rows = [
@@ -636,17 +668,22 @@ def render_contextual_watchlist_panel(
         key=f"watchlist-editor-player:{game.locale}:{game.slug}",
     )
     current = next(item for item in watched if item.player_key == selected_key)
+    alerts_enabled = feature_enabled(settings, "alerts")
+    if not alerts_enabled:
+        st.caption("Statusalarmer er deaktiveret. Gemte alarmregler er bevaret.")
     with st.form(f"watchlist-editor:{game.locale}:{game.slug}:{selected_key}"):
         reasons = st.multiselect(
             "Begrundelser",
             WATCHLIST_REASONS,
             default=current.reasons,
             format_func=_REASON_LABELS.get,
+            disabled=read_only,
         )
         note = st.text_area(
             "Fritekst",
             value=current.reason_note,
             max_chars=280,
+            disabled=read_only,
         )
         st.markdown("**Alarmregler**")
         existing_rule_ids = st.multiselect(
@@ -664,33 +701,46 @@ def render_contextual_watchlist_panel(
                 if rule.rule_id == rule_id
             ),
             help="Fjern en markering for at slette reglen.",
+            disabled=read_only or not alerts_enabled,
         )
-        add_rule = st.checkbox("Tilføj en regel")
+        add_rule = st.checkbox("Tilføj en regel", disabled=read_only or not alerts_enabled)
         rule_kind = st.selectbox(
             "Ny regel",
             tuple(_RULE_LABELS),
             format_func=_RULE_LABELS.get,
-            disabled=not add_rule,
+            disabled=read_only or not alerts_enabled,
         )
         threshold = st.number_input(
             "Ny tærskel",
             value=1.0,
-            disabled=not add_rule or rule_kind == "status_change",
+            disabled=read_only or not alerts_enabled,
+            help="Bruges kun til regler med en numerisk tærskel.",
         )
         threshold_unit = st.segmented_control(
             "Ny pristærskel",
             ("absolute", "percent"),
             default="absolute",
             format_func={"absolute": "Beløb", "percent": "Procent"}.get,
-            disabled=not add_rule or not rule_kind.startswith("value_"),
+            disabled=read_only or not alerts_enabled,
         )
-        save = st.form_submit_button("Gem watchlist", type="primary")
-    if save:
-        try:
-            rules = tuple(
-                rule for rule in current.rules if rule.rule_id in existing_rule_ids
+        save = st.form_submit_button("Gem watchlist", type="primary", disabled=read_only)
+    if save and not read_only:
+        rendered_rule_ids = {rule.rule_id for rule in current.rules}
+
+        def apply(settings: HubSettings) -> None:
+            current = next(
+                (item for item in settings.watchlist if item.player_key == selected_key), None
             )
-            if add_rule:
+            if current is None:
+                raise ValueError("Spilleren er ikke længere på watchlisten. Åbn listen igen.")
+            alerts_enabled = feature_enabled(settings, "alerts")
+            if add_rule and not alerts_enabled:
+                raise ValueError("Aktivér Statusalarmer i Indstillinger for at tilføje regler")
+            rules = tuple(
+                rule for rule in current.rules
+                if rule.rule_id in existing_rule_ids or rule.rule_id not in rendered_rule_ids
+            ) if alerts_enabled else current.rules
+            if add_rule and alerts_enabled:
                 rules = (
                     *rules,
                     _rule_from_form(
@@ -710,9 +760,7 @@ def render_contextual_watchlist_panel(
                 for item in settings.watchlist
             )
             store.set_watchlist(settings, updated)
-        except (OSError, ValueError) as exc:
-            st.error(str(exc))
-        else:
+        if _save_settings(store, apply):
             st.rerun()
 
 
@@ -727,6 +775,7 @@ def render_player_watchlist_editor(
 
     player_key = player_identity(game, entry)
     store, settings = _settings(paths)
+    read_only = read_only or not settings_readable(paths)
     watched = next(
         (item for item in settings.watchlist if item.player_key == player_key),
         None,
@@ -737,12 +786,18 @@ def render_player_watchlist_editor(
             key=f"player-watchlist-add:{player_key}",
             disabled=read_only,
             type="primary",
-        ):
-            store.set_watchlist(
-                settings, (*settings.watchlist, watchlist_entry(game, entry))
-            )
-            st.rerun()
+        ) and not read_only:
+            def add(settings: HubSettings) -> None:
+                if not any(item.player_key == player_key for item in settings.watchlist):
+                    store.set_watchlist(
+                        settings, (*settings.watchlist, watchlist_entry(game, entry, settings))
+                    )
+            if _save_settings(store, add):
+                st.rerun()
         return
+    alerts_enabled = feature_enabled(settings, "alerts")
+    if not alerts_enabled:
+        st.caption("Statusalarmer er deaktiveret. Gemte alarmregler er bevaret.")
     with st.form(f"player-watchlist-editor:{player_key}"):
         reasons = st.multiselect(
             "Begrundelser",
@@ -772,36 +827,50 @@ def render_player_watchlist_editor(
                 if rule.rule_id == rule_id
             ),
             help="Fjern en markering for at slette reglen.",
-            disabled=read_only,
+            disabled=read_only or not alerts_enabled,
         )
-        add_rule = st.checkbox("Tilføj alarmregel", disabled=read_only)
+        add_rule = st.checkbox(
+            "Tilføj alarmregel", disabled=read_only or not alerts_enabled
+        )
         rule_kind = st.selectbox(
             "Regeltype",
             tuple(_RULE_LABELS),
             format_func=_RULE_LABELS.get,
-            disabled=read_only or not add_rule,
+            disabled=read_only or not alerts_enabled,
         )
         threshold = st.number_input(
             "Tærskel",
             value=1.0,
-            disabled=read_only or not add_rule or rule_kind == "status_change",
+            disabled=read_only or not alerts_enabled,
+            help="Bruges kun til regler med en numerisk tærskel.",
         )
         threshold_unit = st.segmented_control(
             "Pristærskel",
             ("absolute", "percent"),
             default="absolute",
             format_func={"absolute": "Beløb", "percent": "Procent"}.get,
-            disabled=read_only or not add_rule or not rule_kind.startswith("value_"),
+            disabled=read_only or not alerts_enabled,
         )
         save = st.form_submit_button(
             "Gem watchlist", type="primary", disabled=read_only
         )
-    if save:
-        try:
-            rules = tuple(
-                rule for rule in watched.rules if rule.rule_id in keep_rule_ids
+    if save and not read_only:
+        rendered_rule_ids = {rule.rule_id for rule in watched.rules}
+
+        def apply(settings: HubSettings) -> None:
+            watched = next(
+                (item for item in settings.watchlist if item.player_key == player_key), None
             )
-            if add_rule:
+            if watched is None:
+                raise ValueError("Spilleren er ikke længere på watchlisten. Åbn listen igen.")
+            alerts_enabled = feature_enabled(settings, "alerts")
+            if add_rule and not alerts_enabled:
+                raise ValueError("Aktivér Statusalarmer i Indstillinger for at tilføje regler")
+            rules = tuple(
+                rule for rule in watched.rules
+                if rule.rule_id in keep_rule_ids or rule.rule_id not in rendered_rule_ids
+            ) if alerts_enabled else watched.rules
+            if add_rule and alerts_enabled:
                 rules = (
                     *rules,
                     _rule_from_form(
@@ -823,20 +892,18 @@ def render_player_watchlist_editor(
                     for item in settings.watchlist
                 ),
             )
-        except (OSError, ValueError) as exc:
-            st.error(str(exc))
-        else:
+        if _save_settings(store, apply):
             st.rerun()
     if st.button(
         "Fjern fra watchlist",
         key=f"player-watchlist-remove:{player_key}",
         disabled=read_only,
-    ):
-        store.set_watchlist(
-            settings,
-            tuple(item for item in settings.watchlist if item.player_key != player_key),
-        )
-        st.rerun()
+    ) and not read_only:
+        if _save_settings(store, lambda current: store.set_watchlist(
+            current,
+            tuple(item for item in current.watchlist if item.player_key != player_key),
+        )):
+            st.rerun()
 
 
 def _smartlists_view(game: GameUrl, index: PlayerStatisticsIndex) -> None:
@@ -937,8 +1004,16 @@ def _notes_view(paths: AppPaths, settings: HubSettings, index: PlayerStatisticsI
 
 
 def _formula_editor(
-    game: GameUrl, store: HubSettingsStore, settings: HubSettings
+    game: GameUrl,
+    store: HubSettingsStore,
+    settings: HubSettings,
+    paths: AppPaths,
+    *,
+    read_only: bool = False,
 ) -> None:
+    if not tool_visible(paths, "scouting"):
+        return
+    read_only = read_only or not settings_readable(paths)
     with st.expander(
         "Egne beregnede kolonner",
         icon=":material/calculate:",
@@ -973,32 +1048,38 @@ def _formula_editor(
                     item.name for item in selected if item.column_id == column_id
                 ),
                 key=f"computed-column-remove:{game.locale}:{game.slug}",
+                disabled=read_only,
             )
             if st.button(
                 "Slet kolonne",
                 key=f"computed-column-remove-button:{game.locale}:{game.slug}",
-            ):
-                store.set_computed_player_columns(
-                    settings,
+                disabled=read_only,
+            ) and not read_only:
+                if _save_settings(store, lambda current: store.set_computed_player_columns(
+                    current,
                     tuple(
                         item
-                        for item in settings.computed_player_columns
+                        for item in current.computed_player_columns
                         if not (
                             item.column_id == remove_column
                             and (item.game_locale, item.game_slug)
                             == (game.locale.casefold(), game.slug)
                         )
                     ),
-                )
-                st.rerun()
+                )):
+                    st.rerun()
         with st.form(f"computed-column-form:{game.locale}:{game.slug}"):
-            name = st.text_input("Kolonnenavn")
-            expression = st.text_input("Formel", placeholder="form_3 / coalesce(value, 1)")
-            decimals = st.number_input("Decimaler", min_value=0, max_value=8, value=2)
-            save = st.form_submit_button(
-                "Tilføj kolonne", type="primary", disabled=len(selected) >= 20
+            name = st.text_input("Kolonnenavn", disabled=read_only)
+            expression = st.text_input(
+                "Formel", placeholder="form_3 / coalesce(value, 1)", disabled=read_only
             )
-        if save:
+            decimals = st.number_input(
+                "Decimaler", min_value=0, max_value=8, value=2, disabled=read_only
+            )
+            save = st.form_submit_button(
+                "Tilføj kolonne", type="primary", disabled=read_only or len(selected) >= 20
+            )
+        if save and not read_only:
             try:
                 column = ComputedPlayerColumn(
                     game.locale,
@@ -1008,13 +1089,14 @@ def _formula_editor(
                     expression,
                     int(decimals),
                 )
-                store.set_computed_player_columns(
-                    settings, (*settings.computed_player_columns, column)
-                )
+                saved = _save_settings(store, lambda current: store.set_computed_player_columns(
+                    current, (*current.computed_player_columns, column)
+                ))
             except (OSError, ValueError) as exc:
                 st.error(str(exc))
             else:
-                st.rerun()
+                if saved:
+                    st.rerun()
 
 
 def render_scouting_page(games: tuple[ManagerGame, ...], paths: AppPaths) -> None:
@@ -1049,6 +1131,10 @@ def render_scouting_page(games: tuple[ManagerGame, ...], paths: AppPaths) -> Non
         key="global-scouting-game",
     )
     game = next(item[0] for item in ordered if item[0].original == game_url)
+    read_only = any(
+        item.identity == (game.locale.casefold(), game.slug) and item.is_archived
+        for item in games
+    )
     st.query_params["game"] = game.slug
     st.query_params["locale"] = game.locale
     requested_view = str(st.query_params.get("view", "watchlist"))
@@ -1064,8 +1150,8 @@ def render_scouting_page(games: tuple[ManagerGame, ...], paths: AppPaths) -> Non
     st.query_params["view"] = view
     store, settings = _settings(paths)
     if view == "watchlist":
-        render_contextual_watchlist_panel(game, index, paths)
-        _formula_editor(game, store, settings)
+        render_contextual_watchlist_panel(game, index, paths, read_only=read_only)
+        _formula_editor(game, store, settings, paths, read_only=read_only)
     elif view == "smartlists":
         _smartlists_view(game, index)
     else:

@@ -1,6 +1,36 @@
 # Rundecenter og daglig arbejdsgang
 
-Rundecenter er startsiden for et managerspil. Det samler næste handling, handelsvindue, datastatus, opdatering, rundeafvigelser, sammenligning, gruppematrix og Rundens historie. Selve overblikket er cache-only: navigation og previews læser lokale snapshots, metadata, alarmer og manifester uden netværk eller vedvarende writes.
+Managerspillets **Overblik** viser gemte runder, datastatus, spillerdækning samt stillinger og kampe. Rundecenteret åbnes under **Datadetaljer og rundecenter**. De to øvrige hovedfaner er **Ligaer og turneringer** og **Spillere**. Det eksisterende link med `section=round-center` åbner fortsat Overblik. Historik, analyse, holdstatistik og administration findes under **Flere funktioner**; de valgfrie værktøjer følger tilvalgene i Indstillinger.
+
+Rundecenter samler handelsvindue, datastatus, opdatering, rundeafvigelser, sammenligning og gruppematrix. Rundens historie vises, når værktøjet er aktiveret. Selve overblikket er cache-only: navigation og previews læser lokale snapshots, metadata, alarmer og manifester uden netværk eller vedvarende writes.
+
+## Efter en pause: afgræns og opdater
+
+På **Mine managerspil** starter **Opdater alle** indhentning for alle aktive managerspil. **Vælg spil og omfang** giver mulighed for at vælge bestemte spil og tilvælge **Genhent også aktuelle data**. På et managerspil eller en konkurrence starter **Opdater data** den samme indhentning for det åbne scope. Arkiverede managerspil indgår ikke i hentningen; gendan først spillet, hvis det skal opdateres igen.
+
+Et managerspils scope omfatter gruppernes og turneringernes medlemmer samt det valgte eget hold, hvis det er konfigureret. Et konkurrencescope omfatter kun den valgte konkurrences medlemmer. Hold deduplikeres inden for scopet, og opdateringen ændrer ikke gruppernes medlemmer eller tilføjer tilfældige hold fra anden cache.
+
+Disse opdateringsknapper starter kørslen ved det eksplicitte klik. Det udvidede Rundecenter har desuden det cachebaserede planlægningspreview beskrevet nedenfor. Under indhentningen hentes nødvendige metadata og seneste spillerdata, hvorefter afsluttede spillerunder med manglende eller utilstrækkelige data indhentes i stigende rækkefølge. En afsluttet runde genbesøges, hvis den gemte statistik er foreløbig, har ukendt status eller blev hentet før rundens sluttid. Allerede bekræftet komplette historiske runder genbruges. Holddata hentes for scopets unikke hold; et holds rundehistorik følger med kildens holddata.
+
+Ny metadata eller seneste spillerdata kan afsløre runder, som det første preview ikke kendte. Derfor genvurderes de resterende trin under kørslen. Manglende runder udfyldes med kildedata; der interpoleres ingen værdier. Historiske spillerhentninger opretter ikke nye statusalarmer.
+
+Fremdriften tilhører en worker, og en lokal journal under `data/refresh-runs/<run-id>/run.json` gør det muligt at se kørslen igen efter en browsergenindlæsning. Kun én worker kan opdatere samme datarod ad gangen. Polling starter ingen hentning og skriver ikke journalen.
+
+Rundecentrets **Start opdatering** bruger den samme worker som de øvrige opdateringsknapper, inklusive fastfrysning af eksisterende turneringskampe før hentning. Et manifestretry behandler kun de fejlede kilder. Den ønskede spillerunde gemmes særskilt fra en eventuel ældre fallback-cache, så et retry ikke kan godkende den forkerte runde.
+
+**Stop efter denne datakilde** anmoder om stop mellem kildeoperationer; et allerede igangværende kald kan afsluttes først. En genindlæst browser starter ikke en afbrudt kørsel automatisk. Efter appens proces er stoppet, kræver fortsættelse et klik på **Genoptag / prøv fejlede trin igen**. Afsluttede delresultater og manifestreferencer bevares, og et kildetrin med usikkert udfald skal kontrolleres ved genoptagelse.
+
+**Download JSON** henter en samlet fil fra lokal cache for det åbne managerspil eller den åbne konkurrence. **Opdater før download** starter først en afgrænset opdatering. Når den er færdig, vises **Download opdateret JSON** direkte ved kørselsresultatet; en delvis kørsel tilbyder **Download JSON med kendte mangler**. Valget om spillerhistorik følger med kørslen. Eventuelle mangler beskrives i eksporten. Se [Dataportabilitet](data-portability.md) for indhold og kildeoplysninger.
+
+## Overblik og konkurrencesider
+
+Forsiden viser aktive spil i én sammenlignelig tabel med konkurrencer, hold, senest gemte runde, datastatus, ældste datakilde og næste handelsfrist. Spil åbnes i samme browserfane. **Åbn spil** og sidebaren giver også tastaturadgang.
+
+Spillets Overblik viser spillerantal, gemte runder, kildealder, eget hold samt et udsnit af stillinger og kampe. **Ligaer og turneringer** er den særskilte liste over konkurrencer og formater. Rundecenterets detaljer er fortsat tilgængelige under **Datadetaljer og rundecenter**.
+
+Turneringssiden viser stilling og kampe før den sammenklappede Datastatus. Foreløbige gamle snapshots beskrives som afventende afsluttende data; de bruges ikke som bevis for, at runden stadig er i gang. Et valgt historisk slutpunkt afgrænser også historikgraf og datatabel.
+
+Historikgrafer har kun hele runder på x-aksen og bevarer huller i datagrundlaget. Værdigrafen bruger en tydeligt mærket, tilpasset y-akse og tilbyder **Ændring fra første runde**, beregnet fra hvert holds første tilgængelige observation. Rankgrafer viser bedre placeringer øverst.
 
 ## Næste bedste handling og handelsvindue
 
@@ -16,7 +46,7 @@ Handelsvinduet vises som **Lukket**, **Åbner om …**, **Åbent** eller **Lukke
 
 ## Opdaterings-preview, fremdrift og retry
 
-Før et managerspil opdateres, bygger Hubben en `RefreshPlan` fra den eksisterende cache. Previewet viser de valgte datakilder, hvorfor hvert trin er valgt, og hvor mange unikke hold der omtrent bliver hentet. Hold deduplikeres på tværs af grupper. Previewet er et øjebliksbillede: det kontakter ikke Holdet.dk, skriver ikke filer og garanterer ikke, at kilden er uændret ved den efterfølgende kørsel.
+Under **Datadetaljer og rundecenter** findes det udvidede opdaterings-preview. Her bygger Hubben en `RefreshPlan` fra den eksisterende cache, før denne opdatering bekræftes. Previewet viser de valgte datakilder, hvorfor hvert trin er valgt, og hvor mange unikke hold der omtrent bliver hentet. Hold deduplikeres på tværs af grupper. Previewet er et øjebliksbillede: det kontakter ikke Holdet.dk, skriver ikke filer og garanterer ikke, at kilden er uændret ved den efterfølgende kørsel.
 
 Der er tre tilstande:
 
@@ -44,15 +74,18 @@ stateDiagram-v2
 
 En runde kan være aktuel, foreløbig, forældet, manglende, fejlet eller ikke verificeret. **Runde afsluttet, men data bør genhentes** (`completed_needs_refresh`) er en særskilt tilstand: rundens sluttid er passeret, men mindst én kilde mangler, er hentet før afslutningen, er ufuldstændig eller har en nyere fejl. Den er ikke det samme som et endeligt resultat.
 
-`RefreshManifest` schema 2 forklarer den seneste eksplicitte kørsel pr. trin. Det gemmer start/slut, kilde og begrundelse, data- eller cachereference, fejl, metadataændringer samt run- og retryrelationer. UI'et oversætter til:
+`RefreshManifest` forklarer den eksplicitte kørsel pr. trin. Det gemmer start/slut, kilde og begrundelse, data- eller cachereference, fejl, metadataændringer samt run- og retryrelationer. UI'et oversætter til:
 
 - **Lykkedes**: nye data blev hentet.
 - **Genbrugte cache**: en aktuel cache blev bevidst genbrugt.
 - **Fejlede, cache genbrugt**: hentningen fejlede, men en kompatibel cache findes.
 - **Fejlede uden cache**: der er intet sikkert fallback.
 - **Ikke tilgængelig**: trinnet kunne ikke køres med den kendte kontekst.
+- **Annulleret**: trinnet blev ikke afsluttet, fordi kørslen blev stoppet; det kan vælges igen ved en eksplicit genoptagelse.
 
-Det nye managerspil-refresh skriver schema 2, mens store-laget kan læse både manifest schema 1 og 2. Schema 2 gemmer både et samlet resultat (`complete`, `partial` eller `failed`) og hvert trins oprindelige run-ID, så genbrug og retry kan forklares uden at følge en kæde af filer. Hvis selve manifestskrivningen fejler, bevares det komplette manifest i hukommelsen og kan skrives igen lokalt uden at gentage netværkshentningen. Et schema-1-manifest normaliseres i hukommelsen med `not_recorded` for trin, som det gamle format ikke registrerede, og omskrives ikke ved læsning. Korrupte manifestfiler isoleres med en advarsel, så andre gyldige kørsler fortsat kan vises.
+Indhentning af historiske runder og annullerede kørsler skriver schema 3. Formatet bevarer schema 2's trinprovenance og tilføjer den ønskede runde (`requested_round`) og status for annullerede trin. Store-laget læser fortsat schema 1, 2 og 3. Den eksisterende opdatering uden historik eller annullering kan fortsat skrive schema 2.
+
+Schema 2 og 3 gemmer både et samlet resultat (`complete`, `partial` eller `failed`) og hvert trins oprindelige run-ID, så genbrug og retry kan forklares uden at følge en kæde af filer. Hvis selve manifestskrivningen fejler, bevares det komplette manifest og kan skrives igen lokalt uden at gentage allerede afsluttede netværkshentninger. Den workerstyrede indhentning gemmer et ventende manifest sammen med kørselsjournalen. Et schema-1-manifest normaliseres i hukommelsen med `not_recorded` for trin, som det gamle format ikke registrerede, og omskrives ikke ved læsning. Korrupte manifestfiler isoleres med en advarsel, så andre gyldige kørsler fortsat kan vises.
 
 ## Rundens afvigelser og sammenligning
 

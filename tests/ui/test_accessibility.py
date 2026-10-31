@@ -50,13 +50,16 @@ def test_accessibility_smoke(page: Page, ui_server: UiServer) -> None:
         expect(panel).to_be_visible()
 
     page.keyboard.press("Tab")
-    for _ in range(12):
+    for _ in range(40):
         visible_focus = page.evaluate(
             """() => {
                 const node = document.activeElement;
                 if (!node || node === document.body) return false;
                 const style = getComputedStyle(node);
-                return style.outlineStyle !== 'none' && parseFloat(style.outlineWidth) > 0;
+                return node.matches(':focus-visible') && (
+                    (style.outlineStyle !== 'none' && parseFloat(style.outlineWidth) > 0)
+                    || style.boxShadow !== 'none'
+                );
             }"""
         )
         if visible_focus:
@@ -80,7 +83,7 @@ def test_player_sort_and_dataframe_scroll_survive_fragment_rerun(
     ui_server: UiServer,
 ) -> None:
     _open_players(page, ui_server)
-    page.get_by_text("Filtre · 0", exact=True).click()
+    page.get_by_role("button", name="Flere filtre og kolonner").click()
     page.get_by_text("Avancerede filtre og kolonner", exact=True).click()
     sorter = page.get_by_role("combobox", name="Sortér efter")
     expect(sorter).to_have_value("Pris")
@@ -126,6 +129,7 @@ def test_round_center_is_responsive_and_keyboard_named(
 ) -> None:
     page.set_viewport_size({"width": width, "height": 900})
     page.goto(ui_server.base_url + ROUND_CENTER_ROUTE, wait_until="domcontentloaded")
+    page.get_by_text("Datadetaljer og rundecenter", exact=True).click(timeout=20_000)
     expect(
         page.get_by_role("heading", name="Rundecenter", exact=True).first
     ).to_be_visible(timeout=20_000)
@@ -134,13 +138,14 @@ def test_round_center_is_responsive_and_keyboard_named(
         timeout=20_000,
     )
 
-    headings = page.locator("h1,h2,h3,h4,h5,h6").evaluate_all(
-        "nodes => nodes.map(node => Number(node.tagName.slice(1)))"
+    heading_items = page.locator("h1,h2,h3,h4,h5,h6").evaluate_all(
+        "nodes => nodes.map(node => ({level: Number(node.tagName.slice(1)), text: node.innerText}))"
     )
+    headings = [item["level"] for item in heading_items]
     assert headings and all(
         current <= previous + 1
         for previous, current in zip(headings, headings[1:])
-    )
+    ), heading_items
     unnamed = page.get_by_role("button").evaluate_all(
         "nodes => nodes.filter(node => !(node.getAttribute('aria-label') || node.innerText.trim())).length"
     )

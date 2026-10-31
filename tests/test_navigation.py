@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -24,6 +25,8 @@ CANONICAL_PATHS = {
     navigation.PageId.MANAGERS: "/managers",
     navigation.PageId.CALENDAR: "/calendar",
     navigation.PageId.DATA: "/data",
+    navigation.PageId.SETTINGS: "/settings",
+    navigation.PageId.SCOUTING: "/scouting",
     navigation.PageId.GAME: "/game",
     navigation.PageId.GROUP: "/group",
     navigation.PageId.TEAM: "/team",
@@ -51,6 +54,8 @@ def test_canonical_route_matrix(page_id: navigation.PageId, path: str) -> None:
         ("hall-of-fame", navigation.PageId.MANAGERS),
         ("calendar", navigation.PageId.CALENDAR),
         ("data", navigation.PageId.DATA),
+        ("settings", navigation.PageId.SETTINGS),
+        ("scouting", navigation.PageId.SCOUTING),
         ("game", navigation.PageId.GAME),
         ("group", navigation.PageId.GROUP),
         ("team", navigation.PageId.TEAM),
@@ -125,33 +130,60 @@ class _Tab:
         return None
 
 
-def test_inactive_game_tabs_do_not_call_their_data_renderers() -> None:
+@pytest.mark.parametrize(
+    ("section", "selected_tab", "renderer"),
+    (
+        ("round-center", 0, "_game_overview"),
+        ("groups", 1, "_game_groups_tab"),
+        ("players", 2, "_player_statistics_tab"),
+    ),
+)
+def test_core_game_tabs_do_not_render_inactive_or_optional_tools(
+    section: str, selected_tab: int, renderer: str,
+) -> None:
     manager_game = holdet.normalize_manager_game("tour-de-france-2026", "Tour")
-    tabs = tuple(_Tab(index == 0) for index in range(9))
-    selected = MagicMock()
-    inactive = tuple(MagicMock() for _ in range(8))
-    with (
-        patch.object(ui, "_stateful_tabs", return_value=tabs),
-        patch.object(ui, "_unread_alert_counts", return_value={}),
-        patch.object(ui, "_game_round_center_tab", selected),
-        patch.object(ui, "_game_groups_tab", inactive[0]),
-        patch.object(ui, "_player_statistics_tab", inactive[1]),
-        patch.object(ui, "alerts_view", inactive[2]),
-        patch.object(ui, "_team_statistics_game_tab", inactive[3]),
-        patch.object(ui, "game_history_panel", inactive[4]),
-        patch.object(ui, "analysis_panel", inactive[5]),
-        patch.object(ui, "_manage_game", inactive[6]),
-        patch.object(ui, "_game_settings_tab", inactive[7]),
-        patch.object(ui.st, "markdown"),
-        patch.object(ui.st, "title"),
-        patch.object(ui.st, "caption"),
-    ):
-        ui._game_view(
-            manager_game,
-            (),
-            holdet.SnapshotIndex((), ()),
-            MagicMock(),
-        )
+    tabs = tuple(_Tab(index == selected_tab) for index in range(3))
+    renderers = {name: MagicMock() for name in (
+        "_game_overview", "_game_round_center_tab", "_game_groups_tab", "_player_statistics_tab",
+        "alerts_view", "_team_statistics_game_tab", "game_history_panel",
+        "analysis_panel", "_manage_game", "_game_settings_tab",
+    )}
+    with ExitStack() as stack:
+        stack.enter_context(patch.multiple(ui, **renderers))
+        stack.enter_context(patch.object(ui, "_stateful_tabs", return_value=tabs))
+        stack.enter_context(patch.object(ui, "_entity_header"))
+        stack.enter_context(patch.object(ui.st, "query_params", {"section": section}))
+        ui._game_view(manager_game, (), holdet.SnapshotIndex((), ()), MagicMock())
+    renderers[renderer].assert_called_once()
+    for name, spy in renderers.items():
+        if name != renderer:
+            spy.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("section", "renderer"),
+    (
+        ("teams", "_team_statistics_game_tab"),
+        ("history", "game_history_panel"),
+        ("administration", "_manage_game"),
+        ("settings", "_game_settings_tab"),
+        ("alerts", "alerts_view"),
+        ("analysis", "analysis_panel"),
+    ),
+)
+def test_optional_game_sections_keep_their_deep_link_destination(
+    section: str, renderer: str,
+) -> None:
+    manager_game = holdet.normalize_manager_game("tour-de-france-2026", "Tour")
+    with ExitStack() as stack:
+        selected = stack.enter_context(patch.object(ui, renderer))
+        tabs = stack.enter_context(patch.object(ui, "_stateful_tabs"))
+        stack.enter_context(patch.object(ui, "_entity_header"))
+        stack.enter_context(patch.object(ui, "page_link"))
+        stack.enter_context(patch.object(ui, "require_tool", return_value=True))
+        stack.enter_context(patch.object(ui.st, "query_params", {"section": section}))
+        ui._game_view(manager_game, (), holdet.SnapshotIndex((), ()), MagicMock(), read_only=True)
     selected.assert_called_once()
-    for renderer in inactive:
-        renderer.assert_not_called()
+    if section != "history":
+        assert selected.call_args.kwargs["read_only"] is True
+    tabs.assert_not_called()

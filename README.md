@@ -4,56 +4,68 @@
 ![Python 3.14](https://img.shields.io/badge/Python-3.14-3776AB?logo=python&logoColor=white)
 ![Windows](https://img.shields.io/badge/platform-Windows-0078D4?logo=windows&logoColor=white)
 
-Holdet Fantasy Hub er et uofficielt, lokalt Windows-værktøj til offentlige fantasydata fra [Holdet.dk](https://www.holdet.dk/). Dashboardet samler managerspil, spillere, hold, grupper, managerkarrierer, sæsoner og fleksible turneringer. Almindelig navigation bruger kun lokal cache.
+Holdet Fantasy Hub er et uofficielt, lokalt Windows-værktøj til offentlige fantasydata fra [Holdet.dk](https://www.holdet.dk/). Følg dine managerspil, ligaer og turneringer, og undersøg spillernes statistik og værdi i samme app. Almindelig navigation bruger kun lokal cache.
 
 > Projektet er ikke udviklet, godkendt eller supporteret af Holdet.dk.
 
 ## Funktioner
 
-- Rundecenter med næste bedste handling, handelsvindue, cache-preview, målrettet refresh/retry, rundeafvigelser, sammenligning, time machine, gruppematrix og forklarlig Rundens historie i delbar HTML.
-- Global cache-only Scouting med regelstyret watchlist, begrundelser, atomiske bulkhandlinger, smartlister, notesøgning, sikre beregnede kolonner, positionspercentiler, prisalternativer, lignende spillere og tilgængelige scatterplots.
-- Spiller- og holdstatistik med spillerdetaljer, sammenligning, historik, intra-runde-ændringer, transferlaboratorium og eksport i TXT, JSON, Markdown, CSV, XLSX og valgfri Parquet.
-- Cachebaseret analyse- og beslutningscenter med form, stabilitet, kaptajn, bank, transferregnskab, gruppeswing, eksponering og regelverificeret idealhold.
-- Opt-in-modeller for fixturecache og Monte Carlo, tydeligt mærket som eksperimentelle og aldrig som facit.
-- Managerprofiler på tværs af spil og hold, Elo-rating, medaljer, rekorder, streaks og H2H.
-- Manuelt sammensatte sæsoner, som genbruger den globale redigerbare pointprofil.
-- Liga, schweizersystem, gruppespil + knockout og double elimination med frosne seeds og publicerede parringer.
-- Global cache-only kalender og validerede officielle Holdet-links.
-- Selvstændige manager- og sæsonrapporter, anonymiserede supportpakker, preview-baseret import, integritetsindeks, lagerinventar og manuel retention.
-- Loopback-only read-only API til Excel, Power BI og egne scripts samt valideret ZIP-backup og rollback-sikker gendannelse.
+- **Mine managerspil** viser aktive spil, konkurrencer, datadækning og kommende frister. Hvert spil har hovedfanerne **Overblik**, **Ligaer og turneringer** og **Spillere**.
+- **Opdater alle** indhenter data for aktive managerspil efter en pause. Vælg bestemte spil eller opdater én liga eller turnering; manglende og tidligere foreløbige afsluttede spillerunder indhentes, mens bekræftet historik genbruges.
+- Liga, schweizersystem, gruppespil + knockout og double elimination med frosne seeds og publicerede modstandere. Korrigerede resultater kan genberegnes uden at omskrive allerede publicerede opgør.
+- Spiller- og holdstatistik med spillerdetaljer, sammenligning, historik og intra-runde-ændringer. Avancerede filtre, kolonner og særskilte eksportformater findes ved tabellerne.
+- **Download JSON** samler alle spillere, scopets unikke hold, deres rundehistorik og konkurrencerne i én fil. Spillerhistorik pr. runde er et tilvalg, og tabelfiltre begrænser ikke eksporten. **Opdater før download** opdaterer først det samme scope og viser downloadknappen ved det færdige kørselsresultat.
+- En lokal kørselsjournal bevarer fremdrift og delresultater. En browsergenindlæsning kan tilslutte sig kørslen igen; stop og genoptagelse er eksplicitte handlinger.
+- Scouting og watchlists, statusalarmer, beslutningsanalyse og transferlaboratorium, Managers og sæsoner, kalender samt Rundens historie er seks valgfrie værktøjer. De starter deaktiveret og vælges under **Indstillinger**. Eksperimentelle fixture- og Monte Carlo-modeller kræver yderligere tilvalg.
+- Dataadministration med import, integritetskontrol, lageroverblik, ZIP-backup, sikker gendannelse og et lokalt read-only API til Excel, Power BI og egne scripts.
 
 ## Kom hurtigt i gang
 
-Projektet kræver Windows og Python 3.14. Kør fra repositoryets rod i PowerShell:
+Projektet kræver Windows og Python 3.14. Opret et separat miljø, og installer låsens præcise afhængigheder fra repositoryets rod i PowerShell:
 
 ```powershell
-py -3.14 .\scripts\install_locked_dependencies.py
-py -3.14 -m pip install --no-deps --no-build-isolation -e .
+py -3.14 -m venv .venv
+.\.venv\Scripts\python.exe .\scripts\install_locked_dependencies.py
+.\.venv\Scripts\python.exe -m pip install --no-deps --no-build-isolation --no-index -e .
 ```
 
 `pylock.toml` låser hele Windows/Python 3.14-miljøet, inklusive Parquet- og
 UI-testafhængigheder, til kontrollerede PyPI-wheels med SHA-256. Pips
 `lock`/`pylock.toml`-understøttelse er fortsat eksperimentel og platformsspecifik;
 installationsscriptet validerer derfor låsen og giver pip de eksakte wheel-URL'er
-og hashes. Låsen må kun opdateres på Windows med Python 3.14:
+og hashes. Brug samme `.venv`-interpreter til appen og testene. Genberegn kun
+låsen ved ændringer i afhængighederne på Windows med Python 3.14. Den låste
+installation omfatter også pip, så det samme miljø kan kontrollere og
+genberegne låsen:
 
 ```powershell
-py -3.14 .\scripts\refresh_dependency_lock.py
+.\.venv\Scripts\python.exe .\scripts\refresh_dependency_lock.py
 ```
 
+Start appen med:
+
 ```powershell
-py -3.14 -m streamlit run .\website\server.py
+.\start.ps1
+```
+
+Launcheren vælger altid projektets `.venv`, også hvis en ældre global
+`streamlit`-kommando ligger i din PATH. Den svarer til:
+
+```powershell
+.\.venv\Scripts\python.exe -m streamlit run .\website\server.py
 ```
 
 Åbn [http://localhost:8501](http://localhost:8501). Data hentes kun efter et eksplicit klik på en hente-, opdaterings- eller genopbygningshandling.
 
 ## Navigation
 
-Streamlit ejer routingen via `st.navigation`/`st.Page`, mens den dynamiske sidebar fortsat viser **Mine managerspil**, **Scouting**, statistikvisninger, aktive og arkiverede managerspil, **Managers**, **Kalender** og **Data og lager**. `/scouting?game=…&view=watchlist|smartlists|notes` er den globale cache-only indgang; kontekstuelle spillerfaner bevarer `panel=compare`, mens watchlist bruger `panel=watchlist`. Ulæste statusalarmer vises ved det relevante managerspil og i managerspillets egen **Statusalarmer**-fane. Gamle `?view=…`-links viderestilles; eksempelvis går `?view=hall-of-fame` til `/managers`.
+Start i **Mine managerspil**, åbn et spil, og vælg **Ligaer og turneringer** eller **Spillere**. **Overblik** samler konkurrencer og datastatus; **Datadetaljer og rundecenter** åbner de mere detaljerede previews og historiske visninger.
 
-Managers har fanerne Rangliste, Medaljer og rekorder, Sammenlign, Sæsoner og Identiteter. Kalenderen kan filtreres på managerspil og gruppe eller turnering. Gruppe-, hold- og managerkort viser officielle links, når de findes i cache eller konfiguration.
+Sidebaren prioriterer managerspillene og det åbne spils konkurrencer. **Værktøjer** indeholder selvstændig spiller- og holdstatistik samt de aktiverede globale tilvalg. **Flere funktioner** på managerspillet giver adgang til holdstatistik, historik, administration, spilindstillinger og aktiverede analyse- og alarmværktøjer. **Indstillinger** indeholder værktøjsvalg og indgangen til **Data, import og backup**.
 
-Et managerspil åbner i det cachebaserede Rundecenter. Se [Rundecenter og daglig arbejdsgang](docs/round-center.md) for opdaterings-preview, datastatus, afvigelser og historiske visninger.
+Deaktivering af et værktøj bevarer dets gemte data. Et eksisterende direkte link giver mulighed for **Åbn denne gang** uden at gemme et tilvalg. Arkiverede spil kan læses og eksporteres; hentning og redigering kræver gendannelse af spillet.
+
+Streamlit ejer routingen via `st.navigation`/`st.Page`. Eksisterende `section=round-center`, spillerpaneler og gamle `?view=…`-links bevares. Se [Navigation](docs/navigation.md) for den fulde kompatibilitetskontrakt og [Rundecenter og daglig arbejdsgang](docs/round-center.md) for opdatering efter en pause, afgrænsning, retry og historiske visninger.
 
 ## Dokumentation
 
@@ -76,22 +88,19 @@ Et managerspil åbner i det cachebaserede Rundecenter. Se [Rundecenter og daglig
 
 ## Lokal data og privatliv
 
-Personlige konti, profiler, grupper, sæsoner, noter, filtre, alarmer, snapshots, metadata, manager-events, importer, backups, rapporter og eksporter ligger uden for repositoryet under `%APPDATA%\Holdet Fantasy Hub` og `%LOCALAPPDATA%\Holdet Fantasy Hub`. Mapper oprettes først ved en eksplicit skrivehandling. Anonymiserede supportpakker er irreversible og markeret som ikke-gendannelige.
+Personlige konti, profiler, grupper, sæsoner, noter, filtre, alarmer, snapshots, metadata, kørselsjournaler, manager-events, importer, backups, rapporter og eksporter ligger uden for repositoryet under `%APPDATA%\Holdet Fantasy Hub` og `%LOCALAPPDATA%\Holdet Fantasy Hub`. Mapper oprettes først ved en eksplicit skrivehandling. Anonymiserede supportpakker er irreversible og markeret som ikke-gendannelige.
 
 Repositoryet må ikke indeholde virkelige profil-ID'er, fantasy-team-ID'er eller personlige holdnavne. Dokumentation og tests bruger fiktive identiteter.
 
 ## Verifikation
 
 ```powershell
-py -3.14 -m pytest tests -q
-py -3.14 -m pytest tests/ui -q --run-ui --browser chromium
-py -3.14 -m pytest tests/parser_canary -q --run-parser-canary
-py -3.14 -m pip check
-py -3.14 .\scripts\refresh_dependency_lock.py --check
+.\.venv\Scripts\python.exe -m pytest tests -q
+.\.venv\Scripts\python.exe -m pip check
 git diff --check
 ```
 
-Live-kontroller er opt-in og beskrevet i [Tests](docs/testing.md).
+Browser-, parser-canary- og afhængighedskontroller er beskrevet i [Tests](docs/testing.md). Canary-testene og genberegning af låsen, også med `--check`, bruger netværk og er særskilte tilvalg.
 
 ## Fejlfinding på port 8501
 

@@ -5,6 +5,8 @@ import re
 import tomllib
 from urllib.parse import urlsplit
 
+from scripts import refresh_dependency_lock
+
 
 PROJECT_ROOT = Path(__file__).parents[1]
 REQUIREMENT_NAME = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)")
@@ -34,19 +36,20 @@ def test_manifest_uses_audited_dependency_ranges() -> None:
     manifest = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     requirements = direct_requirements(manifest)
     assert requirements == {
-        "setuptools": "setuptools>=84,<85",
+        "pip": "pip>=26.2.2,<27",
+        "setuptools": "setuptools>=84.1,<85",
         "platformdirs": "platformdirs>=4.11.1,<5",
         "xlsxwriter": "xlsxwriter>=3.2.9,<4",
-        "streamlit": "streamlit>=1.61.1,<2",
+        "streamlit": "streamlit>=1.66.1,<2",
         "starlette": "starlette>=1.3.1,<1.4",
         "pandas": "pandas>=3.0.5,<4",
         "altair": "altair>=6.2.2,<7",
         "pyarrow": "pyarrow>=24,<25",
         "pytest": "pytest>=9.1.1,<10",
-        "httpx2": "httpx2>=2.10,<3",
+        "httpx2": "httpx2>=2.12,<3",
         "playwright": "playwright>=1.62,<2",
         "pytest-playwright": "pytest-playwright>=0.8,<1",
-        "pillow": "pillow>=12.3,<13",
+        "pillow": "pillow>=13,<14",
     }
 
 
@@ -76,3 +79,37 @@ def test_lock_covers_manifest_with_trusted_hashed_wheels() -> None:
     assert set(direct_requirements(manifest)) <= locked_names
     assert {"pandas", "altair", "httpx2"} <= locked_names
     assert {"httpx", "httpcore"}.isdisjoint(locked_names)
+
+
+def test_lock_check_preserves_locked_versions_and_does_not_rewrite(monkeypatch, tmp_path) -> None:
+    before = refresh_dependency_lock.LOCK_PATH.read_bytes()
+    lock = tomllib.loads(before.decode("utf-8"))
+    expected = {f"{item['name']}=={item['version']}" for item in lock["packages"]}
+    evidence = []
+
+    def resolve(_requirements, destination, *, constraints=None):
+        assert constraints is not None
+        assert set(constraints.read_text(encoding="utf-8").splitlines()) == expected
+        destination.write_bytes(before)
+
+    def reject_write(_content):
+        raise AssertionError("check rewrote lock")
+
+    monkeypatch.setattr(refresh_dependency_lock, "ensure_supported_runtime", lambda **_kwargs: None)
+    monkeypatch.setattr(refresh_dependency_lock.tempfile, "tempdir", str(tmp_path))
+    monkeypatch.setattr(refresh_dependency_lock, "generate_lock", resolve)
+    monkeypatch.setattr(
+        refresh_dependency_lock, "verify_pypi_artifacts",
+        lambda artifacts: evidence.append(("registry", len(artifacts))) or 0,
+    )
+    monkeypatch.setattr(
+        refresh_dependency_lock, "verify_osv",
+        lambda artifacts: evidence.append(("advisories", len(artifacts))),
+    )
+    monkeypatch.setattr(
+        refresh_dependency_lock, "replace_lock_atomically",
+        reject_write,
+    )
+    assert refresh_dependency_lock.run(check=True) == 0
+    assert evidence == [("registry", len(expected)), ("advisories", len(expected))]
+    assert refresh_dependency_lock.LOCK_PATH.read_bytes() == before

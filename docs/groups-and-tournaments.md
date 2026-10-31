@@ -50,7 +50,7 @@ Fælles kamppoint er som standard 3/1/0. Stillingen kan derefter bruge `score di
 
 Seedning kan være tilfældig, manuel eller Elo-baseret. Det konkrete seed-resultat og alle publicerede fixtures fryses på turneringsrevisionen. Senere Elo- eller datakorrektioner ændrer resultater, men aldrig allerede publicerede parringer.
 
-Ligaen bruger circle scheduling og blokerer flere kampe til samme deltager i én fantasy-runde. Swiss bruger som standard `ceil(log2(deltagere))` runder; næste parring må først publiceres efter eksplicit refresh af den foregående komplette runde. En Swiss-turnering kan først afsluttes, når alle konfigurerede runder er publiceret og komplette. Byen går deterministisk til den lavest rangerede deltager uden tidligere bye og tæller som en spillet sejr med turneringens konfigurerede sejrspoint, men først når runden er nået. Liga-byes giver ingen point.
+Ligaen bruger circle scheduling og blokerer flere kampe til samme deltager i én fantasy-runde. Bibliotekets standard for Swiss er `ceil(log2(deltagere))` runder; næste parring må først publiceres efter eksplicit refresh af den foregående komplette runde. Parringssøgningen prøver først at finde en plan helt uden gentagelser. Kun når søgningen har gennemgået mulighederne uden at finde en sådan plan, tillades gentagne opgør. Rammer søgningen sin grænse, afbrydes publiceringen med en fejl; tilpas turneringen eller opret en ny revision. En Swiss-turnering kan først afsluttes, når alle konfigurerede runder er publiceret og komplette. Byen går deterministisk til den lavest rangerede deltager uden tidligere bye og tæller som en spillet sejr med turneringens konfigurerede sejrspoint, men først når runden er nået. Liga-byes giver ingen point.
 
 Gruppespil + knockout understøtter 1–8 grupper, serpentine-seedning, gennemførlig kvalifikation og valgfri bronzekamp. Uden bronzekamp bestemmes bronze af den bedst rangerede tabende semifinalist. Double elimination understøtter op til 32 deltagere, byes og en reset-finale, når den ubesejrede finalist taber første finale.
 
@@ -60,7 +60,13 @@ Gruppespil + knockout understøtter 1–8 grupper, serpentine-seedning, gennemf�
 
 Indlæste Swiss-parringer kontekstvalideres mod gruppe, revision, rundeinterval og deltagere. Dubletter, mere end én bye eller mere end én kamp pr. deltager og runde afvises. Efter datakorrektioner genberegnes den forventede parring som en ren kontrol; en afvigelse vises som konflikt, mens den publicerede parring forbliver uændret.
 
-Schema 1–7 læses som `group_knockout` med én gruppe, eksisterende fixtures og seeds, de tidligere tie-breakers og ingen bronzekamp. Kompatibilitetswrapperne `create_tournament_config` og `build_tournament_state` bevares.
+Parringslagerets schema 2 gemmer konkrete knockout- og double-elimination-kampe med stabilt kamp-ID, deltagere, seeds, runder og deres kilder i bracketen. Den samme revisions publicerede kampe kan ikke overskrives. Efter en korrektion beregnes scoringerne for de gemte deltagere igen; hvis nye resultater ville have givet andre deltagere eller seeds, vises en konflikt, og de berørte efterfølgende opgør og mesteren blokeres, indtil turneringen får en ny revision. Parringslagerets schema 1 for Swiss læses fortsat. Da ældre Swiss-data ikke angiver parringsalgoritmen, accepterer konfliktkontrollen for alle Swiss-runder både den tidligere og den nuværende algoritmes udfald; en korrektion kan derfor undgå at blive markeret, hvis dens nye parring svarer til den anden algoritmes udfald.
+
+For en ældre knockoutturnering uden et parringslager etablerer en eksplicit opdatering først en baseline ud fra de eksisterende lokale snapshots, før nye data hentes. Der kan kun fastfryses kampe, hvis deltagere kan udledes af de snapshots; manglende historiske data kan ikke genskabe en tidligere vist parring. Selve visningen læser data og opretter ikke en baseline.
+
+En ulæselig eller modstridende gemt kampplan vises som **Afventer gennemgang**. Den bruges ikke til officielle stillinger, mestre, indbyrdes sejre eller turneringsawards. Rå holddata bevares. Et historisk slutpunkt skjuler deltagere, hvis kvalifikation først kan afgøres senere, og aktive/eliminerede hold følger de bekræftede, ikke-blokerede opgør.
+
+Gruppedefinitionens schema 1–7 læses som `group_knockout` med én gruppe, eksisterende fixtures og seeds, de tidligere tie-breakers og ingen bronzekamp. Kompatibilitetswrapperne `create_tournament_config` og `build_tournament_state` bevares.
 
 Turneringens faner tilpasses templaten. Overblik, Kampe og Historik bevares; standings og brackets vises kun, når de er relevante.
 
@@ -78,6 +84,6 @@ Grupper kan gemme en manuel `official_url` med typen `group` eller `minileague`.
 
 ## Opdatering
 
-**Opdater managerspil** henter den seneste spillerliste én gang og deduplikerer hold på tværs af grupper. Spiller- og holdfejl rapporteres separat. **Opdater turnering** henter alle deltagere, også eliminerede og afsluttede, så rettelser kan genberegnes. Begge handlinger følger rækkefølgen hent data, publicér højst næste Swiss-runde, genopbyg state og frys komplette events for det aktuelle managerspil. Resultatet gemmes som snapshots og et uforanderligt manifest; delvise fejl bruger seneste gyldige cache, når den findes.
+**Opdater managerspil** henter den seneste spillerliste én gang og deduplikerer hold på tværs af grupper. Spiller- og holdfejl rapporteres separat. **Opdater turnering** henter alle deltagere, også eliminerede og afsluttede, så rettelser kan genberegnes. Opdateringen etablerer først eventuelle legacy-baselines, henter data og publicerer derefter de runder, hvis forudgående runder er komplette, inden komplette events fryses for det aktuelle managerspil. Publicering af Swiss-runder er begrænset af turneringens konfigurerede sidste runde. Resultatet gemmes som snapshots og et uforanderligt manifest; delvise fejl bruger seneste gyldige cache, når den findes.
 
 Se [Analyse- og beslutningscenter](decision-analysis.md) for swing-, eksponerings- og provenancekontrakter.

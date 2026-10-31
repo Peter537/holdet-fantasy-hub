@@ -641,7 +641,7 @@ def build_manager_head_to_head(
 
     official: list[HeadToHeadMeeting] = []
     for group in group_tuple:
-        if group.tournament is None:
+        if group.tournament is None or group.tournament.pairing_error is not None:
             continue
         published_fixtures = (
             ()

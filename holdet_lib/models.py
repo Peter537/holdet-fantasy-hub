@@ -10,7 +10,7 @@ from urllib.parse import quote
 
 
 HOLDET_ORIGIN = "https://www.holdet.dk"
-SEASON_API_ROOT = f"{HOLDET_ORIGIN}/api/season"
+SEASON_API_ROOT = f"{HOLDET_ORIGIN}/api/fantasy"
 RoundStatus = Literal["complete", "in_progress", "unknown"]
 
 

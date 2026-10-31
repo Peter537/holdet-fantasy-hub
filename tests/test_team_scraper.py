@@ -340,7 +340,7 @@ class TeamServiceAndOutputTests(unittest.TestCase):
             "https://www.holdet.dk/da/season/tour-de-france-2026": variant_html("cycling"),
             f"https://www.holdet.dk/da/season/tour-de-france-2026/cycling/fantasyteams/{FICTIONAL_TEAM_ID}": team_page_html(),
         }
-        base = "https://www.holdet.dk/api/season"
+        base = "https://www.holdet.dk/api/fantasy"
         json_data = {
             f"{base}/cartridges/{game.slug}": cartridge_payload(),
             f"{base}/fantasyteams/{FICTIONAL_TEAM_ID}/history": history_payload(),
@@ -486,7 +486,7 @@ class GameInfoTests(unittest.TestCase):
         )
         cartridge = cartridge_payload()
         cartridge["_embedded"]["games"]["7"]["scheduleId"] = 623
-        base = "https://www.holdet.dk/api/season"
+        base = "https://www.holdet.dk/api/fantasy"
         calls: list[str] = []
 
         def fetch_json(url: str):

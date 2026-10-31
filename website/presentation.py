@@ -297,8 +297,8 @@ def data_status_label(value: object) -> str:
 def next_schedule_action(
     metadata: Any | None, *, now: datetime | None = None
 ) -> str | None:
-    if metadata is None:
-        return None
+    if metadata is None or not metadata.rounds:
+        return "Tidsplan er ikke verificeret"
     current = _local(now or datetime.now().astimezone())
     open_rounds = tuple(
         round_item
@@ -321,7 +321,12 @@ def next_schedule_action(
     if future_starts:
         start = min(future_starts, key=_instant)
         return f"Handel åbner {format_relative_precise(start, now=current)}"
-    return None
+    active = tuple(item for item in metadata.rounds if _instant(item.close) <= _instant(current) < _instant(item.end))
+    if active:
+        return "Runden er i gang · handel er lukket"
+    if all(_instant(item.end) <= _instant(current) for item in metadata.rounds):
+        return "Spillet er afsluttet"
+    return "Ingen kommende handelsfrist"
 
 
 def sport_label(slug: str) -> str:

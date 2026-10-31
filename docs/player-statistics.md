@@ -6,7 +6,7 @@ Spillerstatistik kan bruges på `/players`, i et managerspil eller fra den globa
 
 `/scouting?locale=…&game=…&view=watchlist|smartlists|notes` samler Watchlist, Smartlister og Noter på tværs af spil. En spillerrute bruger `/player?locale=…&game=…&player=…`; tabeller linker direkte dertil med den stabile spilleridentitet.
 
-Spillerstatistikken har fem lazy-loadede paneler:
+Spillerstatistikken har tre grundpaneler og to valgfrie, lazy-loadede scoutingpaneler:
 
 - **Spillerliste**: filtre, multi-row bulkhandlinger og eksport;
 - **Scouting**: percentiler, potentiale/risiko, ownership og scatterplots;
@@ -14,7 +14,11 @@ Spillerstatistikken har fem lazy-loadede paneler:
 - **Watchlist**: begrundelser, regler og dataprovenance;
 - **Ændringer**: **Mellem hentninger** eller **Mellem runder**.
 
-`panel=compare` er fortsat gyldigt. Watchlist-deeplinks bruger `panel=watchlist`. Den nyeste kompatible cache vises straks. En fælles rundevælger ændrer ikke cache og starter ikke netværk.
+**Spillerliste**, **Sammenligning** og **Ændringer** vises som standard. Scouting og Watchlist tilvælges under **Indstillinger → Valgfrie værktøjer**; eksisterende deeplinks giver også mulighed for at åbne værktøjet denne gang uden at ændre gemte præferencer.
+
+Listen viser som standard otte kolonner. Søgning, position, maksimumpris og sortering er direkte tilgængelige; øvrige filtre, kolonnevalg, profiler og formler findes under **Flere filtre og kolonner**. Beregnede nøgletal sorteres numerisk med manglende værdier sidst. Foreløbige og ukendte observationer bevarer deres status i nøgletal og grafer; en højere runde erstattes ikke af en senere hentning af en lavere runde.
+
+`panel=compare` er fortsat gyldigt. Watchlist-deeplinks bruger `panel=watchlist`. Den nyeste kompatible cache vises straks. En fælles rundevælger ændrer ikke cache og starter ikke netværk. Spillerdetaljens links medtager den valgte runde og hentetid, så værdier og beregnede nøgletal bruger samme historiske grundlag som listen. En spiller, der er forsvundet fra det valgte snapshot, vises med en tydeligt markeret sidst kendt observation.
 
 ## Watchlist og bulkhandlinger
 
@@ -31,7 +35,7 @@ Schema 1–3-watchlister får statusændring som standard ved in-memory-migratio
 
 Spillerlisten og Scouting understøtter atomiske bulkhandlinger: tilføj/fjern watchlist, tilføj/fjern tags, sæt/ryd begrundelser og sæt/ryd regler. Alle valgte spillere valideres før én samlet save; en ugyldig spiller eller grænse giver ingen delvis write.
 
-Alarmer oprettes kun efter en eksplicit aktuel spiller- eller managerspilopdatering. Historisk backfill opretter ikke aktuelle alarmer. Event-ID'et indeholder regel, forrige og nuværende snapshottidspunkt samt overgang, så to reelle hændelser i samme runde ikke deduplikeres sammen. Alarmvisning, filtrering og navigation er cache-only; læst, afvist og rydning er eksplicitte writes.
+Alarmer oprettes kun efter en eksplicit aktuel spiller- eller managerspilopdatering, når Statusalarmer er aktiveret i Indstillinger. Historisk backfill opretter ikke aktuelle alarmer. Event-ID'et indeholder regel, forrige og nuværende snapshottidspunkt samt overgang, så to reelle hændelser i samme runde ikke deduplikeres sammen. Alarmvisning, filtrering og navigation er cache-only; læst, afvist og rydning er eksplicitte writes.
 
 ## Smartlister og global notesøgning
 
@@ -99,10 +103,12 @@ Spillersnapshot schema 4 bevarer valgfrie `popularity`, `popularity_change`, `tr
 
 Form 3/5 bruger nyeste afsluttede observation pr. runde; huller interpoleres ikke. Spillersnapshots bevarer derimod hver immutable hentning, så intra-runde-diff ikke mister observationer.
 
-Filtre påvirker kun den viste og eksporterede tabel. Numeriske felter forbliver tal; manglende værdier vises `–`. Eksport kan oprettes som TXT, JSON, Markdown, CSV, XLSX eller valgfri Parquet under:
+Filtre påvirker kun den viste og eksporterede tabel. Tabeleksporten følger den valgte sortering og gemmer den anvendte rækkefølge i eksportmetadata. Numeriske felter forbliver tal; manglende værdier vises `–`. Eksport kan oprettes som TXT, JSON, Markdown, CSV, XLSX eller valgfri Parquet under:
 
 ```text
 %LOCALAPPDATA%\Holdet Fantasy Hub\exports\players\<game-slug>\data-round<round>_<MMDD>_<HHmmss>[_N].<format>
 ```
+
+Spillets eller konkurrencens **Download JSON** er en særskilt samlet eksport med hele spillerkataloget, scopets hold og konkurrencer, uafhængigt af tabelfiltre. Spillerhistorik pr. runde kan tilvælges. Se [Dataportabilitet](data-portability.md) for kontrakten.
 
 Se [Analyse- og beslutningscenter](decision-analysis.md) for de øvrige analysekontrakter, [Datahentning](data-retrieval.md) for kildefelterne og [Datalagring](data-storage.md) for migration og backup.

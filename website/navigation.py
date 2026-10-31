@@ -21,6 +21,7 @@ class PageId(StrEnum):
     MANAGERS = "managers"
     CALENDAR = "calendar"
     DATA = "data"
+    SETTINGS = "settings"
     GAME = "game"
     GROUP = "group"
     TEAM = "team"
@@ -50,6 +51,7 @@ PAGE_SPECS = (
     PageSpec(PageId.MANAGERS, "managers.py", "Managers", ":material/military_tech:", "managers"),
     PageSpec(PageId.CALENDAR, "calendar.py", "Kalender", ":material/calendar_month:", "calendar"),
     PageSpec(PageId.DATA, "data.py", "Data og lager", ":material/database:", "data"),
+    PageSpec(PageId.SETTINGS, "settings.py", "Indstillinger", ":material/settings:", "settings"),
     PageSpec(PageId.GAME, "game.py", "Managerspil", ":material/sports_soccer:", "game", hidden=True),
     PageSpec(PageId.GROUP, "group.py", "Gruppe", ":material/leaderboard:", "group", hidden=True),
     PageSpec(PageId.TEAM, "team.py", "Hold", ":material/group:", "team", hidden=True),
@@ -70,6 +72,7 @@ _LEGACY_VIEWS = {
     "hall-of-fame": PageId.MANAGERS,
     "calendar": PageId.CALENDAR,
     "data": PageId.DATA,
+    "settings": PageId.SETTINGS,
     "game": PageId.GAME,
     "group": PageId.GROUP,
     "team": PageId.TEAM,

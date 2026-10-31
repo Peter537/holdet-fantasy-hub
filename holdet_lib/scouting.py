@@ -241,7 +241,7 @@ def _raw_metrics(
     game = latest.statistics.game
     latest_entries = _entry_map(latest)
     completed: dict[str, dict[int, int]] = {key: {} for key in latest_entries}
-    for snapshot in sorted(index.for_game(game), key=lambda item: item.generated_at):
+    for snapshot in index.per_round(game):
         if snapshot.statistics.round_status != "complete":
             continue
         for key, entry in _entry_map(snapshot).items():
@@ -313,10 +313,13 @@ def build_scouting_metrics(
     game: GameUrl,
     *,
     own_team_player_keys: frozenset[str] | None = None,
+    round_number: int | None = None,
+    generated_at: datetime | None = None,
 ) -> tuple[PlayerScoutingMetrics, ...]:
-    """Build all position-relative metrics from the newest cached snapshot."""
+    """Build position-relative metrics in an inclusive round/fetch context."""
 
-    latest = index.newest(game)
+    index = index.through(game, round_number=round_number, generated_at=generated_at)
+    latest = index.latest_round(game)
     if latest is None:
         return ()
     raw = _raw_metrics(index, latest)

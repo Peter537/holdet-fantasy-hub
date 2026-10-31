@@ -12,9 +12,10 @@ import shutil
 from uuid import uuid4
 import zipfile
 
+from .errors import PayloadError
 from .paths import AppPaths
 from .persistence import aware_local
-from .storage import PlayerStatisticsStore, SnapshotStore
+from .storage import ManifestStore, PlayerStatisticsStore, SnapshotStore
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,6 +139,69 @@ def _sha256(path: Path) -> str:
     return hasher.hexdigest()
 
 
+def _protected_snapshot_paths(
+    paths: AppPaths, player_index, team_index
+) -> tuple[set[Path], tuple[str, ...]]:
+    """Keep manifest provenance and inputs needed by unfinished alert retries."""
+    protected: set[Path] = set()
+    warnings: list[str] = []
+    all_snapshots = (*player_index.snapshots, *team_index.snapshots)
+    run_root = paths.data_dir / "refresh-runs"
+    if run_root.exists():
+        from .refresh_runs import RefreshRunCoordinator
+
+        try:
+            if not run_root.is_dir():
+                raise OSError("Opdateringsjournalens placering er ikke en mappe")
+            runs, run_warnings = RefreshRunCoordinator(
+                run_root, lambda *_args, **_kwargs: None
+            ).scan_runs()
+        except OSError as exc:
+            warnings.append(f"Opdateringsjournalen kan ikke læses: {exc}; snapshots bevares")
+            return {item.path.resolve() for item in all_snapshots}, tuple(warnings)
+        unfinished = any(
+            run["status"] != "success" or not run["games"]
+            or any(game["status"] != "success" for game in run["games"])
+            for run in runs
+        )
+        if run_warnings or unfinished:
+            warnings.extend(run_warnings)
+            warnings.append("En opdateringsjournal er uafsluttet eller ulæselig; snapshots bevares")
+            return {item.path.resolve() for item in all_snapshots}, tuple(warnings)
+    store = ManifestStore(paths.manifest_dir)
+    if not paths.manifest_dir.exists():
+        return protected, ()
+    for path in paths.manifest_dir.rglob("refresh-round*.json"):
+        try:
+            manifest = store.load(path)
+        except (OSError, ValueError, PayloadError) as exc:
+            # An unreadable manifest can contain references we cannot identify.
+            warnings.append(f"{path.name}: {exc}; snapshots bevares")
+            return {item.path.resolve() for item in all_snapshots}, tuple(warnings)
+        if manifest.schema_version == 1 or any(
+            step.source == "postprocess" and step.retryable
+            for step in manifest.steps
+        ):
+            # Legacy paths are not normalized; alert retries need the referenced
+            # transition and its predecessors, including same-round captures.
+            protected.update(
+                item.path.resolve()
+                for item in all_snapshots
+                if (item.identity[1] == manifest.game_slug and (
+                    not manifest.game_locale
+                    or item.identity[0] == manifest.game_locale.casefold()
+                ))
+            )
+        for step in manifest.steps:
+            for reference in (step.data_reference, step.cache_reference):
+                if not reference or not reference.startswith("snapshots/"):
+                    continue
+                target = (paths.data_dir / reference).resolve()
+                if target.is_relative_to(paths.snapshot_dir.resolve()):
+                    protected.add(target)
+    return protected, tuple(warnings)
+
+
 def plan_snapshot_retention(paths: AppPaths) -> RetentionPlan:
     """Select only older valid snapshots, keeping one newest per round."""
 
@@ -145,6 +209,7 @@ def plan_snapshot_retention(paths: AppPaths) -> RetentionPlan:
     retained: list[Path] = []
     player_index = PlayerStatisticsStore(paths.snapshot_dir).scan()
     team_index = SnapshotStore(paths.snapshot_dir).scan()
+    protected, manifest_warnings = _protected_snapshot_paths(paths, player_index, team_index)
 
     player_groups: dict[tuple[str, str, int], list[object]] = {}
     for snapshot in player_index.snapshots:
@@ -158,6 +223,9 @@ def plan_snapshot_retention(paths: AppPaths) -> RetentionPlan:
         retained.append(ordered[0].path)
         for snapshot in ordered[1:]:
             path = snapshot.path.resolve()
+            if path in protected:
+                retained.append(path)
+                continue
             candidates.append(
                 RetentionCandidate(
                     path,
@@ -190,6 +258,9 @@ def plan_snapshot_retention(paths: AppPaths) -> RetentionPlan:
         retained.append(ordered[0].path)
         for snapshot in ordered[1:]:
             path = snapshot.path.resolve()
+            if path in protected:
+                retained.append(path)
+                continue
             candidates.append(
                 RetentionCandidate(
                     path,
@@ -206,7 +277,7 @@ def plan_snapshot_retention(paths: AppPaths) -> RetentionPlan:
     return RetentionPlan(
         tuple(candidates),
         tuple(sorted(set(path.resolve() for path in retained), key=str)),
-        tuple((*player_index.warnings, *team_index.warnings)),
+        tuple((*player_index.warnings, *team_index.warnings, *manifest_warnings)),
     )
 
 
@@ -242,6 +313,21 @@ def archive_retention_candidates(
 ) -> ArchiveResult:
     """Archive, validate, then remove only the explicitly selected sources."""
 
+    from .refresh_runs import exclusive_data_operation
+
+    with exclusive_data_operation(paths.data_dir):
+        return _archive_retention_candidates_locked(
+            paths, candidates, destination=destination, now=now
+        )
+
+
+def _archive_retention_candidates_locked(
+    paths: AppPaths,
+    candidates: tuple[RetentionCandidate, ...],
+    *,
+    destination: Path | str | None,
+    now: datetime | None,
+) -> ArchiveResult:
     if not candidates:
         raise ValueError("Vælg mindst én retentionkandidat")
     snapshot_root = paths.snapshot_dir.resolve()
@@ -315,8 +401,17 @@ def archive_retention_candidates(
         temporary.unlink(missing_ok=True)
     removed = 0
     errors: list[str] = []
+    still_candidates = {
+        candidate.path.resolve() for candidate in plan_snapshot_retention(paths).candidates
+    }
     for candidate in candidates:
         try:
+            if candidate.path.resolve() not in still_candidates:
+                errors.append(f"{candidate.path.name}: snapshot er nu nødvendigt og blev bevaret")
+                continue
+            if candidate.path.stat().st_size != candidate.size or _sha256(candidate.path) != candidate.sha256:
+                errors.append(f"{candidate.path.name}: filen er ændret og blev bevaret")
+                continue
             candidate.path.unlink()
             removed += 1
         except OSError as exc:
@@ -325,6 +420,47 @@ def archive_retention_candidates(
 
 
 def list_cleanup_candidates(paths: AppPaths) -> tuple[CleanupCandidate, ...]:
+    # Old retention archives can contain a manifest's only remaining copy.
+    # Do not offer such archives for deletion, including when provenance cannot
+    # be established from legacy, incomplete or unreadable records.
+    players = PlayerStatisticsStore(paths.snapshot_dir).scan()
+    teams = SnapshotStore(paths.snapshot_dir).scan()
+    protected, warnings = _protected_snapshot_paths(paths, players, teams)
+    preserve_archives = bool(warnings)
+    if paths.manifest_dir.exists():
+        manifest_store = ManifestStore(paths.manifest_dir)
+        for manifest_path in paths.manifest_dir.rglob("refresh-round*.json"):
+            try:
+                manifest = manifest_store.load(manifest_path)
+            except (OSError, ValueError, PayloadError):
+                preserve_archives = True
+                break
+            if manifest.schema_version == 1 or any(
+                step.source == "postprocess" and step.retryable
+                for step in manifest.steps
+            ):
+                preserve_archives = True
+                break
+
+    def archive_deletable(path: Path) -> bool:
+        if preserve_archives:
+            return False
+        try:
+            with zipfile.ZipFile(path) as archive:
+                payload = json.loads(archive.read("archive-manifest.json"))
+                files = payload.get("files") if isinstance(payload, dict) else None
+                if not isinstance(files, list) or payload.get("schema_version") != 1:
+                    return False
+                for entry in files:
+                    if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
+                        return False
+                    target = (paths.data_dir / entry["path"]).resolve()
+                    if not target.is_relative_to(paths.snapshot_dir.resolve()) or target in protected:
+                        return False
+        except (OSError, ValueError, KeyError, zipfile.BadZipFile):
+            return False
+        return True
+
     roots = (
         (paths.player_export_dir, "Afledt spillereksport"),
         (paths.team_export_dir, "Afledt holdeksport"),
@@ -334,6 +470,8 @@ def list_cleanup_candidates(paths: AppPaths) -> tuple[CleanupCandidate, ...]:
     result: list[CleanupCandidate] = []
     for root, category in roots:
         for path in _files(root):
+            if root == paths.archive_dir and not archive_deletable(path):
+                continue
             stat = path.stat()
             result.append(
                 CleanupCandidate(
@@ -363,6 +501,13 @@ def list_cleanup_candidates(paths: AppPaths) -> tuple[CleanupCandidate, ...]:
 def delete_derived_files(paths: AppPaths, selected: tuple[Path, ...]) -> tuple[Path, ...]:
     """Delete only exact files under the explicitly allowed derived roots."""
 
+    from .refresh_runs import exclusive_data_operation
+
+    with exclusive_data_operation(paths.data_dir):
+        return _delete_derived_files_locked(paths, selected)
+
+
+def _delete_derived_files_locked(paths: AppPaths, selected: tuple[Path, ...]) -> tuple[Path, ...]:
     resolved = tuple(dict.fromkeys(Path(path).resolve() for path in selected))
     allowed = {candidate.path.resolve() for candidate in list_cleanup_candidates(paths)}
     for path in resolved:

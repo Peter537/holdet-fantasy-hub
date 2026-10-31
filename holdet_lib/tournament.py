@@ -28,6 +28,12 @@ STAGE_NAMES = {
     2: "Finale",
 }
 
+_SWISS_PAIRING_SEARCH_LIMIT = 200_000
+
+
+class SwissPairingSearchLimitError(PayloadError):
+    """The search ended before absence of a rematch-free plan was proved."""
+
 
 @dataclass(frozen=True, slots=True)
 class GroupFixture:
@@ -39,6 +45,22 @@ class GroupFixture:
     @property
     def is_bye(self) -> bool:
         return self.team_b_id is None
+
+
+@dataclass(frozen=True, slots=True)
+class PublishedKnockoutMatch:
+    """Concrete fixture and its bracket provenance, frozen for one revision."""
+
+    match_id: str
+    stage: str
+    match_index: int
+    round_numbers: tuple[int, ...]
+    team_a_id: int | None
+    team_b_id: int | None
+    team_a_seed: int | None
+    team_b_seed: int | None
+    source_a: str
+    source_b: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,6 +87,11 @@ class TournamentConfig:
     group_count: int = 1
     qualifiers_per_group: int | None = None
     bronze_match: bool = False
+    # Runtime context loaded separately from the group definition. None denotes
+    # a legacy tournament for which no baseline has been explicitly published.
+    published_matches: tuple[PublishedKnockoutMatch, ...] | None = None
+    # A read-time verification error; never persisted in the tournament definition.
+    pairing_error: str | None = None
 
     @property
     def knockout_stage_count(self) -> int:
@@ -90,7 +117,7 @@ class GroupMatch:
 
 @dataclass(frozen=True, slots=True)
 class TournamentStanding:
-    rank: int
+    rank: int | None
     team_id: int
     team_name: str
     owner_name: str
@@ -123,6 +150,12 @@ class KnockoutMatch:
     team_b_change: int | None
     winner_id: int | None
     complete: bool
+    match_id: str = ""
+    source_a: str = ""
+    source_b: str = ""
+    published: bool = False
+    conflict: bool = False
+    blocked: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,6 +169,7 @@ class TournamentState:
     eliminated_team_ids: frozenset[int]
     champion_id: int | None
     warnings: tuple[str, ...]
+    pairing_conflicts: tuple[str, ...] = ()
 
     @property
     def next_matches(self) -> tuple[GroupMatch | KnockoutMatch, ...]:
@@ -173,6 +207,7 @@ class HeadToHeadMatch:
     winner_id: int | None
     complete: bool
     advanced_by_seed_id: int | None = None
+    blocked: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -795,7 +830,7 @@ def _knockout(
     return tuple(result)
 
 
-def build_tournament_state(
+def _build_unprotected_tournament_state(
     group: GroupDefinition, snapshots: SnapshotIndex, as_of_round: int
 ) -> TournamentState:
     if group.kind != "tournament" or group.tournament is None:
@@ -863,6 +898,304 @@ def build_tournament_state(
     )
 
 
+def _knockout_layout(config: TournamentConfig) -> tuple[PublishedKnockoutMatch, ...]:
+    """Describe stable match identities and sources, without deciding entrants."""
+    layout: list[PublishedKnockoutMatch] = []
+    if config.template == "group_knockout":
+        order = bracket_seed_order(config.knockout_size)
+        previous = [f"seed:{seed}" for seed in order]
+        semifinals: list[str] = []
+        for stage, rounds, count in _stage_specs(config):
+            current: list[str] = []
+            for index in range(1, count + 1):
+                match_id = f"K{count * 2}-{index}"
+                layout.append(PublishedKnockoutMatch(
+                    match_id, stage, index, rounds, None, None, None, None,
+                    previous[(index - 1) * 2], previous[(index - 1) * 2 + 1],
+                ))
+                current.append(f"winner:{match_id}")
+                if stage == "Semifinaler":
+                    semifinals.append(match_id)
+            previous = current
+        if config.bronze_match and len(semifinals) == 2:
+            layout.append(PublishedKnockoutMatch(
+                "BRONZE", "Bronzekamp", 1, _stage_specs(config)[-1][1],
+                None, None, None, None,
+                f"loser:{semifinals[0]}", f"loser:{semifinals[1]}",
+            ))
+    elif config.template == "double_elimination":
+        abstract = build_double_elimination_bracket(len(config.seed_order))
+        levels = _double_elimination_levels(abstract)
+        for item in abstract:
+            first_round = config.start_round + (levels[item.match_id] - 1) * config.rounds_per_tie
+            rounds = tuple(range(first_round, first_round + config.rounds_per_tie))
+            stage = (
+                f"Vinderbracket · runde {item.bracket_round}" if item.bracket == "winners"
+                else f"Taberbracket · runde {item.bracket_round}" if item.bracket == "losers"
+                else "Finale"
+            )
+            index = int(item.match_id.rsplit("-", 1)[1]) if "-" in item.match_id else item.bracket_round
+            layout.append(PublishedKnockoutMatch(
+                item.match_id, stage, index, rounds, None, None, None, None,
+                item.source_a or (f"seed:{item.team_a_seed}" if item.team_a_seed is not None else "bye"),
+                item.source_b or (f"seed:{item.team_b_seed}" if item.team_b_seed is not None else "bye"),
+            ))
+    return tuple(layout)
+
+
+def published_knockout_candidates(
+    group: GroupDefinition, snapshots: SnapshotIndex, as_of_round: int,
+) -> tuple[PublishedKnockoutMatch, ...]:
+    """Return ready concrete fixtures for explicit publication, without writing.
+
+    For a legacy revision call this before fetching corrections, after the user
+    explicitly elects to establish a baseline. Never call it to infer a legacy
+    baseline from newly fetched data.
+    """
+    config = group.tournament
+    if config is None or config.template not in {"group_knockout", "double_elimination"}:
+        return ()
+    if config.pairing_error is not None:
+        raise PayloadError(config.pairing_error)
+    if config.published_matches is not None:
+        protected = build_tournament_state(group, snapshots, as_of_round)
+        if protected.pairing_conflicts:
+            raise PayloadError("Publicerede knockoutkampe er i konflikt; opret en ny revision")
+    raw_group = replace(group, tournament=replace(config, published_matches=None))
+    state = _build_unprotected_tournament_state(raw_group, snapshots, as_of_round)
+    by_key = {(m.stage, m.match_index, m.round_numbers): m for m in state.knockout_matches}
+    result: list[PublishedKnockoutMatch] = []
+    for slot in _knockout_layout(config):
+        match = by_key.get((slot.stage, slot.match_index, slot.round_numbers))
+        if match is None or match.team_a_id is None and match.team_a_seed is not None:
+            continue
+        if match.team_a_id is None or match.team_b_id is None:
+            # Only a structurally known bye is publishable, not an unresolved source.
+            if not match.complete or match.winner_id is None:
+                continue
+        result.append(replace(
+            slot, team_a_id=match.team_a_id, team_b_id=match.team_b_id,
+            team_a_seed=match.team_a_seed, team_b_seed=match.team_b_seed,
+        ))
+    return tuple(result)
+
+
+def build_tournament_state(
+    group: GroupDefinition, snapshots: SnapshotIndex, as_of_round: int
+) -> TournamentState:
+    """Build state purely; when supplied, published fixtures are authoritative."""
+    state = _build_unprotected_tournament_state(group, snapshots, as_of_round)
+    config = group.tournament
+    if config is not None and config.pairing_error is not None:
+        return replace(
+            state,
+            phase="Afventer gennemgang",
+            group_matches=tuple(replace(m, winner_id=None, complete=False) for m in state.group_matches),
+            knockout_matches=tuple(replace(m, winner_id=None, complete=False, blocked=True) for m in state.knockout_matches),
+            standings=tuple(replace(
+                row, rank=None, played=0, wins=0, draws=0, losses=0, growth_for=0,
+                growth_against=0, growth_difference=0, points=0,
+                head_to_head_points=0, buchholz=0,
+            ) for row in sorted(state.standings, key=lambda row: (row.group_index, row.team_id))),
+            active_team_ids=frozenset(), eliminated_team_ids=frozenset(), champion_id=None,
+            warnings=(*state.warnings, config.pairing_error),
+        )
+    if config is None or config.published_matches is None or config.template not in {"group_knockout", "double_elimination"}:
+        return state
+    layout = _knockout_layout(config)
+    slots = {item.match_id: item for item in layout}
+    frozen = {item.match_id: item for item in config.published_matches}
+    if len(frozen) != len(config.published_matches) or not set(frozen) <= set(slots):
+        raise PayloadError("Ugyldige publicerede knockoutkampe")
+    expected = {(m.stage, m.match_index, m.round_numbers): m for m in state.knockout_matches}
+    _, names, _ = _member_maps(group, snapshots)
+    resolved: dict[str, KnockoutMatch] = {}
+    conflicts: list[str] = []
+    for slot in layout:
+        match = expected.get((slot.stage, slot.match_index, slot.round_numbers))
+        published = frozen.get(slot.match_id)
+        if published is None and match is None:
+            continue
+        dependency_blocked = any(
+            source.split(":", 1)[1] not in resolved
+            or resolved[source.split(":", 1)[1]].blocked
+            or not resolved[source.split(":", 1)[1]].complete
+            for source in (slot.source_a, slot.source_b)
+            if source.startswith(("winner:", "loser:"))
+        )
+        if config.template == "group_knockout" and match is None and (
+            slot.source_a.startswith("seed:") or slot.source_b.startswith("seed:")
+        ):
+            dependency_blocked = True
+        direct_conflict = bool(
+            published is not None and match is not None
+            and (match.complete or match.team_a_id is not None and match.team_b_id is not None)
+            and (published.team_a_id, published.team_b_id, published.team_a_seed, published.team_b_seed)
+            != (match.team_a_id, match.team_b_id, match.team_a_seed, match.team_b_seed)
+            and not dependency_blocked
+        )
+        # A previously published reset no longer exists if the corrected GF1
+        # winner is the undefeated finalist.
+        if published is not None and match is None and slot.match_id == "GF2" and not dependency_blocked:
+            direct_conflict = True
+        if direct_conflict:
+            conflicts.append(slot.match_id)
+        blocked = dependency_blocked or direct_conflict or published is None
+        if published is None:
+            assert match is not None
+            if match.complete and match.team_a_id is None and match.team_b_id is None and not dependency_blocked:
+                # An empty branch in an uneven double-elimination bracket is
+                # structural, not a concrete fixture requiring publication.
+                resolved[slot.match_id] = replace(
+                    match, match_id=slot.match_id, source_a=slot.source_a, source_b=slot.source_b,
+                )
+                continue
+            resolved[slot.match_id] = replace(
+                match, match_id=slot.match_id, source_a=slot.source_a, source_b=slot.source_b,
+                winner_id=None, complete=False, blocked=True,
+            )
+            continue
+        a, b = published.team_a_id, published.team_b_id
+        a_total: int | None = 0 if a is not None else None
+        b_total: int | None = 0 if b is not None else None
+        winner: int | None = None
+        complete = False
+        if a is None or b is None:
+            complete = True
+            winner = a if a is not None else b
+        else:
+            for round_number in slot.round_numbers:
+                av = _change(snapshots, group.game, a, round_number) if round_number <= as_of_round else None
+                bv = _change(snapshots, group.game, b, round_number) if round_number <= as_of_round else None
+                if av is None or bv is None:
+                    a_total = b_total = None
+                    break
+                assert a_total is not None and b_total is not None
+                a_total += av; b_total += bv
+            complete = a_total is not None and b_total is not None
+            if complete:
+                assert a_total is not None and b_total is not None
+                if a_total != b_total:
+                    winner = a if a_total > b_total else b
+                else:
+                    winner = resolve_knockout_tie(
+                        config, snapshots, group.game, a, b,
+                        published.team_a_seed or 10**9, published.team_b_seed or 10**9,
+                        slot.round_numbers[-1],
+                    )
+        resolved[slot.match_id] = KnockoutMatch(
+            slot.stage, slot.match_index, slot.round_numbers, a, b,
+            names.get(a), names.get(b), published.team_a_seed, published.team_b_seed,
+            a_total, b_total, winner if not blocked else None, complete and not blocked,
+            slot.match_id, slot.source_a, slot.source_b, True, direct_conflict, blocked,
+        )
+    matches = tuple(resolved[item.match_id] for item in layout if item.match_id in resolved)
+    expected_finals = [
+        item for item in layout
+        if item.stage == "Finale" and (item.stage, item.match_index, item.round_numbers) in expected
+    ]
+    final = resolved.get(expected_finals[-1].match_id) if expected_finals else None
+    champion = state.champion_id if final is not None and final.complete and final.winner_id == state.champion_id else None
+    standings = state.standings
+    if config.template == "double_elimination" and champion is None:
+        # Do not display the unprotected bracket's hypothetical outcomes as
+        # official standings when published predecessors are blocked.
+        stats = {row.team_id: [0, 0, 0, 0] for row in standings}
+        for match in matches:
+            if not match.complete or match.team_a_id is None or match.team_b_id is None:
+                continue
+            assert match.winner_id is not None and match.team_a_change is not None and match.team_b_change is not None
+            loser = match.team_b_id if match.winner_id == match.team_a_id else match.team_a_id
+            stats[match.winner_id][0] += 1
+            stats[loser][1] += 1
+            stats[match.team_a_id][2] += match.team_a_change
+            stats[match.team_a_id][3] += match.team_b_change
+            stats[match.team_b_id][2] += match.team_b_change
+            stats[match.team_b_id][3] += match.team_a_change
+        win_points, _, loss_points = config.match_points
+        updated = [replace(
+            row, played=stats[row.team_id][0] + stats[row.team_id][1],
+            wins=stats[row.team_id][0], losses=stats[row.team_id][1], draws=0,
+            growth_for=stats[row.team_id][2], growth_against=stats[row.team_id][3],
+            growth_difference=stats[row.team_id][2] - stats[row.team_id][3],
+            points=stats[row.team_id][0] * win_points + stats[row.team_id][1] * loss_points,
+        ) for row in standings]
+        updated.sort(key=lambda row: (
+            row.losses >= 2, row.losses, -row.wins, -row.growth_difference, row.entry_seed, row.team_id,
+        ))
+        standings = tuple(replace(row, rank=index) for index, row in enumerate(updated, 1))
+    warnings = state.warnings
+    if conflicts:
+        warnings += ("Publicerede knockoutkampe afviger fra korrigerede resultater: " + ", ".join(conflicts),)
+    if any(not item.published and (item.team_a_id is not None or item.team_b_id is not None) for item in matches):
+        warnings += ("Knockoutkampe afventer publicering",)
+
+    eliminated: set[int] = set()
+    if config.template == "group_knockout":
+        first_stage = tuple(
+            resolved[slot.match_id]
+            for slot in layout
+            if slot.source_a.startswith("seed:") and slot.source_b.startswith("seed:")
+            and slot.match_id in resolved
+        )
+        expected_count = config.knockout_size // 2
+        if len(first_stage) == expected_count and all(m.published and not m.blocked for m in first_stage):
+            qualifiers = {team_id for match in first_stage for team_id in (match.team_a_id, match.team_b_id) if team_id is not None}
+            eliminated.update({team.team_id for team in group.teams} - qualifiers)
+        for match in matches:
+            if match.complete and match.winner_id is not None and match.stage != "Bronzekamp":
+                loser = match.team_b_id if match.winner_id == match.team_a_id else match.team_a_id
+                if loser is not None:
+                    eliminated.add(loser)
+    else:
+        losses = {team.team_id: 0 for team in group.teams}
+        for match in matches:
+            if match.complete and match.winner_id is not None and match.team_a_id is not None and match.team_b_id is not None:
+                loser = match.team_b_id if match.winner_id == match.team_a_id else match.team_a_id
+                losses[loser] += 1
+        eliminated.update(team_id for team_id, count in losses.items() if count >= 2)
+    if champion is not None:
+        eliminated = set(state.eliminated_team_ids)
+    active = set() if champion is not None else {t.team_id for t in group.teams} - eliminated
+
+    def source_visible(source: str) -> bool:
+        if source.startswith("seed:"):
+            if config.template != "group_knockout":
+                return True
+            return as_of_round >= config.group_end_round and any(
+                item.source_a.startswith("seed:")
+                and (item.stage, item.match_index, item.round_numbers) in expected
+                for item in layout
+            )
+        if source.startswith(("winner:", "loser:")):
+            source_id = source.split(":", 1)[1]
+            predecessor = resolved.get(source_id)
+            if predecessor is None:
+                return False
+            if predecessor.complete:
+                return True
+            source_slot = slots[source_id]
+            expected_source = expected.get((source_slot.stage, source_slot.match_index, source_slot.round_numbers))
+            return bool(predecessor.published and expected_source and expected_source.complete)
+        return True
+
+    visible_matches: list[KnockoutMatch] = []
+    for match in matches:
+        slot = slots[match.match_id]
+        changes: dict[str, object] = {}
+        for side, source in (("a", slot.source_a), ("b", slot.source_b)):
+            if not source_visible(source):
+                for suffix in ("id", "name", "seed", "change"):
+                    changes[f"team_{side}_{suffix}"] = None
+        visible_matches.append(replace(match, **changes) if changes else match)
+    return replace(
+        state, knockout_matches=tuple(visible_matches), standings=standings, champion_id=champion,
+        phase=state.phase if champion is not None or state.phase != "Afsluttet" else "Afventer publicering",
+        active_team_ids=frozenset(active), eliminated_team_ids=frozenset(eliminated),
+        warnings=warnings, pairing_conflicts=tuple(conflicts),
+    )
+
+
 def build_tournament_head_to_head(
     group: GroupDefinition,
     snapshots: SnapshotIndex,
@@ -896,7 +1229,7 @@ def build_tournament_head_to_head(
         }
         a_change = changes[team_a_id]
         b_change = changes[team_b_id]
-        complete = a_change is not None and b_change is not None
+        complete = match.complete and a_change is not None and b_change is not None
         winner = None
         if complete and a_change != b_change:
             winner = team_a_id if a_change > b_change else team_b_id
@@ -904,7 +1237,7 @@ def build_tournament_head_to_head(
             HeadToHeadMatch(
                 fixture.round_number, "Gruppespil", team_a_id, team_b_id,
                 names[team_a_id], names[team_b_id], a_change, b_change,
-                winner, complete,
+                winner, complete, blocked=group.tournament is not None and group.tournament.pairing_error is not None,
             )
         )
 
@@ -925,7 +1258,7 @@ def build_tournament_head_to_head(
                 continue
             a_change = _change(snapshots, group.game, team_a_id, round_number)
             b_change = _change(snapshots, group.game, team_b_id, round_number)
-            complete = a_change is not None and b_change is not None
+            complete = not match.blocked and a_change is not None and b_change is not None
             winner = None
             if complete and a_change != b_change:
                 winner = team_a_id if a_change > b_change else team_b_id
@@ -939,6 +1272,7 @@ def build_tournament_head_to_head(
                         if aggregate_tie and round_number == match.round_numbers[-1]
                         else None
                     ),
+                    match.blocked,
                 )
             )
 
@@ -1124,6 +1458,7 @@ def generate_league_fixtures(
 def generate_swiss_pairings(
     participants: tuple[SwissParticipant, ...],
     round_number: int,
+    *, legacy_policy: bool = False,
 ) -> tuple[GroupFixture, ...]:
     """Pair one Swiss round with deterministic rematch avoidance and a fair bye."""
 
@@ -1146,7 +1481,9 @@ def generate_swiss_pairings(
             bye = ranked[-1]
         ranked.remove(bye)
 
-    def search(remaining: tuple[SwissParticipant, ...]) -> list[tuple[int, int]] | None:
+    def search(
+        remaining: tuple[SwissParticipant, ...], *, allow_rematches: bool
+    ) -> list[tuple[int, int]] | None:
         if not remaining:
             return []
         first = remaining[0]
@@ -1160,20 +1497,50 @@ def generate_swiss_pairings(
             ),
         )
         for opponent in candidates:
-            if opponent.team_id in first.opponent_ids:
+            if not allow_rematches and opponent.team_id in first.opponent_ids:
                 continue
             rest = tuple(item for item in remaining[1:] if item.team_id != opponent.team_id)
-            tail = search(rest)
+            if not allow_rematches:
+                key = tuple(item.team_id for item in rest)
+                if key in impossible:
+                    continue
+                if len(impossible) >= _SWISS_PAIRING_SEARCH_LIMIT:
+                    raise SwissPairingSearchLimitError(
+                        "Swiss-parringen kunne ikke gennemgås inden for søgegrænsen. "
+                        "Ingen ny parring blev dannet; tilpas turneringen eller opret en ny revision."
+                    )
+            tail = search(rest, allow_rematches=allow_rematches)
             if tail is not None:
                 return [(first.team_id, opponent.team_id), *tail]
-        for opponent in candidates:
-            rest = tuple(item for item in remaining[1:] if item.team_id != opponent.team_id)
-            tail = search(rest)
-            if tail is not None:
-                return [(first.team_id, opponent.team_id), *tail]
+            if not allow_rematches:
+                impossible.add(key)
         return None
 
-    pairs = search(tuple(ranked)) or []
+    impossible: set[tuple[int, ...]] = set()
+    def legacy_search(remaining: tuple[SwissParticipant, ...]) -> list[tuple[int, int]] | None:
+        if not remaining:
+            return []
+        first = remaining[0]
+        candidates = sorted(remaining[1:], key=lambda item: (
+            item.team_id in first.opponent_ids,
+            abs(item.match_points - first.match_points), item.entry_seed, item.team_id,
+        ))
+        for rematches_allowed in (False, True):
+            for opponent in candidates:
+                if not rematches_allowed and opponent.team_id in first.opponent_ids:
+                    continue
+                rest = tuple(item for item in remaining[1:] if item.team_id != opponent.team_id)
+                tail = legacy_search(rest)
+                if tail is not None:
+                    return [(first.team_id, opponent.team_id), *tail]
+        return None
+
+    if legacy_policy:
+        pairs = legacy_search(tuple(ranked)) or []
+    else:
+        pairs = search(tuple(ranked), allow_rematches=False)
+        if pairs is None:
+            pairs = search(tuple(ranked), allow_rematches=True) or []
     fixtures = [GroupFixture(round_number, first, second) for first, second in pairs]
     if bye is not None:
         fixtures.append(GroupFixture(round_number, bye.team_id, None))
@@ -1309,7 +1676,14 @@ def build_swiss_pairing_conflicts(
                 )
             )
 
-        if normalize(published) != normalize(expected):
+        # Schema-1 records did not identify the pairing algorithm. Accept the
+        # former deterministic policy too, so upgrading does not invent a
+        # correction conflict for an unchanged published round.
+        legacy = tuple(
+            TournamentPairing(item.round_number, item.team_a_id, item.team_b_id)
+            for item in generate_swiss_pairings(participants, round_number, legacy_policy=True)
+        )
+        if normalize(published) not in (normalize(expected), normalize(legacy)):
             conflicts.append(SwissPairingConflict(round_number, published, expected))
     return tuple(conflicts)
 

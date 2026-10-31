@@ -218,7 +218,8 @@ class GameRefreshTests(unittest.TestCase):
             player_store = holdet.PlayerStatisticsStore(root / "snapshots")
             player_store.save(statistics(healthy, 1))
             settings = holdet.HubSettings(
-                watchlist=(holdet.watchlist_entry(game.game, healthy),)
+                watchlist=(holdet.watchlist_entry(game.game, healthy),),
+                enabled_features=("alerts",),
             )
             inbox = holdet.AnalysisInboxStore(root / "analysis-inbox.json")
             result = holdet.refresh_manager_game(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
+from datetime import datetime
 import hashlib
 from itertools import combinations
 import json
@@ -15,10 +16,20 @@ from typing import Iterable, Literal, Mapping
 
 from .groups import GroupDefinition
 from .hub_settings import player_identity
-from .models import GameUrl, PlayerEntry, RoundSummary
+from .models import GameUrl, PlayerEntry, RoundStatus, RoundSummary
 from .rules import AnalysisProvenance, GameRuleProfile
 from .standings import build_standings
 from .storage import PlayerStatisticsIndex, SnapshotIndex, TeamSnapshot
+
+
+@dataclass(frozen=True, slots=True)
+class PlayerValueObservation:
+    """A round's value and status from the same newest eligible snapshot."""
+
+    round_number: int
+    value: int
+    round_status: RoundStatus
+    generated_at: datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +45,30 @@ class PlayerDecisionAnalysis:
     stability_label: str | None
     curve: tuple[tuple[int, int], ...]
     provenance: AnalysisProvenance
+    source_round: int | None = None
+    source_generated_at: datetime | None = None
+    source_round_status: RoundStatus = "unknown"
+    present_in_selected_round: bool = True
+    observations: tuple[PlayerValueObservation, ...] = ()
+    provenances: tuple[tuple[str, AnalysisProvenance], ...] = ()
+
+    def metric_provenance(self, name: str) -> AnalysisProvenance:
+        """Explain value, total_growth, growth_per_million, form_3/5 or stability."""
+
+        return dict(self.provenances)[name]
+
+    def observation_gaps(self, name: str) -> tuple[int, ...]:
+        """Identify unavailable rounds inside a metric's actual observation window."""
+
+        rounds = self.metric_provenance(name).rounds
+        if len(rounds) < 2:
+            return ()
+        present = set(rounds)
+        return tuple(
+            number
+            for number in range(min(rounds), max(rounds) + 1)
+            if number not in present
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -171,31 +206,68 @@ def build_player_decision_analysis(
     snapshots: PlayerStatisticsIndex,
     game: GameUrl,
     player_key: str,
+    *,
+    round_number: int | None = None,
+    generated_at: datetime | None = None,
 ) -> PlayerDecisionAnalysis | None:
-    """Build form, stability and value metrics from completed local rounds."""
+    """Build player metrics within inclusive round and optional fetch-time bounds.
 
+    Current values use the highest eligible round, even after historical
+    backfill. Form uses each round's newest eligible snapshot only if complete.
+    A missing player retains last-known values with unverified provenance.
+    """
+
+    history = snapshots.through(
+        game, round_number=round_number, generated_at=generated_at
+    )
+    rounds = history.per_round(game)
+    if not rounds:
+        return None
+    selected_round = (
+        round_number
+        if round_number is not None
+        else rounds[-1].statistics.round_number
+    )
+    selected = next(
+        (
+            snapshot
+            for snapshot in rounds
+            if snapshot.statistics.round_number == selected_round
+        ),
+        None,
+    )
+    present_in_selected_round = selected is not None and player_key in _entries(selected)
     latest_entry: PlayerEntry | None = None
-    latest_unit: str | None = None
-    curve: list[tuple[int, int]] = []
-    completed: list[tuple[int, int]] = []
+    source = None
     for snapshot in sorted(
-        snapshots.for_game(game),
+        history.for_game(game),
         key=lambda item: (item.statistics.round_number, item.generated_at),
     ):
         entry = _entries(snapshot).get(player_key)
+        if entry is not None:
+            latest_entry = entry
+            source = snapshot
+    if latest_entry is None or source is None:
+        return None
+
+    observations: list[PlayerValueObservation] = []
+    completed: list[tuple[int, int]] = []
+    for snapshot in rounds:
+        entry = _entries(snapshot).get(player_key)
         if entry is None:
             continue
-        latest_entry = entry
-        latest_unit = snapshot.statistics.unit
-        if entry.value is not None:
-            curve.append((snapshot.statistics.round_number, entry.value))
-        if snapshot.statistics.round_status == "complete" and entry.round_growth is not None:
-            completed.append((snapshot.statistics.round_number, entry.round_growth))
-    if latest_entry is None:
-        return None
-    # Multiple fetches of a round contribute one newest observation.
-    by_round = {round_number: value for round_number, value in completed}
-    ordered = tuple(sorted(by_round.items()))
+        statistics = snapshot.statistics
+        observations.append(
+            PlayerValueObservation(
+                statistics.round_number,
+                entry.value,
+                statistics.round_status,
+                snapshot.generated_at,
+            )
+        )
+        if statistics.round_status == "complete" and entry.round_growth is not None:
+            completed.append((statistics.round_number, entry.round_growth))
+    ordered = tuple(completed)
     values = [value for _, value in ordered]
     recent = values[-5:]
     stability_score: int | None = None
@@ -208,7 +280,7 @@ def build_player_decision_analysis(
             "Stabil" if stability_score >= 70 else
             "Balanceret" if stability_score >= 40 else "Boom/bust"
         )
-    money = latest_unit == "money"
+    money = source.statistics.unit == "money"
     growth_per_million = (
         latest_entry.total_growth / (latest_entry.value / 1_000_000)
         if money
@@ -216,9 +288,62 @@ def build_player_decision_analysis(
         and latest_entry.total_growth is not None
         else None
     )
-    rounds = tuple(round_number for round_number, _ in ordered[-5:])
-    certainty = "final" if ordered else "unverified"
-    missing = () if ordered else ("Ingen afsluttede runder med spillervækst",)
+    source_rounds = (source.statistics.round_number,)
+    certainty = (
+        "unverified"
+        if not present_in_selected_round or source.statistics.round_status == "unknown"
+        else "final" if source.statistics.round_status == "complete" else "preliminary"
+    )
+    source_reasons: tuple[str, ...] = ()
+    if not present_in_selected_round:
+        source_reasons = (
+            f"Spilleren mangler i det valgte snapshot for runde {selected_round}",
+        )
+    elif source.statistics.round_status == "unknown":
+        source_reasons = ("Kildens rundestatus er ikke verificeret",)
+
+    def source_provenance(reason: str | None = None) -> AnalysisProvenance:
+        return AnalysisProvenance(
+            "unverified" if reason else certainty,
+            source_rounds,
+            0 if reason else 1,
+            source_reasons + ((reason,) if reason else ()),
+        )
+
+    def window_provenance(size: int, minimum: int) -> AnalysisProvenance:
+        used = tuple(number for number, _ in ordered[-size:])
+        return AnalysisProvenance(
+            "final" if len(used) >= minimum else "unverified",
+            used,
+            len(used),
+            () if len(used) >= minimum else (
+                f"Kræver {minimum} afsluttede observationer; kun {len(used)} er tilgængelige",
+            ),
+        )
+
+    efficiency_reason = (
+        "Vækst pr. mio. bruges kun i pengespil" if not money
+        else "Prisen skal være større end nul" if latest_entry.value <= 0
+        else "Totalvækst mangler" if latest_entry.total_growth is None
+        else None
+    )
+    provenances = (
+        ("value", source_provenance()),
+        (
+            "total_growth",
+            source_provenance(
+                "Totalvækst mangler" if latest_entry.total_growth is None else None
+            ),
+        ),
+        ("growth_per_million", source_provenance(efficiency_reason)),
+        ("form_3", window_provenance(3, 3)),
+        ("form_5", window_provenance(5, 5)),
+        ("stability", window_provenance(5, 3)),
+    )
+    form_rounds = tuple(number for number, _ in ordered[-5:])
+    missing = source_reasons + (
+        () if ordered else ("Ingen afsluttede runder med spillervækst",)
+    )
     return PlayerDecisionAnalysis(
         player_key,
         latest_entry.name,
@@ -229,8 +354,14 @@ def build_player_decision_analysis(
         mean(values[-5:]) if len(values) >= 5 else None,
         stability_score,
         stability_label,
-        tuple(dict(curve).items()),
-        AnalysisProvenance(certainty, rounds, len(rounds), missing),
+        tuple((point.round_number, point.value) for point in observations),
+        AnalysisProvenance(certainty, form_rounds, len(form_rounds), missing),
+        source.statistics.round_number,
+        source.generated_at,
+        source.statistics.round_status,
+        present_in_selected_round,
+        tuple(observations),
+        provenances,
     )
 
 

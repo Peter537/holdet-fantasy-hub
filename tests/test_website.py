@@ -13,6 +13,7 @@ import tempfile
 import tomllib
 import unittest
 from unittest.mock import call, patch
+from urllib.parse import parse_qs
 from uuid import uuid4
 
 from streamlit.testing.v1 import AppTest
@@ -67,6 +68,16 @@ def widget(app: AppTest, kind: str, label: str):
     return next(item for item in getattr(app, kind) if item.label == label)
 
 
+def query_param_values(app: AppTest, key: str) -> list[str]:
+    parameters = app.query_params
+    if hasattr(parameters, "get_all"):
+        return parameters.get_all(key)
+    value = parameters.get(key)
+    if value is None:
+        return []
+    return list(value) if isinstance(value, (list, tuple)) else [value]
+
+
 def navigate(app: AppTest, route: str, **parameters: object) -> AppTest:
     page_id = {
         "home": PageId.HOME,
@@ -79,6 +90,7 @@ def navigate(app: AppTest, route: str, **parameters: object) -> AppTest:
         "hall-of-fame": PageId.MANAGERS,
         "calendar": PageId.CALENDAR,
         "data": PageId.DATA,
+        "settings": PageId.SETTINGS,
         "game": PageId.GAME,
         "group": PageId.GROUP,
         "team": PageId.TEAM,
@@ -88,8 +100,18 @@ def navigate(app: AppTest, route: str, **parameters: object) -> AppTest:
     app.query_params = {key: str(value) for key, value in parameters.items()}
     relative_page = page_source(page_id).relative_to(APP_PATH.parent)
     return app.switch_page(str(relative_page)).run(timeout=15)
-def select_game_tab(app: AppTest, game: holdet.GameContext, label: str) -> AppTest:
-    app.session_state[f"game-tabs-{game.locale}-{game.slug}"] = label
+def select_game_section(app: AppTest, game: holdet.GameUrl, section: str) -> AppTest:
+    app.query_params.update(locale=game.locale, game=game.slug, section=section)
+    return app.run(timeout=15)
+
+
+def enable_tools(config: Path, *features: str) -> None:
+    store = holdet.HubSettingsStore(config / "hub-settings.json")
+    store.set_enabled_features(store.load(), features)
+
+
+def open_round_details(app: AppTest, game: holdet.GameUrl) -> AppTest:
+    app.session_state[f"round-details:{(game.locale.casefold(), game.slug)}"] = True
     return app.run(timeout=15)
 
 
@@ -109,6 +131,21 @@ def _refresh_dialog_test_app(manager_game, groups) -> None:
 
 
 class DashboardTests(unittest.TestCase):
+    def test_unsupported_streamlit_stops_before_dashboard_and_shows_project_launcher(self) -> None:
+        for version in ("1.60.0", "1.66.0", "2.0.0"):
+            with (
+                self.subTest(version=version),
+                website_environment(),
+                patch.object(dashboard.st, "__version__", version),
+                patch.object(dashboard, "build_ui_context", side_effect=AssertionError("dashboard must not load")) as context,
+            ):
+                app = AppTest.from_file(APP_PATH).run(timeout=15)
+                self.assertFalse(app.exception)
+                self.assertIn(version, app.error[0].value)
+                self.assertIn(">=1.66.1,<2", app.error[0].value)
+                self.assertEqual(app.code[0].value, f'& "{PROJECT_ROOT / "start.ps1"}"')
+                context.assert_not_called()
+
     def test_danish_table_integer_formatting_preserves_numeric_data(self) -> None:
         self.assertEqual(dashboard._format_table_integer(50_670_000), "50.670.000")
         self.assertEqual(dashboard._format_table_integer(670_000), "670.000")
@@ -188,7 +225,7 @@ class DashboardTests(unittest.TestCase):
         markup = render.call_args.args[0]
         self.assertNotIn("<a", markup)
         self.assertNotIn("href=", markup)
-        self.assertIn("linear-gradient(125deg, #123456, #20252d)", markup)
+        self.assertIn(".st-key-nav-card-game-da-test button", markup)
         self.assertEqual(dashboard._markdown_literal("<A_[x]*>"), "\\<A\\_\\[x\\]\\*\\>")
 
         with patch.object(dashboard.st, "html") as render_styles:
@@ -220,34 +257,26 @@ class DashboardTests(unittest.TestCase):
             patch.object(dashboard.st, "markdown"),
             patch.object(dashboard.st, "caption"),
             patch.object(dashboard.st, "divider"),
+            patch.object(dashboard.st, "expander") as tools,
+            patch.object(dashboard, "page_link"),
+            patch.object(dashboard, "tool_visible", return_value=False),
             patch.object(dashboard, "_unread_alert_counts", return_value={}),
         ):
             dashboard._sidebar(
                 (manager_game, alpha_game), (group,), manager_game, group, "game"
             )
 
-        self.assertEqual(
-            [item.args[0] for item in menu_button.call_args_list],
-            [
-                "Mine managerspil",
-                "Tilføj managerspil",
-                "Spillerstatistik",
-                "Scouting",
-                "Holdstatistik",
-                "Alpha",
-                "Menuspil",
-                "Undergruppe",
-                "Arkiverede managerspil",
-                "Managers",
-                "Kalender",
-                "Data og lager",
-            ],
-        )
-        data_call = next(
+        labels = [item.args[0] for item in menu_button.call_args_list]
+        self.assertEqual(labels[:4], ["Mine managerspil", "Alpha", "Menuspil", "Undergruppe"])
+        self.assertLess(labels.index("Undergruppe"), labels.index("Spillerstatistik"))
+        self.assertLess(labels.index("Undergruppe"), labels.index("Holdstatistik"))
+        self.assertTrue({"Scouting", "Managers", "Kalender"}.isdisjoint(labels))
+        tools.assert_called_once_with("Værktøjer", expanded=False)
+        settings_call = next(
             item for item in menu_button.call_args_list
-            if item.args[0] == "Data og lager"
+            if item.args[0] == "Indstillinger"
         )
-        self.assertEqual(data_call.kwargs["type"], "secondary")
+        self.assertEqual(settings_call.kwargs["type"], "secondary")
 
         with (
             patch.object(dashboard.st, "sidebar"),
@@ -255,18 +284,22 @@ class DashboardTests(unittest.TestCase):
             patch.object(dashboard.st, "markdown"),
             patch.object(dashboard.st, "caption"),
             patch.object(dashboard.st, "divider"),
+            patch.object(dashboard.st, "container"),
+            patch.object(dashboard.st, "expander"),
+            patch.object(dashboard, "page_link"),
+            patch.object(dashboard, "tool_visible", return_value=False),
             patch.object(dashboard, "_unread_alert_counts", return_value={}),
         ):
             dashboard._sidebar(
-                (manager_game, alpha_game), (group,), manager_game, group, "data"
+                (manager_game, alpha_game), (group,), manager_game, group, "settings"
             )
         active_data_call = next(
             item for item in data_buttons.call_args_list
-            if item.args[0] == "Data og lager"
+            if item.args[0] == "Indstillinger"
         )
         self.assertEqual(active_data_call.kwargs["type"], "primary")
 
-    def test_both_add_manager_game_actions_use_reload_free_navigation(self) -> None:
+    def test_add_manager_game_entries_use_native_navigation(self) -> None:
         with (
             patch.object(dashboard.st, "sidebar"),
             patch.object(
@@ -277,6 +310,9 @@ class DashboardTests(unittest.TestCase):
             patch.object(dashboard.st, "markdown"),
             patch.object(dashboard.st, "caption"),
             patch.object(dashboard.st, "divider"),
+            patch.object(dashboard.st, "expander"),
+            patch.object(dashboard, "page_link"),
+            patch.object(dashboard, "tool_visible", return_value=False),
             patch.object(dashboard, "_navigate") as navigate,
         ):
             dashboard._sidebar((), (), None, None, "home")
@@ -284,24 +320,19 @@ class DashboardTests(unittest.TestCase):
 
         with (
             patch.object(dashboard.st, "container"),
-            patch.object(
-                dashboard.st, "button",
-                side_effect=lambda label, **_kwargs: label == "Tilføj managerspil",
-            ) as add_button,
+            patch.object(dashboard.st, "button") as home_button,
             patch.object(dashboard.st, "markdown"),
             patch.object(dashboard.st, "info"),
-            patch.object(dashboard, "_navigate") as navigate,
+            patch.object(dashboard, "get_ui_context", return_value=SimpleNamespace(games=())),
+            patch.object(dashboard, "render_global_update"),
+            patch.object(dashboard, "render_run_progress"),
+            patch.object(dashboard, "page_link") as link,
         ):
             dashboard._home((), (), holdet.SnapshotIndex(()))
-        self.assertEqual(
-            [call.args[0] for call in add_button.call_args_list],
-            ["Spillerstatistik", "Scouting", "Holdstatistik", "Tilføj managerspil"],
+        link.assert_called_once_with(
+            PageId.MANAGE_GAMES, "Tilføj managerspil", icon=":material/add:"
         )
-        add_call = add_button.call_args_list[3]
-        self.assertEqual(add_call.kwargs["key"], "add-manager-game-home")
-        self.assertEqual(add_call.kwargs["icon"], ":material/add:")
-        self.assertEqual(add_call.kwargs["type"], "primary")
-        navigate.assert_called_once_with("manage-games")
+        home_button.assert_not_called()
     def test_sidebar_groups_are_indented_native_buttons_without_arrow(self) -> None:
         team = sample_team(57, name="Sidehold")
         group = holdet.GroupDefinition(
@@ -505,6 +536,7 @@ class DashboardTests(unittest.TestCase):
                 raise AssertionError("navigation must not contact Holdet")
 
         with website_environment() as (config, output):
+            enable_tools(config, "managers", "calendar", "stories")
             first = sample_team(801, name="F\u00f8rste hold")
             second = sample_team(802, name="Andet hold")
             store = holdet.GroupStore(config / "groups.json")
@@ -809,6 +841,7 @@ class DashboardTests(unittest.TestCase):
         )
 
         tournament_row = SimpleNamespace(
+            group_index=0,
             rank=1,
             owner_name="Manager",
             team_name=team.team_name,
@@ -880,12 +913,15 @@ class DashboardTests(unittest.TestCase):
             labels = [item.label for item in app.button]
             self.assertIn("Mine managerspil", labels)
             self.assertNotIn("Hjem", labels)
-            self.assertEqual(labels.count("Tilføj managerspil"), 2)
+            self.assertEqual(labels.count("Tilføj managerspil"), 1)
+            self.assertTrue(any(item.label == "Tilføj managerspil" for item in app.get("page_link")))
+            self.assertTrue(any(item.label == "Værktøjer" for item in app.expander))
             self.assertFalse(
                 any("Intet opdateres uden dit klik" in item.value for item in app.markdown)
             )
             self.assertFalse(any("↳" in label for label in labels))
-            self.assertEqual(len(app.dataframe), 0)
+            self.assertEqual(len(app.dataframe), 1)
+            self.assertIn("Managerspil", app.dataframe[0].value.columns)
             self.assertFalse(
                 any(
                     item.label in {
@@ -908,22 +944,19 @@ class DashboardTests(unittest.TestCase):
             self.assertTrue(any(item.value == "Tourspillet 2026" for item in app.title))
             self.assertEqual(
                 [item.label for item in app.tabs],
-                [
-                    "Rundecenter",
-                    "Grupper · 0",
-                    "Spillerstatistik",
-                    "Statusalarmer · 0",
-                    "Holdstatistik",
-                    "Historik",
-                    "Analyse",
-                    "Administration",
-                    "Indstillinger",
-                ],
+                ["Overblik", "Ligaer og turneringer", "Spillere"],
+            )
+            self.assertEqual(
+                widget(app, "menu_button", "Flere funktioner").options,
+                ["Holdstatistik", "Historik", "Administration", "Indstillinger"],
             )
             self.assertFalse(any(item.label == "Tilbage til forsiden" for item in app.button))
             self.assertFalse(any(item.label == "Administration" for item in app.button))
             self.assertFalse(any(item.label == "Indstillinger" for item in app.expander))
-            select_game_tab(app, team.reference.game, "Administration")
+            widget(app, "menu_button", "Flere funktioner").click("administration").run(timeout=15)
+            self.assertFalse(app.exception)
+            self.assertEqual(query_param_values(app, "section"), ["administration"])
+            self.assertEqual(query_param_values(app, "game"), [team.reference.game.slug])
             self.assertTrue(
                 any(
                     str(team.reference.team_id) in option
@@ -937,11 +970,116 @@ class DashboardTests(unittest.TestCase):
                 if item.label.startswith("Direkte fantasy-team")
             ).input(str(team.reference.team_id))
             button(app, "Opret gruppe").click()
-            select_game_tab(app, team.reference.game, "Administration")
+            select_game_section(app, team.reference.game, "administration")
             groups = holdet.GroupStore(config / "groups.json").load()
             self.assertEqual(len(groups), 1)
             self.assertEqual(groups[0].name, "Tour venner")
             self.assertEqual(groups[0].teams[0].team_id, team.reference.team_id)
+
+    def test_home_column_action_opens_the_original_sorted_game_identity(self) -> None:
+        alpha = holdet.normalize_manager_game("alpha-game", "Alpha")
+        beta = holdet.normalize_manager_game("beta-game", "Beta")
+        session = {}
+        summary = SimpleNamespace(round_number=1, status="Data er aktuelle", oldest_capture=None)
+        with (
+            patch.object(dashboard.st, "session_state", session),
+            patch.object(dashboard.st, "container"),
+            patch.object(dashboard.st, "title"),
+            patch.object(dashboard.st, "caption"),
+            patch.object(dashboard.st.column_config, "ButtonColumn", wraps=dashboard.st.column_config.ButtonColumn) as column,
+            patch.object(dashboard, "render_global_update"),
+            patch.object(dashboard, "render_run_progress"),
+            patch.object(dashboard, "page_link"),
+            patch.object(dashboard, "PlayerStatisticsStore"),
+            patch.object(dashboard, "GameMetadataStore") as metadata,
+            patch.object(dashboard, "settings_for", return_value=holdet.HubSettings()),
+            patch.object(dashboard, "scope_overview", return_value=summary),
+            patch.object(dashboard, "dataframe") as table,
+            patch.object(dashboard, "_navigate") as go,
+        ):
+            metadata.return_value.scan.return_value = ((), ())
+            dashboard._home((beta, alpha), (), holdet.SnapshotIndex(()))
+            self.assertEqual([row["Managerspil"] for row in table.call_args.args[0]], ["Alpha", "Beta"])
+            self.assertEqual(column.call_args.kwargs["key"], "open-manager-game")
+            callback = column.call_args.kwargs["on_click"]
+            callback()
+            go.assert_not_called()
+            session["open-manager-game"] = SimpleNamespace(row=1, value="Beta")
+            callback()
+            go.assert_called_once_with("game", locale=beta.game.locale, game=beta.game.slug)
+            summary.round_number = None
+            dashboard._home((alpha,), (), holdet.SnapshotIndex(()))
+            self.assertEqual(table.call_args.args[0][0]["Gemt runde"], "–")
+
+    def test_game_overview_and_competition_rows_keep_results_and_native_navigation(self) -> None:
+        with website_environment() as (config, output):
+            teams = tuple(sample_team(number, name=f"Hold {number}", current_round=1,
+                                      history_rounds=(1,), total=600 - number * 100)
+                          for number in range(1, 5))
+            snapshots = holdet.SnapshotStore(output)
+            for team in teams:
+                snapshots.save_team_json(team)
+            game = teams[0].reference.game
+            store = holdet.GroupStore(config / "groups.json")
+            manager = store.create_manager_game(game, "Overbliksspil")
+            archived = store.create_manager_game("archived-game", "Arkivspil")
+            store.archive_manager_game(archived.game)
+            members = tuple(holdet.GroupTeam(team.reference.team_id, team.team_name,
+                                            team.reference.source_url) for team in teams)
+            league = store.create("Venner", game, members, group_id="overview-league")
+            cup = store.create_tournament("Kampplan", game, members, start_round=1,
+                                          final_round=3, rounds_per_tie=1,
+                                          group_id="overview-cup", template="league")
+            statistics = replace(sample_statistics(1), round_status="complete")
+            holdet.PlayerStatisticsStore(output).save(statistics)
+            before = {path.relative_to(config.parent): path.read_bytes()
+                      for path in config.parent.rglob("*") if path.is_file()}
+            with patch("holdet_lib.http.HttpClient.fetch_text", side_effect=AssertionError("network")) as fetch:
+                app = AppTest.from_file(APP_PATH).run(timeout=15)
+                self.assertFalse(app.exception)
+                home = next(item.value for item in app.dataframe if "Managerspil" in item.value.columns)
+                self.assertEqual(home.loc[0, "Managerspil"], manager.name)
+                self.assertEqual(home.loc[0, "Konkurrencer"], 2)
+                self.assertEqual(home.loc[0, "Hold"], 4)
+                self.assertEqual(home.loc[0, "Gemt runde"], "1")
+                self.assertTrue(home["Hold"].dtype.kind in "iu")
+                self.assertEqual(home["Managerspil"].tolist(), [manager.name])
+                game_menu = widget(app, "menu_button", "Åbn spil")
+                self.assertEqual(game_menu.options, [manager.name])
+
+                game_menu.click_index(0).run(timeout=15)
+                self.assertFalse(app.exception)
+                self.assertEqual(query_param_values(app, "game"), [game.slug])
+                self.assertEqual(query_param_values(app, "locale"), [game.locale])
+                self.assertEqual([item.value for item in app.title], [manager.name])
+                metrics = {item.label: item.value for item in app.metric}
+                self.assertEqual(metrics["Senest gemte runde"], "1")
+                self.assertEqual(metrics["Spillere"], str(len(statistics.entries)))
+                standing = next(item.value for item in app.dataframe
+                                if {"Placering", "Hold", "Værdi / point"}.issubset(item.value.columns))
+                self.assertEqual(standing["Hold"].tolist(), ["Hold 1", "Hold 2", "Hold 3"])
+                self.assertTrue(any("Næste kamp:" in item.value and "Runde 2" in item.value
+                                    for item in app.caption))
+                self.assertFalse(any(item.label == "Opret liga eller turnering" for item in app.button))
+                self.assertTrue(any(item.label == "Vælg mit hold" for item in app.page_link))
+
+                select_game_section(app, game, "groups")
+                self.assertFalse(app.exception)
+                self.assertFalse(app.dataframe)
+                links = {item.label: parse_qs(item.query_string) for item in app.page_link
+                         if item.label in {league.name, cup.name}}
+                self.assertEqual(links, {league.name: {"group": [league.group_id]},
+                                         cup.name: {"group": [cup.group_id]}})
+                self.assertTrue({"Liga", "Liga med kampplan"}.issubset(
+                    {item.value for item in app.markdown}))
+                widget(app, "menu_button", "Flere funktioner").click("history").run(timeout=15)
+                self.assertFalse(app.exception)
+                self.assertEqual(query_param_values(app, "section"), ["history"])
+                self.assertEqual(query_param_values(app, "game"), [game.slug])
+                fetch.assert_not_called()
+            after = {path.relative_to(config.parent): path.read_bytes()
+                     for path in config.parent.rglob("*") if path.is_file()}
+            self.assertEqual(after, before)
 
     def test_archive_page_is_available_when_empty(self) -> None:
         with website_environment():
@@ -973,14 +1111,14 @@ class DashboardTests(unittest.TestCase):
                     app, "game", locale=manager_game.game.locale,
                     game=manager_game.game.slug,
                 )
-                select_game_tab(app, manager_game.game, "Indstillinger")
+                select_game_section(app, manager_game.game, "settings")
                 button(app, "Arkiv" + chr(0xE9) + "r managerspil").click()
-                select_game_tab(app, manager_game.game, "Indstillinger")
+                select_game_section(app, manager_game.game, "settings")
                 self.assertTrue(
                     any("data bevares" in item.value for item in app.warning)
                 )
                 button(app, "Bekr" + chr(0xE6) + "ft arkivering").click()
-                select_game_tab(app, manager_game.game, "Indstillinger")
+                select_game_section(app, manager_game.game, "settings")
                 archived = store.load_configuration().games[0]
                 self.assertTrue(archived.is_archived)
                 self.assertEqual(store.load(), (group,))
@@ -1002,7 +1140,7 @@ class DashboardTests(unittest.TestCase):
                     app, "archive", locale=manager_game.game.locale,
                     game=manager_game.game.slug,
                 )
-                self.assertFalse(any(item.label == group.name for item in app.button))
+                self.assertTrue(any(item.label == group.name for item in app.button))
 
                 navigate(
                     app, "game", locale=manager_game.game.locale,
@@ -1011,19 +1149,19 @@ class DashboardTests(unittest.TestCase):
                 self.assertTrue(
                     any(item.label == "Gendan managerspil" for item in app.button)
                 )
-                self.assertFalse(any(item.label == group.name for item in app.button))
+                self.assertTrue(any(item.label == group.name for item in app.button))
                 self.assertFalse(
                     any(item.value == "ARKIVERET" for item in app.caption)
                 )
                 self.assertTrue(
                     any("er arkiveret" in item.value for item in app.warning)
                 )
-                self.assertTrue(button(app, "Opdater managerspil").disabled)
-                select_game_tab(app, manager_game.game, "Administration")
+                self.assertTrue(button(app, "Opdater data").disabled)
+                select_game_section(app, manager_game.game, "administration")
                 self.assertTrue(
                     any("skrivebeskyttet" in item.value for item in app.info)
                 )
-                select_game_tab(app, manager_game.game, "Indstillinger")
+                select_game_section(app, manager_game.game, "settings")
                 self.assertTrue(
                     any("skrivebeskyttede" in item.value for item in app.info)
                 )
@@ -1032,8 +1170,7 @@ class DashboardTests(unittest.TestCase):
                 self.assertFalse(any(item.label == "Arkivér managerspil" for item in app.button))
 
                 self.assertFalse(any(item.label == "Opret gruppe" for item in app.button))
-                tab_key = f"game-tabs-{manager_game.game.locale}-{manager_game.game.slug}"
-                app.session_state[tab_key] = "Spillerstatistik"
+                app.query_params["section"] = "players"
                 app.run(timeout=15)
                 self.assertTrue(
                     button(app, "Hent seneste spillerstatistik").disabled
@@ -1044,7 +1181,7 @@ class DashboardTests(unittest.TestCase):
                 self.assertTrue(
                     any("er arkiveret" in item.value for item in app.warning)
                 )
-                self.assertFalse(any(item.label == group.name for item in app.button))
+                self.assertTrue(any(item.label == group.name for item in app.button))
                 self.assertFalse(
                     any(item.value == "ARKIVERET" for item in app.caption)
                 )
@@ -1059,7 +1196,7 @@ class DashboardTests(unittest.TestCase):
                     app, "team", group=group.group_id,
                     team=team.reference.team_id,
                 )
-                self.assertFalse(any(item.label == group.name for item in app.button))
+                self.assertTrue(any(item.label == group.name for item in app.button))
                 self.assertFalse(
                     any(item.value == "ARKIVERET" for item in app.caption)
                 )
@@ -1081,12 +1218,14 @@ class DashboardTests(unittest.TestCase):
         with website_environment() as (config, _output):
             with patch("holdet_lib.HoldetClient") as client_type:
                 app = AppTest.from_file(APP_PATH).run(timeout=15)
+                self.assertFalse(app.exception)
                 self.assertIn("Mine managerspil", [item.value for item in app.title])
                 self.assertEqual(client_type.mock_calls, [])
 
                 add_label = "Tilf" + chr(0xf8) + "j managerspil"
                 add_buttons = [item for item in app.button if item.label == add_label]
-                self.assertEqual(len(add_buttons), 2)
+                self.assertEqual(len(add_buttons), 1)
+                self.assertTrue(any(item.label == add_label for item in app.get("page_link")))
                 navigate(app, "manage-games")
                 widget(app, "text_input", "Holdet-URL eller slug").input(
                     "super-manager-fall-2026"
@@ -1118,10 +1257,10 @@ class DashboardTests(unittest.TestCase):
                 self.assertEqual(configuration.groups, ())
                 self.assertEqual(configuration.games[0].game.locale, "da")
 
-                select_game_tab(app, configuration.games[0].game, "Indstillinger")
+                select_game_section(app, configuration.games[0].game, "settings")
                 widget(app, "text_input", "Visningsnavn").input("Nyt navn")
                 button(app, "Gem navn").click()
-                select_game_tab(app, configuration.games[0].game, "Indstillinger")
+                select_game_section(app, configuration.games[0].game, "settings")
                 self.assertEqual(
                     holdet.GroupStore(config / "groups.json")
                     .load_configuration().games[0].name,
@@ -1140,7 +1279,9 @@ class DashboardTests(unittest.TestCase):
             self.assertFalse(revisions.exists())
 
             app = AppTest.from_file(APP_PATH).run(timeout=15)
-            button(app, "Data og lager").click().run(timeout=15)
+            button(app, "Indstillinger").click().run(timeout=15)
+            self.assertTrue(any(item.label == "Data, import og backup" for item in app.get("page_link")))
+            navigate(app, "data")
 
             self.assertFalse(app.exception)
             self.assertTrue(any(item.value == "Data og lager" for item in app.title))
@@ -1333,10 +1474,10 @@ class DashboardTests(unittest.TestCase):
                 self.assertEqual(fake.calls, [])
                 navigate(app, "game", locale=game.locale, game=game.slug)
                 self.assertEqual(fake.calls, [])
-                select_game_tab(app, game, "Administration")
+                select_game_section(app, game, "administration")
                 self.assertEqual(fake.calls, [])
                 button(app, "Find hold på konfigurerede konti").click()
-                select_game_tab(app, game, "Administration")
+                select_game_section(app, game, "administration")
 
                 self.assertEqual(fake.calls, ["konto-a", "konto-b", "konto-c"])
                 self.assertTrue(
@@ -1350,7 +1491,7 @@ class DashboardTests(unittest.TestCase):
                 choices.select("da:super-manager-fall-2026:777")
                 widget(app, "text_input", "Gruppenavn").input("Opdaget gruppe")
                 button(app, "Opret gruppe").click()
-                select_game_tab(app, game, "Administration")
+                select_game_section(app, game, "administration")
 
             group = holdet.GroupStore(config / "groups.json").load()[0]
             self.assertEqual(len(group.teams), 1)
@@ -1419,10 +1560,19 @@ class DashboardTests(unittest.TestCase):
                     return first
 
             client = FakeClient()
-            with patch("holdet_lib.HoldetClient", return_value=client):
+            from website.refresh_service import create_refresh_coordinator
+            from tests.test_refresh_runs import wait_for
+            coordinator = create_refresh_coordinator(holdet.resolve_paths(), client_factory=lambda: client)
+            with (
+                patch("holdet_lib.HoldetClient", return_value=client),
+                patch("website.workflows._coordinator", return_value=coordinator),
+                patch("holdet_lib.http.HttpClient.fetch_text", side_effect=AssertionError("network")),
+            ):
                 app = AppTest.from_file(APP_PATH).run(timeout=15)
                 navigate(app, "game", locale=first.reference.game.locale, game=first.reference.game.slug)
-                button(app, "Opdater managerspil").click().run(timeout=20)
+                open_round_details(app, first.reference.game)
+                button(app, "Opdater managerspil").click()
+                open_round_details(app, first.reference.game)
                 self.assertEqual(len(app.get("dialog")), 1)
                 self.assertEqual(client.calls, [])
                 self.assertFalse(
@@ -1458,6 +1608,9 @@ class DashboardTests(unittest.TestCase):
                     ).run(timeout=20)
                 button(dialog, "Start opdatering").click().run(timeout=30)
                 self.assertFalse(dialog.exception)
+                run = wait_for(coordinator, dialog.session_state["visible-refresh-run"],
+                    lambda state: state["status"] in {"success", "partial", "failed"})
+                self.assertEqual(run["status"], "partial")
                 self.assertEqual(
                     client.calls,
                     [
@@ -1479,12 +1632,13 @@ class DashboardTests(unittest.TestCase):
                 manifest = holdet.ManifestStore(
                     output.parent / "manifests"
                 ).load(manifests[0])
-                self.assertEqual(manifest.schema_version, 2)
+                self.assertEqual(manifest.schema_version, 3)
                 self.assertEqual(
                     [(item.step_id, item.status) for item in manifest.steps],
                     [
                         ("metadata", "fetched"),
                         ("players", "fetched"),
+                        ("players:round:3", "reused_current"),
                         ("team:1", "fetched"),
                         ("team:2", "reused_after_error"),
                         ("postprocess", "fetched"),
@@ -1599,7 +1753,13 @@ class DashboardTests(unittest.TestCase):
                             render_chart.assert_called_once()
                             chart = render_chart.call_args.args[0]
                             spec = chart.to_dict()
-                            self.assertEqual(spec["encoding"]["y"]["field"], column)
+                            self.assertEqual(spec["encoding"]["y"]["field"], "Grafværdi")
+                            expected_values = chart.data[column]
+                            if column == "Værdi/point" and chart.data["Enhed"].eq("money").all():
+                                expected_values = expected_values / 1_000_000
+                                self.assertIn("mio.", spec["encoding"]["y"]["title"])
+                            self.assertTrue(chart.data["Grafværdi"].equals(expected_values))
+                            self.assertEqual(spec["encoding"]["x"]["axis"]["values"], [1, 2, 3])
                             self.assertEqual(spec["encoding"]["y"]["scale"]["reverse"], column != "Værdi/point")
                             alpha = chart.data[chart.data["Hold"] == "Alpha"].set_index("Runde")
                             self.assertEqual(alpha.loc[1, "Samlet placering"], 21)
@@ -1677,7 +1837,9 @@ class DashboardTests(unittest.TestCase):
                     locale=manager_game.game.locale,
                     game=manager_game.game.slug,
                 )
-                button(app, "Opdater managerspil").click().run(timeout=20)
+                open_round_details(app, manager_game.game)
+                button(app, "Opdater managerspil").click()
+                open_round_details(app, manager_game.game)
 
                 self.assertFalse(app.exception)
                 self.assertEqual(len(app.get("dialog")), 1)
@@ -1695,6 +1857,10 @@ class DashboardTests(unittest.TestCase):
                         },
                         {
                             "Datakilde": "Spillere",
+                            "Handling": "Cache genbruges",
+                        },
+                        {
+                            "Datakilde": "Spillere · runde 3",
                             "Handling": "Cache genbruges",
                         },
                         {
@@ -1717,7 +1883,8 @@ class DashboardTests(unittest.TestCase):
                 self.assertEqual(client_type.mock_calls, [])
                 self.assertFalse(manifest_dir.exists())
 
-                button(app, "Luk").click().run(timeout=15)
+                button(app, "Luk").click()
+                open_round_details(app, manager_game.game)
                 self.assertEqual(client_type.mock_calls, [])
                 self.assertFalse(manifest_dir.exists())
 
@@ -1771,6 +1938,7 @@ class DashboardTests(unittest.TestCase):
                     locale=manager_game.game.locale,
                     game=manager_game.game.slug,
                 )
+                open_round_details(app, manager_game.game)
                 selector = widget(app, "selectbox", "Vis Rundecenter")
                 self.assertIn("Runde 2 · senest korrigeret", selector.options)
                 root = config.parent
@@ -1780,13 +1948,14 @@ class DashboardTests(unittest.TestCase):
                     if path.is_file()
                 }
 
-                selector.set_value(2).run(timeout=20)
+                selector.set_value(2)
+                open_round_details(app, manager_game.game)
 
                 self.assertFalse(app.exception)
                 self.assertEqual(
                     widget(app, "selectbox", "Vis Rundecenter").value, 2
                 )
-                self.assertEqual(app.query_params["round"], ["2"])
+                self.assertEqual(query_param_values(app, "round"), ["2"])
                 self.assertTrue(
                     any(
                         "Runde 2 er rekonstrueret med seneste rettelser"
@@ -1895,8 +2064,7 @@ class DashboardTests(unittest.TestCase):
                 app = AppTest.from_file(APP_PATH).run(timeout=15)
                 navigate(app, "game", locale=game.locale, game=game.slug)
                 self.assertEqual(fake.calls, [])
-                tab_key = "game-tabs-da-tour-de-france-2026"
-                app.session_state[tab_key] = "Spillerstatistik"
+                app.query_params["section"] = "players"
                 app.run(timeout=15)
                 self.assertEqual(fake.calls, [])
                 frame = app.dataframe[0].value
@@ -1906,10 +2074,10 @@ class DashboardTests(unittest.TestCase):
                 self.assertTrue(frame["Pris"].dtype.kind in "iu")
 
                 widget(app, "selectbox", "Runde").set_value(6)
-                app.session_state[tab_key] = "Spillerstatistik"
+                app.query_params["section"] = "players"
                 app.run(timeout=15)
                 button(app, "Hent runde 6").click()
-                app.session_state[tab_key] = "Spillerstatistik"
+                app.query_params["section"] = "players"
                 app.run(timeout=15)
                 self.assertEqual(fake.calls, [6])
                 self.assertEqual(
@@ -1947,9 +2115,12 @@ class DashboardTests(unittest.TestCase):
             with patch("holdet_lib.HoldetClient", return_value=client):
                 app = AppTest.from_file(APP_PATH).run(timeout=15)
                 navigate(app, "game", locale=game.locale, game=game.slug)
-                select_game_tab(app, game, "Analyse")
+                select_game_section(app, game, "analysis")
                 self.assertFalse(app.exception)
                 self.assertEqual(client.calls, 0)
+                self.assertFalse(settings_path.exists())
+                self.assertTrue(any("valgfrit værktøj" in item.value for item in app.info))
+                button(app, "Åbn denne gang").click().run(timeout=15)
                 self.assertFalse(settings_path.exists())
                 self.assertTrue(
                     any(item.value == "Analyse og beslutninger" for item in app.header)
@@ -1960,6 +2131,9 @@ class DashboardTests(unittest.TestCase):
 
                 player = statistics.entries[0]
                 player_key = holdet.player_identity(game, player)
+                navigate(app, "scouting", locale=game.locale, game=game.slug)
+                button(app, "Åbn denne gang").click().run(timeout=15)
+                self.assertFalse(settings_path.exists())
                 navigate(
                     app,
                     "player",
@@ -1991,6 +2165,7 @@ class DashboardTests(unittest.TestCase):
                     section="alerts",
                 )
                 self.assertFalse(app.exception)
+                button(app, "Åbn denne gang").click().run(timeout=15)
                 self.assertEqual([item.value for item in app.title], ["Tourspillet"])
                 self.assertTrue(
                     any(item.value == "Statusalarmer" for item in app.header)
@@ -1999,6 +2174,62 @@ class DashboardTests(unittest.TestCase):
                     any(item.label == "Managerspil" for item in app.selectbox)
                 )
                 self.assertEqual(client.calls, 0)
+
+    def test_optional_deep_link_open_once_is_session_only_and_enable_is_explicit(self) -> None:
+        with website_environment() as (config, output):
+            statistics = sample_statistics()
+            game = statistics.game
+            holdet.GroupStore(config / "groups.json").create_manager_game(game, "Testspil")
+            holdet.PlayerStatisticsStore(output).save(statistics)
+            settings_path = config / "hub-settings.json"
+            before = {path.relative_to(config.parent): path.read_bytes()
+                      for path in config.parent.rglob("*") if path.is_file()}
+            with patch("holdet_lib.HoldetClient", side_effect=AssertionError("network")) as client:
+                app = AppTest.from_file(APP_PATH).run(timeout=15)
+                navigate(app, "game", locale=game.locale, game=game.slug, section="analysis")
+                self.assertFalse(app.exception)
+                self.assertFalse(any(item.value == "Analyse og beslutninger" for item in app.header))
+                button(app, "Åbn denne gang").click().run(timeout=15)
+                self.assertFalse(app.exception)
+                self.assertTrue(any(item.value == "Analyse og beslutninger" for item in app.header))
+                self.assertFalse(settings_path.exists())
+                after = {path.relative_to(config.parent): path.read_bytes()
+                         for path in config.parent.rglob("*") if path.is_file()}
+                self.assertEqual(after, before)
+
+                fresh = AppTest.from_file(APP_PATH).run(timeout=15)
+                navigate(fresh, "game", locale=game.locale, game=game.slug, section="analysis")
+                self.assertTrue(any("valgfrit værktøj" in item.value for item in fresh.info))
+                button(fresh, "Aktivér værktøj").click().run(timeout=15)
+                self.assertFalse(fresh.exception)
+                saved = holdet.HubSettingsStore(settings_path).load()
+                self.assertIn("analysis", saved.enabled_features)
+                self.assertTrue(any(item.value == "Analyse og beslutninger" for item in fresh.header))
+                client.assert_not_called()
+
+    def test_archived_optional_deep_link_cannot_persist_an_enable(self) -> None:
+        with website_environment() as (config, output):
+            game = sample_statistics().game
+            store = holdet.GroupStore(config / "groups.json")
+            store.create_manager_game(game, "Arkivspil")
+            store.archive_manager_game(game)
+            before = {path.relative_to(config.parent): path.read_bytes()
+                      for path in config.parent.rglob("*") if path.is_file()}
+            with patch("holdet_lib.HoldetClient", side_effect=AssertionError("network")) as client:
+                app = AppTest.from_file(APP_PATH).run(timeout=15)
+                navigate(app, "game", locale=game.locale, game=game.slug, section="analysis")
+                self.assertFalse(app.exception)
+                self.assertTrue(button(app, "Aktivér værktøj").disabled)
+                self.assertFalse(button(app, "Åbn denne gang").disabled)
+                button(app, "Åbn denne gang").click().run(timeout=15)
+                self.assertFalse(app.exception)
+                self.assertTrue(any(item.value == "Analyse og beslutninger" for item in app.header))
+                self.assertTrue(button(app, "Opdater data").disabled)
+                client.assert_not_called()
+            after = {path.relative_to(config.parent): path.read_bytes()
+                     for path in config.parent.rglob("*") if path.is_file()}
+            self.assertEqual(after, before)
+            self.assertTrue(store.load_configuration().games[0].is_archived)
 
     def test_manager_alerts_are_scoped_badged_and_clear_only_current_game(self) -> None:
         with website_environment() as (config, output):
@@ -2019,6 +2250,7 @@ class DashboardTests(unittest.TestCase):
                 holdet.HubSettings(),
                 (holdet.watchlist_entry(game, player),),
             )
+            enable_tools(config, "alerts", "scouting")
             detected = datetime(2026, 8, 7, 12, tzinfo=timezone.utc)
             current_unread = holdet.WatchlistAlert(
                 alert_id="current-unread",
@@ -2055,12 +2287,12 @@ class DashboardTests(unittest.TestCase):
             navigate(app, "alerts")
             self.assertFalse(app.exception)
             self.assertNotIn("view", app.query_params)
-            self.assertEqual(app.query_params["section"], ["alerts"])
+            self.assertEqual(query_param_values(app, "section"), ["alerts"])
             self.assertEqual([item.value for item in app.title], ["Tourspillet"])
             self.assertTrue(
                 any(item.value == "Statusalarmer" for item in app.header)
             )
-            self.assertIn("Statusalarmer · 1", [item.label for item in app.tabs])
+            self.assertIn("Statusalarmer", widget(app, "menu_button", "Flere funktioner").options)
             self.assertFalse(
                 any(item.label == "Managerspil" for item in app.selectbox)
             )
@@ -2075,7 +2307,7 @@ class DashboardTests(unittest.TestCase):
             )
 
             button(app, "Markér som læst").click().run(timeout=15)
-            self.assertIn("Statusalarmer · 1", [item.label for item in app.tabs])
+            self.assertTrue(any(item.value == "Statusalarmer" for item in app.header))
             self.assertNotIn(
                 "Tourspillet (1 ulæste)", [item.label for item in app.button]
             )
@@ -2087,6 +2319,7 @@ class DashboardTests(unittest.TestCase):
 
     def test_hidden_alert_route_supports_non_manager_games_and_inbox_errors(self) -> None:
         with website_environment() as (config, output):
+            enable_tools(config, "alerts")
             statistics = sample_statistics()
             game = statistics.game
             holdet.PlayerStatisticsStore(output).save(statistics)
@@ -2179,11 +2412,10 @@ class DashboardTests(unittest.TestCase):
             with patch("holdet_lib.HoldetClient", return_value=client):
                 app = AppTest.from_file(APP_PATH).run(timeout=15)
                 navigate(app, "game", locale=game.locale, game=game.slug)
-                tab_key = "game-tabs-da-tour-de-france-2026"
-                app.session_state[tab_key] = "Spillerstatistik"
+                app.query_params["section"] = "players"
                 app.run(timeout=15)
                 button(app, "Opdater runde 7").click()
-                app.session_state[tab_key] = "Spillerstatistik"
+                app.query_params["section"] = "players"
                 app.run(timeout=15)
 
                 self.assertEqual(len(app.dataframe), 1)
@@ -2212,7 +2444,7 @@ class DashboardTests(unittest.TestCase):
                 )
 
                 button(app, "Prøv igen").click()
-                app.session_state[tab_key] = "Spillerstatistik"
+                app.query_params["section"] = "players"
                 app.run(timeout=15)
                 self.assertEqual(client.calls, [7, 7])
                 self.assertFalse(
@@ -2231,7 +2463,7 @@ class DashboardTests(unittest.TestCase):
                 app.session_state["player_statistics_errors"] = {
                     ("da", "tour-de-france-2026"): "gammel teknisk fejl"
                 }
-                app.session_state[tab_key] = "Spillerstatistik"
+                app.query_params["section"] = "players"
                 app.run(timeout=15)
                 self.assertTrue(
                     any("gammel teknisk fejl" in item.value for item in app.code)
@@ -2366,6 +2598,7 @@ class DashboardTests(unittest.TestCase):
                 raise AssertionError("scouting-navigation må ikke kontakte Holdet")
 
         with website_environment() as (config, output):
+            enable_tools(config, "scouting")
             base = sample_statistics(variant="soccer")
             players = tuple(
                 replace(
@@ -2448,7 +2681,7 @@ class DashboardTests(unittest.TestCase):
         self.assertIn('anchor="data-og-lager"', data_source)
 
         readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
-        command = "py -3.14 -m streamlit run .\\website\\server.py"
+        command = ".\\.venv\\Scripts\\python.exe -m streamlit run .\\website\\server.py"
         self.assertIn(command, readme)
         self.assertNotIn("--server.address", readme)
         self.assertNotIn("--server.port", readme)

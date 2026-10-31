@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
 import json
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Iterable, Literal, Sequence
 
 from .data_packages import DataPackage, DataTable, serialize_data_package
 from .errors import PayloadError
@@ -131,6 +132,7 @@ class PlayerExportDocument:
         tuple[str, tuple[tuple[str, float | bool | None], ...]], ...
     ] = ()
     formula_error_count: int = 0
+    output_order: Literal["query", "display"] = "query"
 
 
 @dataclass(frozen=True, slots=True)
@@ -276,10 +278,18 @@ def build_player_export(
     source_generated_at: datetime | None = None,
     computed_columns: tuple[ComputedPlayerColumn, ...] = (),
     computed_contexts: dict[int, dict[str, float | int | bool | None]] | None = None,
+    ordered_entries: Sequence[PlayerEntry] | None = None,
 ) -> PlayerExportDocument:
     entries = filter_player_statistics(statistics, query)
     if not entries:
         raise PayloadError("Ingen spillere matcher de valgte filtre")
+    if ordered_entries is not None:
+        display_entries = tuple(ordered_entries)
+        if Counter(display_entries) != Counter(entries):
+            raise PayloadError(
+                "Visningsrækkefølgen skal indeholde præcis de filtrerede spillere"
+            )
+        entries = display_entries
     timestamp = generated_at or datetime.now().astimezone()
     if timestamp.tzinfo is None:
         timestamp = timestamp.astimezone()
@@ -330,6 +340,7 @@ def build_player_export(
         selected_columns,
         tuple(frozen_values),
         error_count,
+        "display" if ordered_entries is not None else "query",
     )
 
 
@@ -470,6 +481,7 @@ def player_export_to_dict(document: PlayerExportDocument) -> dict[str, object]:
             "round": statistics.round_number,
         },
         "filters": player_query_to_dict(document.query),
+        "output_order": document.output_order,
         "row_count": len(document.entries),
         "columns": [
             *document.query.columns,
@@ -517,6 +529,7 @@ def player_export_data_package(document: PlayerExportDocument) -> DataPackage:
             "variant": statistics.variant,
             "format": statistics.format,
             "unit": statistics.unit,
+            "output_order": document.output_order,
         },
         tables=(
             DataTable(
@@ -560,6 +573,11 @@ def _metadata_lines(document: PlayerExportDocument) -> list[tuple[str, str]]:
         ("Eksport oprettet", document.generated_at.astimezone().strftime("%d.%m.%Y %H:%M:%S")),
         ("Rækker", str(len(document.entries))),
         ("Formelfejl", str(document.formula_error_count)),
+        (
+            "Rækkefølge",
+            "Som vist i spillerlisten" if document.output_order == "display"
+            else "Filterets sortering",
+        ),
         (
             "Filtre",
             json.dumps(player_query_to_dict(document.query), ensure_ascii=False, separators=(",", ":")),

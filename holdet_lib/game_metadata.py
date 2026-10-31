@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 import json
 from pathlib import Path
@@ -76,6 +76,10 @@ class GameMetadataRevision:
 
     metadata: GameMetadata
     changes: tuple[MetadataChange, ...] = ()
+    # Derived on read; older captures have no durable promotion receipt.
+    promotion: Literal["current", "unconfirmed_newer", "unknown"] = field(
+        default="unknown", compare=False
+    )
 
 
 def _target_round(metadata: GameMetadata) -> int | None:
@@ -434,11 +438,17 @@ class GameMetadataStore:
             if previous is None or not had_revision
             else compare_game_metadata(previous, metadata)
         )
-        replace_text_atomically(
-            self._path(metadata.game),
-            json.dumps(_metadata_to_dict(metadata), ensure_ascii=False, indent=2) + "\n",
-        )
-        self._save_revision(GameMetadataRevision(metadata, changes))
+        revision_path = self._save_revision(GameMetadataRevision(metadata, changes))
+        try:
+            replace_text_atomically(
+                self._path(metadata.game),
+                json.dumps(_metadata_to_dict(metadata), ensure_ascii=False, indent=2) + "\n",
+            )
+        except OSError as exc:
+            raise OSError(
+                f"Metadatarevisionen {revision_path.name} blev gemt, men den "
+                "aktuelle spilinfo blev ikke erstattet"
+            ) from exc
         return metadata
 
     def load(self, game: GameUrl) -> GameMetadata | None:
@@ -477,6 +487,11 @@ class GameMetadataStore:
             return (), ()
         values: list[GameMetadataRevision] = []
         warnings: list[str] = []
+        try:
+            current = self.load(game)
+        except (OSError, PayloadError, ValueError) as exc:
+            current = None
+            warnings.append(f"Aktuel spilinfo kunne ikke læses: {exc}")
         for path in directory.glob("metadata-*.json"):
             try:
                 revision = _revision_from_dict(
@@ -487,7 +502,13 @@ class GameMetadataStore:
                     game.slug,
                 ):
                     raise PayloadError("Metadatarevisionen tilhører et andet spil")
-                values.append(revision)
+                promotion: Literal["current", "unconfirmed_newer", "unknown"] = "unknown"
+                if current is not None:
+                    if revision.metadata == current:
+                        promotion = "current"
+                    elif revision.metadata.fetched_at > current.fetched_at:
+                        promotion = "unconfirmed_newer"
+                values.append(replace(revision, promotion=promotion))
             except (OSError, json.JSONDecodeError, PayloadError, ValueError) as exc:
                 warnings.append(f"{path}: {exc}")
         values.sort(key=lambda item: item.metadata.fetched_at, reverse=True)

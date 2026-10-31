@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 import os
 from pathlib import Path
+import time
 from uuid import uuid4
 
 
@@ -27,8 +28,12 @@ def publish_immutable(path: Path, content: bytes) -> None:
         except FileExistsError:
             raise
         except OSError:
-            with path.open("xb") as handle:
-                handle.write(content)
+            # Windows rename refuses to overwrite an existing destination. On
+            # other platforms rename may replace it, so fail rather than break
+            # the immutable/no-partial-publication contract.
+            if os.name != "nt":
+                raise
+            os.rename(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -44,6 +49,17 @@ def replace_text_atomically(path: Path, content: str) -> None:
     temporary = path.parent / f".{path.name}.{uuid4().hex}.tmp"
     try:
         temporary.write_text(content, encoding="utf-8", newline="\n")
-        os.replace(temporary, path)
+        for delay in (0.025, 0.05, 0.1, 0.2, None):
+            try:
+                os.replace(temporary, path)
+                break
+            except OSError as exc:
+                if (
+                    os.name != "nt"
+                    or getattr(exc, "winerror", None) not in {5, 32, 33}
+                    or delay is None
+                ):
+                    raise
+                time.sleep(delay)
     finally:
         temporary.unlink(missing_ok=True)

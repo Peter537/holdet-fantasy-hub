@@ -27,7 +27,7 @@ PYPI_JSON = "https://pypi.org/pypi/{name}/{version}/json"
 PYPI_ARTIFACT_HOST = "files.pythonhosted.org"
 OSV_QUERY_BATCH = "https://api.osv.dev/v1/querybatch"
 EXPECTED_PYTHON = (3, 14)
-MINIMUM_PIP = (26, 0, 1)
+MINIMUM_PIP = (26, 2, 2)
 REQUIREMENT_NAME = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 USER_AGENT = "holdet-fantasy-hub-dependency-lock/1"
@@ -71,10 +71,14 @@ def ensure_supported_runtime(*, require_lock_command: bool = True) -> None:
     )
     match = re.search(r"\bpip\s+(\d+)\.(\d+)\.(\d+)", completed.stdout)
     if match is None or tuple(int(part) for part in match.groups()) < MINIMUM_PIP:
-        raise LockError("pip 26.0.1 or newer is required for PEP 751 lock support.")
+        minimum = ".".join(str(part) for part in MINIMUM_PIP)
+        raise LockError(f"pip {minimum} or newer is required for the audited PEP 751 lock workflow.")
 
 
-def generate_lock(requirements: tuple[str, ...], destination: Path) -> None:
+def generate_lock(
+    requirements: tuple[str, ...], destination: Path,
+    *, constraints: Path | None = None,
+) -> None:
     command = [
         sys.executable,
         "-m",
@@ -91,8 +95,10 @@ def generate_lock(requirements: tuple[str, ...], destination: Path) -> None:
         "--output",
         str(destination),
         "--quiet",
-        *requirements,
     ]
+    if constraints is not None:
+        command.extend(("--constraint", str(constraints)))
+    command.extend(requirements)
     try:
         subprocess.run(command, cwd=PROJECT_ROOT, check=True)
     except subprocess.CalledProcessError as exc:
@@ -249,7 +255,18 @@ def run(check: bool) -> int:
     requirements = load_requirements()
     with tempfile.TemporaryDirectory(prefix="holdet-dependency-lock-") as directory:
         candidate = Path(directory) / "pylock.toml"
-        generate_lock(requirements, candidate)
+        constraints = None
+        if check:
+            _, current_artifacts = load_and_validate_lock(LOCK_PATH, requirements)
+            constraints = Path(directory) / "constraints.txt"
+            constraints.write_text(
+                "".join(
+                    f"{artifact['name']}=={artifact['version']}\n"
+                    for artifact in current_artifacts
+                ),
+                encoding="utf-8",
+            )
+        generate_lock(requirements, candidate, constraints=constraints)
         _, artifacts = load_and_validate_lock(candidate, requirements)
         provenance_gaps = verify_pypi_artifacts(artifacts)
         verify_osv(artifacts)

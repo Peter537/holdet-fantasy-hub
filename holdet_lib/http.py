@@ -155,6 +155,10 @@ class HttpClient:
         try:
             return json.loads(text)
         except json.JSONDecodeError as exc:
+            if text.lstrip("\ufeff \t\r\n").lower().startswith(("<!doctype html", "<html")):
+                raise PayloadError(
+                    f"URL'en {url} returnerede en HTML-side i stedet for JSON"
+                ) from exc
             raise PayloadError(f"URL'en {url} returnerede ugyldig JSON") from exc
 
 
