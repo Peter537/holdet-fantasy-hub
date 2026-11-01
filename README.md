@@ -18,6 +18,7 @@ Holdet Fantasy Hub er et uofficielt, lokalt Windows-værktøj til offentlige fan
 - En lokal kørselsjournal bevarer fremdrift og delresultater. En browsergenindlæsning kan tilslutte sig kørslen igen; stop og genoptagelse er eksplicitte handlinger.
 - Scouting og watchlists, statusalarmer, beslutningsanalyse og transferlaboratorium, Managers og sæsoner, kalender samt Rundens historie er seks valgfrie værktøjer. De starter deaktiveret og vælges under **Indstillinger**. Eksperimentelle fixture- og Monte Carlo-modeller kræver yderligere tilvalg.
 - Dataadministration med import, integritetskontrol, lageroverblik, ZIP-backup, sikker gendannelse og et lokalt read-only API til Excel, Power BI og egne scripts.
+- Kildebaseret rådgivnings-CLI og Codex-skill med samlet cachekontekst, komplette regelsider, personlige holdstrategier og validering af forslag. Se [Holdrådgivning](docs/agent-advisor.md).
 
 ## Kom hurtigt i gang
 

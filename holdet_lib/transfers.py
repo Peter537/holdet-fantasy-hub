@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass, replace
-from math import ceil
 from typing import Literal
 
 from .errors import UnsupportedGameError
@@ -29,6 +28,11 @@ class TransferRuleProfile:
     captain_count: int = 0
     known: bool = True
     fee_basis_points: int | None = None
+    fee_rounding: Literal["floor", "ceil", "nearest"] | None = "ceil"
+    fee_free_through_round: int | None = None
+    sport: str | None = None
+    captain_positions: tuple[str, ...] = ()
+    allow_club_excess_without_trades: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,28 +171,36 @@ def transfer_rule_profile(
 
 
 def _position(profile: TransferRuleProfile, value: str) -> str:
-    adapter_key = {
+    adapter_key = profile.sport or {
         "football": "soccer",
         "cycling": "cycling",
         "motor": "formula1",
         "golf": "golf",
     }.get(profile.key)
     if adapter_key is None:
+        positions = {item[0] for item in profile.position_limits}
+        if positions & {"goalkeeper", "defender", "midfielder", "forward"}:
+            adapter_key = "soccer"
+        elif positions & {"driver", "constructor", "pitcrew"}:
+            adapter_key = "formula1"
+    if adapter_key is None:
         return " ".join(value.strip().casefold().split())
     return get_sport_adapter(adapter_key).normalize_position(value)
 
 
-def _roster_player(entry: RosterEntry) -> ScenarioPlayer:
+def _roster_player(entry: RosterEntry, current: PlayerEntry | None = None) -> ScenarioPlayer:
+    # Keep snapshot finances, but use current catalogue attributes for legality and availability.
+    attributes = current if current is not None else entry
     return ScenarioPlayer(
         entry.player_id,
-        entry.name,
-        entry.team,
-        entry.position,
+        attributes.name,
+        attributes.team,
+        attributes.position,
         entry.value,
-        entry.is_active,
-        entry.is_disabled,
-        entry.is_injured,
-        entry.has_suspension,
+        attributes.is_active,
+        attributes.is_disabled,
+        attributes.is_injured,
+        attributes.has_suspension,
         "current",
     )
 
@@ -248,7 +260,7 @@ def simulate_transfers(
         )
 
     kept = [
-        _roster_player(entry)
+        _roster_player(entry, available.get(entry.player_id))
         for entry in scenario.initial_roster
         if entry.player_id not in sold_ids
     ]
@@ -260,12 +272,14 @@ def simulate_transfers(
     for player in purchases:
         if not player.is_active or player.is_disabled:
             errors.append(f"{player.name} kan ikke købes, fordi spilleren er inaktiv")
+
+    ending = tuple((*kept, *purchases))
+    for player in ending:
         if player.is_injured:
             warnings.append(f"{player.name} er markeret som skadet")
         if player.has_suspension:
             warnings.append(f"{player.name} er markeret med karantæne")
 
-    ending = tuple((*kept, *purchases))
     ending_ids = [entry.player_id for entry in ending]
     if len(ending_ids) != len(set(ending_ids)):
         errors.append("Slutholdet indeholder den samme spiller flere gange")
@@ -279,9 +293,29 @@ def simulate_transfers(
         if profile.fee_basis_points is not None
         else profile.fee_percent * 100
     )
-    transfer_fee = sum(
-        ceil(entry.value * fee_basis_points / 10_000) for entry in purchases
+    fee_free_until = (
+        profile.free_through_round
+        if profile.fee_free_through_round is None
+        else profile.fee_free_through_round
     )
+    def fee(value: int) -> int:
+        numerator = value * fee_basis_points
+        if profile.fee_rounding == "floor":
+            return numerator // 10_000
+        if profile.fee_rounding == "nearest":
+            return (numerator + 5_000) // 10_000
+        return (numerator + 9_999) // 10_000
+
+    transfer_fee = (
+        0 if scenario.target_round <= fee_free_until
+        else sum(fee(entry.value) for entry in purchases)
+    )
+    unknown_fee_rounding = (
+        scenario.target_round > fee_free_until and profile.fee_rounding is None
+        and any(entry.value * fee_basis_points % 10_000 for entry in purchases)
+    )
+    if unknown_fee_rounding:
+        warnings.append("Transfergebyrets afrunding er ikke verificeret")
     ending_bank = None
     if profile.budget_enabled:
         if scenario.starting_bank is None:
@@ -333,7 +367,9 @@ def simulate_transfers(
                     f"Der skal være {profile.category_size} spillere i hver af "
                     f"{profile.category_count} kategorier"
                 )
-        if profile.max_from_team is not None:
+        if profile.max_from_team is not None and not (
+            profile.allow_club_excess_without_trades and not sold_ids and not bought_ids
+        ):
             team_counts = Counter(entry.team.strip().casefold() for entry in ending)
             offenders = [
                 team for team, count in team_counts.items()
@@ -348,15 +384,22 @@ def simulate_transfers(
             errors.append(f"Der skal vælges {profile.captain_count} kaptajn(er)")
         if not captains.issubset(set(ending_ids)):
             errors.append("Kaptajnen skal være på slutholdet")
+        if profile.captain_positions and any(
+            _position(profile, entry.position) not in profile.captain_positions
+            for entry in ending if entry.player_id in captains
+        ):
+            errors.append("Kaptajnen har ikke en tilladt position")
         status: Literal["valid", "invalid", "unverified"] = (
             "invalid" if errors else "valid"
         )
     else:
         warnings.append("Regler kan ikke valideres for dette fremtidige format")
         status = "unverified"
+    if unknown_fee_rounding and not errors:
+        status = "unverified"
 
     if (
-        not profile.known
+        not profile.known or unknown_fee_rounding
         or scenario.team_round is None
         or scenario.player_round is None
         or scenario.team_round != scenario.player_round

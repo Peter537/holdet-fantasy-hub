@@ -9,7 +9,7 @@ from pathlib import Path
 
 from .backup import known_schema_error
 from .paths import AppPaths
-from .persistence import replace_text_atomically
+from .persistence import file_update_lock_path, replace_text_atomically
 
 
 INTEGRITY_INDEX_SCHEMA_VERSION = 1
@@ -66,12 +66,14 @@ def _roots(paths: AppPaths) -> tuple[tuple[str, Path], ...]:
         ("data/tournament-pairings", paths.tournament_pairing_dir),
         ("data/game-metadata", paths.game_metadata_dir),
         ("data/fixtures", paths.fixture_dir),
+        ("data/rules", paths.rules_dir),
         ("data/hall-of-fame", paths.hall_of_fame_dir),
         ("data/imports", paths.import_dir),
     )
 
 
 def canonical_local_files(paths: AppPaths) -> tuple[tuple[str, Path], ...]:
+    operational_locks = {file_update_lock_path(paths.strategy_file), file_update_lock_path(paths.config_dir)}
     result: list[tuple[str, Path]] = []
     seen: set[Path] = set()
     for prefix, root in _roots(paths):
@@ -83,6 +85,8 @@ def canonical_local_files(paths: AppPaths) -> tuple[tuple[str, Path], ...]:
             if not path.is_file() or path.is_symlink():
                 continue
             resolved = path.resolve()
+            if resolved in operational_locks:
+                continue
             if resolved in seen or resolved == paths.integrity_index_file.resolve():
                 continue
             seen.add(resolved)
@@ -109,6 +113,8 @@ def _kind(relative: str) -> str:
 
 def _game_scope(relative: str) -> str | None:
     parts = relative.split("/")
+    if len(parts) >= 5 and parts[:2] == ["data", "rules"]:
+        return parts[3]
     if len(parts) >= 4 and parts[0] == "data" and parts[1] in {
         "snapshots",
         "manifests",

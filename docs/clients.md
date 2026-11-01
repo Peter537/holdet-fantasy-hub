@@ -95,6 +95,8 @@ Stop kun de bekræftede app-processer og deres konkrete launcherproces, bekræft
 
 ## Kildebaseret CLI
 
+CLI'en understøtter også cachebaseret discovery og samlet JSON med games/context, komplette regelsider, personlige strategier, forslagsvalidering og eksplicit opdatering. Se [Holdrådgivning fra CLI og Codex](agent-advisor.md). Brug projektets .venv-interpreter, så CLI og dashboard deler det samme understøttede miljø.
+
 CLI'en køres direkte fra projektets kildekode. Brug `--help` som autoritativ oversigt:
 
 ```powershell

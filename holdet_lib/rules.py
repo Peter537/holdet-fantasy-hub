@@ -19,6 +19,12 @@ RoundingMode = Literal["floor", "ceil", "nearest"]
 AnalysisCertainty = Literal["final", "preliminary", "unverified"]
 
 
+def _rounding(value: object) -> RoundingMode | None:
+    if value is not None and (not isinstance(value, str) or value not in {"floor", "ceil", "nearest"}):
+        raise ValueError("Ukendt afrundingsregel")
+    return value  # type: ignore[return-value]
+
+
 @dataclass(frozen=True, slots=True)
 class AnalysisProvenance:
     """Explain the data window and certainty behind an analysis result."""
@@ -47,9 +53,9 @@ class GameRuleProfile:
     source_url: str | None = None
     accessed_on: date | None = None
     bank_interest_basis_points: int | None = None
-    bank_interest_rounding: RoundingMode = "floor"
+    bank_interest_rounding: RoundingMode | None = "floor"
     transfer_fee_basis_points: int | None = None
-    transfer_fee_rounding: RoundingMode = "ceil"
+    transfer_fee_rounding: RoundingMode | None = "ceil"
     transfer_summary_is_fee: bool = False
     salary_cap: int | None = None
     roster_size: int | None = None
@@ -63,10 +69,31 @@ class GameRuleProfile:
     free_through_round: int | None = None
     captain_count: int | None = None
     captain_multiplier: int | None = None
+    sport: str | None = None
+    captain_positions: tuple[str, ...] = ()
+    captain_positive_only: bool = False
+    fee_free_through_round: int | None = None
+    gold_unlimited: bool = False
+    allow_club_excess_without_trades: bool = False
+    source_sha256: str | None = None
+    document_url: str | None = None
+    initial_roster_fee_basis_points: int | None = None
 
     def __post_init__(self) -> None:
         if not self.game_locale.strip() or not self.game_slug.strip():
             raise ValueError("Regelprofilen skal have spilidentitet")
+        for name in ("game_id", "bank_interest_basis_points", "transfer_fee_basis_points",
+                     "salary_cap", "roster_size", "max_from_team", "category_count",
+                     "category_size", "base_contracts", "gold_contracts",
+                     "free_through_round", "fee_free_through_round", "captain_count",
+                     "captain_multiplier", "initial_roster_fee_basis_points"):
+            value = getattr(self, name)
+            if value is not None and (
+                isinstance(value, bool) or not isinstance(value, int) or value < 0
+            ):
+                raise ValueError(f"{name} skal være et ikke-negativt heltal")
+        _rounding(self.bank_interest_rounding)
+        _rounding(self.transfer_fee_rounding)
         if self.verified and (
             not self.source_url
             or not self.source_url.startswith(("https://", "http://"))
@@ -86,7 +113,10 @@ class GameRuleProfile:
         if self.captain_multiplier is not None and self.captain_multiplier < 1:
             raise ValueError("Kaptajnmultiplikatoren skal være mindst 1")
         for position, minimum, maximum in self.position_limits:
-            if not position.strip() or minimum < 0 or maximum < minimum:
+            if (not isinstance(position, str) or not position.strip()
+                    or isinstance(minimum, bool) or not isinstance(minimum, int)
+                    or isinstance(maximum, bool) or not isinstance(maximum, int)
+                    or minimum < 0 or maximum < minimum):
                 raise ValueError("Positionsgrænserne er ugyldige")
         if (self.category_count is None) != (self.category_size is None):
             raise ValueError("Kategoriantal og kategoristørrelse skal angives sammen")
@@ -130,13 +160,20 @@ class GameRuleProfile:
             captain_count=self.captain_count or 0,
             known=known,
             fee_basis_points=basis_points,
+            fee_rounding=self.transfer_fee_rounding,
+            fee_free_through_round=self.fee_free_through_round,
+            sport=self.sport,
+            captain_positions=self.captain_positions,
+            allow_club_excess_without_trades=self.allow_club_excess_without_trades,
         )
 
 
-def _basis_points(amount: int, basis_points: int, rounding: RoundingMode) -> int:
+def _basis_points(amount: int, basis_points: int, rounding: RoundingMode | None) -> int | None:
     if amount < 0:
         raise ValueError("Beløbet skal være ikke-negativt")
     numerator = amount * basis_points
+    if rounding is None:
+        return numerator // 10_000 if numerator % 10_000 == 0 else None
     if rounding == "floor":
         return numerator // 10_000
     if rounding == "ceil":
@@ -144,7 +181,7 @@ def _basis_points(amount: int, basis_points: int, rounding: RoundingMode) -> int
     return (numerator + 5_000) // 10_000
 
 
-# Profiles are added only when the exact season has a captured official source.
+# No season profiles are shipped; reviewed rules are stored in local evidence.
 AUDITED_RULE_PROFILES: tuple[GameRuleProfile, ...] = ()
 
 
@@ -199,6 +236,15 @@ def game_rule_to_dict(profile: GameRuleProfile) -> dict[str, object]:
         "free_through_round": profile.free_through_round,
         "captain_count": profile.captain_count,
         "captain_multiplier": profile.captain_multiplier,
+        "sport": profile.sport,
+        "captain_positions": list(profile.captain_positions),
+        "captain_positive_only": profile.captain_positive_only,
+        "fee_free_through_round": profile.fee_free_through_round,
+        "gold_unlimited": profile.gold_unlimited,
+        "allow_club_excess_without_trades": profile.allow_club_excess_without_trades,
+        "source_sha256": profile.source_sha256,
+        "document_url": profile.document_url,
+        "initial_roster_fee_basis_points": profile.initial_roster_fee_basis_points,
     }
 
 
@@ -225,7 +271,7 @@ def game_rule_from_dict(raw: object) -> GameRuleProfile:
         str(raw.get("game_slug", "")),
         str(raw.get("label", "")),
         game_id=_optional_int(raw.get("game_id")),
-        verified=bool(raw.get("verified", False)),
+        verified=_boolean(raw, "verified"),
         source_url=_optional_text(raw.get("source_url")),
         accessed_on=date.fromisoformat(accessed) if isinstance(accessed, str) else None,
         bank_interest_basis_points=_optional_int(raw.get("bank_interest_basis_points")),
@@ -245,6 +291,15 @@ def game_rule_from_dict(raw: object) -> GameRuleProfile:
         free_through_round=_optional_int(raw.get("free_through_round")),
         captain_count=_optional_int(raw.get("captain_count")),
         captain_multiplier=_optional_int(raw.get("captain_multiplier")),
+        sport=_optional_text(raw.get("sport")),
+        captain_positions=_string_tuple(raw.get("captain_positions", [])),
+        captain_positive_only=_boolean(raw, "captain_positive_only"),
+        fee_free_through_round=_optional_int(raw.get("fee_free_through_round")),
+        gold_unlimited=_boolean(raw, "gold_unlimited"),
+        allow_club_excess_without_trades=_boolean(raw, "allow_club_excess_without_trades"),
+        source_sha256=_optional_text(raw.get("source_sha256")),
+        document_url=_optional_text(raw.get("document_url")),
+        initial_roster_fee_basis_points=_optional_int(raw.get("initial_roster_fee_basis_points")),
     )
 
 
@@ -256,11 +311,20 @@ def _optional_int(value: object) -> int | None:
     return value
 
 
+def _boolean(raw: dict, key: str) -> bool:
+    value = raw.get(key, False)
+    if not isinstance(value, bool):
+        raise ValueError(f"{key} skal være en boolsk værdi")
+    return value
+
+
+def _string_tuple(value: object) -> tuple[str, ...]:
+    if not isinstance(value, list) or any(
+        not isinstance(item, str) or not item.strip() for item in value
+    ):
+        raise ValueError("captain_positions skal være en liste af positioner")
+    return tuple(value)
+
+
 def _optional_text(value: object) -> str | None:
     return value.strip() if isinstance(value, str) and value.strip() else None
-
-
-def _rounding(value: object) -> RoundingMode:
-    if value not in {"floor", "ceil", "nearest"}:
-        raise ValueError("Ukendt afrundingsregel")
-    return value  # type: ignore[return-value]

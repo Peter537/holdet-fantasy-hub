@@ -149,6 +149,12 @@ git diff --check
 
 Tests læser ikke brugerens AppData eller repositoryets tidligere `/config`. Konfiguration, snapshots og backuptræer oprettes i midlertidige mapper. Konto-, profil-, bruger- og fantasy-team-identiteter skal være fiktive; offentlige sportsnavne må bruges som parserfixtures.
 
+Regelside-parseren testes med selvskrevet HTML i `tests/rule_page_fixtures.py`: opdigtede tabeller, skjulte paneler, lukkede details-afsnit og scripts/styles, der udelades fra regelteksten. Der medfølger ingen sæsonprofiler eller kopier af officielle regelsider. Profiltests bruger opdigtede regler og kontrollerer validering, beregninger og binding til syntetiske kilder. Offline-suiten henter ikke aktuelle regelsider.
+
+Strategitests koordinerer overlappende gemninger i både tråde og separate Python-processer med fælles konfiguration og forskellige datarødder. De kontrollerer bevaring af begge holdpolitikker, timeout uden ændring af JSON samt frigivelse efter fejl og processtop. Gendannelsestests starter en separat gemmeproces, mens den aktive konfigurationsmappe er flyttet væk, og kontrollerer både vellykket installation og tilbagerulning efter en påført fejl. En optaget konfigurationslås skal afbryde gendannelsen før ændringer og frigive datalåsen. Driftslåse udelades fra backup og integritetskontrol.
+
+Context-tests beskadiger en arkiveret turneringsdefinition og kontrollerer, at den aktive konkurrence stadig vises sammen med en kildeadvarsel, som kun indeholder antal. Kommandoen må hverken ændre filer eller lække revisionsfilens sti i advarslen.
+
 ## Sideeffektfrihed
 
 Import, `resolve_paths()`, cacheindeksering, type-hint-evaluering og almindelig dashboardnavigation må ikke oprette mapper, skrive filer eller starte netværkskald. Kun eksplicitte save-, export-, backup-, restore-, discovery- og fetch-handlinger må have deres respektive sideeffekter.

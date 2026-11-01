@@ -15,6 +15,7 @@ class VersionAndDispatchTests(unittest.TestCase):
         root = Path(__file__).parents[1]
         documents = [root / "README.md", *sorted((root / "docs").glob("*.md"))]
         expected_docs = {
+            "agent-advisor.md",
             "architecture.md",
             "clients.md",
             "data-retrieval.md",

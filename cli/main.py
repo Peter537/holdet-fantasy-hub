@@ -1,4 +1,4 @@
-"""Command-line dispatch for player and fantasy-team exports."""
+"""Source-based fantasy data exports and cache-first advisory commands."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from holdet_lib.errors import ScraperError
+from holdet_lib.refresh_runs import RefreshRunBusyError
 from holdet_lib.http import HttpClient
 from holdet_lib.client import HoldetClient
 from holdet_lib.models import TeamReference
@@ -31,7 +32,7 @@ from holdet_lib.team_exports import (
     TeamExportStore,
     build_team_export,
 )
-from holdet_lib.paths import PathOverrides, open_in_explorer, resolve_paths
+from holdet_lib.paths import open_in_explorer
 from holdet_lib.storage import PlayerStatisticsStore, SnapshotStore
 from holdet_lib.players import SORT_ORDERS, normalize_game_url
 from holdet_lib.teams import (
@@ -43,6 +44,7 @@ from holdet_lib.teams import (
     select_accounts,
 )
 from holdet_lib.version import VERSION
+from cli import advisor
 
 
 def _status_rule(value: str) -> tuple[str, str]:
@@ -109,7 +111,7 @@ def _add_player_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--data-dir",
         type=Path,
-        default=None,
+        default=argparse.SUPPRESS,
         help="override the complete application-data root",
     )
 
@@ -164,7 +166,7 @@ def _add_team_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--data-dir",
         type=Path,
-        default=None,
+        default=argparse.SUPPRESS,
         help="override the complete application-data root",
     )
 
@@ -174,9 +176,13 @@ def build_argument_parser(*, prog: str | None = None) -> argparse.ArgumentParser
 
     parser = argparse.ArgumentParser(
         prog=prog,
-        description="Export public Holdet.dk player statistics and fantasy teams.",
+        description="Review cached fantasy games, validate teams, and explicitly refresh or export public data.",
     )
     parser.add_argument("--version", action="version", version=VERSION)
+    parser.add_argument("--data-dir", type=Path, default=argparse.SUPPRESS,
+                        help="application root containing data/ and exports/")
+    parser.add_argument("--config-dir", type=Path, default=argparse.SUPPRESS,
+                        help="configuration directory, independent of the data root")
     subparsers = parser.add_subparsers(dest="command", required=True)
     players = subparsers.add_parser(
         "players",
@@ -203,11 +209,13 @@ def build_argument_parser(*, prog: str | None = None) -> argparse.ArgumentParser
     data.add_argument(
         "--data-dir",
         type=Path,
-        default=None,
+        default=argparse.SUPPRESS,
         help="override the complete application-data root",
     )
     data_commands = data.add_subparsers(dest="data_command", required=True)
-    data_commands.add_parser("paths", help="print all effective data paths")
+    data.add_argument("--config-dir", type=Path, default=argparse.SUPPRESS)
+    paths_parser = data_commands.add_parser("paths", help="print all effective data paths")
+    paths_parser.add_argument("--json", action="store_true", help="JSON paths and existence preflight")
     open_parser = data_commands.add_parser(
         "open", help="open an application-data folder in Windows Explorer"
     )
@@ -218,6 +226,7 @@ def build_argument_parser(*, prog: str | None = None) -> argparse.ArgumentParser
     )
     targets.add_argument("--exports", action="store_const", const="exports", dest="target")
     open_parser.set_defaults(target="data")
+    advisor.add_parsers(subparsers)
     return parser
 
 
@@ -424,6 +433,9 @@ def _run_teams(
 
 def _run_data(args: argparse.Namespace, app_paths) -> int:
     if args.data_command == "paths":
+        if args.json:
+            advisor.emit(advisor.path_report(app_paths, getattr(args, "path_warnings", ())))
+            return 0
         values = (
             ("Konfiguration", app_paths.config_dir),
             ("Konti", app_paths.accounts_file),
@@ -456,9 +468,19 @@ def main(
     service_factory: Callable[[], TeamDataService] | None = None,
 ) -> int:
     args = build_argument_parser(prog="holdet").parse_args(argv)
-    app_paths = resolve_paths(
-        overrides=PathOverrides(data_root=getattr(args, "data_dir", None))
-    )
+    app_paths, path_warnings = advisor.resolve_cli_paths(args)
+    args.path_warnings = path_warnings
+    for warning in path_warnings:
+        print(f"warning: {warning}", file=sys.stderr)
+    if args.command in advisor.COMMANDS:
+        try:
+            return advisor.run(args, app_paths)
+        except (ScraperError, OSError, ValueError, RefreshRunBusyError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        except KeyboardInterrupt:
+            print("Refresh cancellation requested; completed work is retained.", file=sys.stderr)
+            return 130
     if args.command == "data":
         return _run_data(args, app_paths)
     if args.command == "teams":

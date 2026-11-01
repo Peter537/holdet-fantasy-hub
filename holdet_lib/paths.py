@@ -44,6 +44,14 @@ class AppPaths:
     def refresh_run_dir(self) -> Path:
         return self.data_dir / "refresh-runs"
 
+    @property
+    def rules_dir(self) -> Path:
+        return self.data_dir / "rules"
+
+    @property
+    def strategy_file(self) -> Path:
+        return self.config_dir / "team-strategies.json"
+
 
 @dataclass(frozen=True, slots=True)
 class PathOverrides:

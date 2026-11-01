@@ -2,18 +2,49 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime, timedelta, timezone
 import json
 
 from .game_metadata import GameMetadata, _metadata_to_dict
+from .errors import PayloadError
 from .groups import GroupDefinition, _tournament_to_dict
 from .output import _round_dict, team_to_dict
 from .player_serialization import player_statistics_to_dict
 from .scopes import ResolvedScope
 from .standings import build_standings
 from .storage import PlayerStatisticsIndex, RefreshManifest, SnapshotIndex
-from .tournament import TournamentConfig, build_tournament_state
+from .tournament import TournamentConfig, build_tournament_state, build_swiss_pairing_conflicts
+from .tournament_pairings import TournamentPairingStore
+
+
+def prepare_scope_export(scope: ResolvedScope, teams: SnapshotIndex,
+                         pairings: TournamentPairingStore) -> ResolvedScope:
+    """Hydrate each revision; bad pairings block only the affected results."""
+    def resolve(group):
+        if group.tournament is None:
+            return group
+        resolved = group
+        try:
+            resolved = pairings.with_published_matches(group)
+            if (resolved.tournament.template == "swiss"
+                    and build_swiss_pairing_conflicts(resolved, teams)):
+                raise PayloadError("Publicerede Swiss-parringer afviger fra korrigerede resultater")
+        except (OSError, PayloadError, ValueError):
+            resolved = replace(resolved, tournament=replace(resolved.tournament,
+                pairing_error="De publicerede parringer kunne ikke verificeres."))
+        return resolved
+
+    groups = []
+    for group in scope.groups:
+        archived = tuple(
+            replace(revision, tournament=resolve(replace(group,
+                kind="tournament", teams=revision.teams, tournament=revision.tournament,
+                active_revision=revision.revision, archived_revisions=())).tournament)
+            for revision in group.archived_revisions
+        )
+        groups.append(replace(resolve(group), archived_revisions=archived))
+    return replace(scope, groups=tuple(groups))
 
 
 def _instant(value: datetime) -> datetime:

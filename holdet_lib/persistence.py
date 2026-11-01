@@ -2,11 +2,90 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import datetime
+import errno
 import os
 from pathlib import Path
 import time
+import threading
 from uuid import uuid4
+
+
+_FILE_UPDATE_LOCKS: dict[str, threading.Lock] = {}
+_FILE_UPDATE_GUARD = threading.Lock()
+
+
+def file_update_lock_path(path: Path) -> Path:
+    resolved = Path(path).resolve()
+    return resolved.with_name(f".{resolved.name}.lock")
+
+
+@contextmanager
+def exclusive_file_update(path: Path, *, timeout: float = 5.0):
+    """Serialize a read/update/replace transaction across threads and processes.
+
+    The sidecar stays in place so waiters always lock the same file, even when
+    the protected JSON is atomically replaced. Reads need no lock or sidecar.
+    """
+    if timeout < 0:
+        raise ValueError("File update timeout must be non-negative")
+    resolved = Path(path).resolve()
+    deadline = time.monotonic() + timeout
+    with _FILE_UPDATE_GUARD:
+        thread_lock = _FILE_UPDATE_LOCKS.setdefault(os.path.normcase(str(resolved)), threading.Lock())
+    busy = f"Settings file is busy; try again: {resolved.name}"
+    if not thread_lock.acquire(timeout=max(0, deadline - time.monotonic())):
+        raise TimeoutError(busy)
+    try:
+        sidecar = file_update_lock_path(resolved)
+        sidecar.parent.mkdir(parents=True, exist_ok=True)
+        with os.fdopen(os.open(sidecar, os.O_RDWR | os.O_CREAT, 0o600), "r+b") as handle:
+            if os.name == "nt":
+                import msvcrt
+                def lock():
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                def unlock():
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+                def lock():
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                def unlock():
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            while True:
+                try:
+                    lock()
+                    break
+                except OSError as exc:
+                    if exc.errno not in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
+                        raise
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError(busy) from exc
+                    time.sleep(min(0.05, remaining))
+            try:
+                handle.seek(0)
+                handle.write(b"0")
+                handle.flush()
+                yield
+            finally:
+                unlock()
+    finally:
+        thread_lock.release()
+
+
+@contextmanager
+def exclusive_configuration_update(config_dir: Path, *, timeout: float = 5.0):
+    """Lock the config namespace using a sibling outside the replaced directory.
+
+    Strategy saves and restore must acquire this before creating or reading
+    configuration, and retain it through publication or rollback.
+    """
+    with exclusive_file_update(config_dir, timeout=timeout):
+        yield
 
 
 def aware_local(value: datetime | None = None) -> datetime:

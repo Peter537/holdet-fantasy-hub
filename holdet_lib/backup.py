@@ -20,7 +20,7 @@ import zipfile
 
 from .errors import PayloadError
 from .paths import AppPaths
-from .persistence import aware_local
+from .persistence import aware_local, exclusive_configuration_update, file_update_lock_path
 
 
 BACKUP_SCHEMA_VERSION = 2
@@ -69,6 +69,7 @@ class RestoreResult:
 
 
 def _canonical_files(paths: AppPaths) -> tuple[tuple[str, Path], ...]:
+    operational_locks = {file_update_lock_path(paths.strategy_file), file_update_lock_path(paths.config_dir)}
     roots = (
         ("config", paths.config_dir),
         ("data/snapshots", paths.snapshot_dir),
@@ -78,6 +79,7 @@ def _canonical_files(paths: AppPaths) -> tuple[tuple[str, Path], ...]:
         ("data/tournament-pairings", paths.tournament_pairing_dir),
         ("data/game-metadata", paths.game_metadata_dir),
         ("data/fixtures", paths.fixture_dir),
+        ("data/rules", paths.rules_dir),
         ("data/hall-of-fame", paths.hall_of_fame_dir),
         ("data/imports", paths.import_dir),
     )
@@ -87,6 +89,8 @@ def _canonical_files(paths: AppPaths) -> tuple[tuple[str, Path], ...]:
             continue
         for path in root.rglob("*"):
             if path.is_file() and not path.is_symlink():
+                if path.resolve() in operational_locks:
+                    continue
                 if archive_root == "data/refresh-runs" and path.name != "run.json" and not (path.name.startswith("pending-") and path.suffix == ".json"):
                     continue
                 relative = path.relative_to(root).as_posix()
@@ -284,6 +288,8 @@ def known_schema_error(path: str, data: bytes) -> str | None:
         return f"{path}: ukendt metadataschema"
     if path.startswith("data/fixtures/") and version != 1:
         return f"{path}: ukendt fixtureschema"
+    if (path.startswith("data/rules/") or path == "config/team-strategies.json") and version != 1:
+        return f"{path}: ukendt rådgivningsschema"
     if path.startswith("data/hall-of-fame/") and version != 1:
         return f"{path}: ukendt Hall of Fame-schema"
     if "/players/" in path and "player-round" in path and version not in {1, 2, 3, 4}:
@@ -483,7 +489,7 @@ def restore_backup(
         checked = source_path.stat()
         if (checked.st_size, checked.st_mtime_ns) != source_signature:
             raise PayloadError("Backupkilden ændrede sig under valideringen")
-    with exclusive_data_operation(paths.data_dir):
+    with exclusive_data_operation(paths.data_dir), exclusive_configuration_update(paths.config_dir):
         config_parent = paths.config_dir.parent
         data_parent = paths.data_dir.parent
         config_parent.mkdir(parents=True, exist_ok=True)

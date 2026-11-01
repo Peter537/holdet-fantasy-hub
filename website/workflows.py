@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
 from datetime import datetime
 
 import streamlit as st
@@ -11,10 +10,9 @@ from holdet_lib.game_metadata import GameMetadataStore
 from holdet_lib.errors import PayloadError
 from holdet_lib.output import sanitize_path_component
 from holdet_lib.refresh_runs import RefreshRunBusyError
-from holdet_lib.scope_exports import serialize_scope_export
+from holdet_lib.scope_exports import prepare_scope_export, serialize_scope_export
 from holdet_lib.scopes import resolve_scope
 from holdet_lib.storage import ManifestStore, PlayerStatisticsStore
-from holdet_lib.tournament import build_swiss_pairing_conflicts
 from holdet_lib.tournament_pairings import TournamentPairingStore
 from website.preferences import settings_for
 from website.navigation import PageId, go_to
@@ -92,33 +90,7 @@ def render_global_update(paths, games):
 
 
 def _export_scope(paths, scope, teams):
-    """Load each revision independently; unreadable pairings block only its results."""
-    pairings = TournamentPairingStore(paths.tournament_pairing_dir)
-
-    def resolve(group):
-        if group.tournament is None:
-            return group
-        resolved = group
-        try:
-            resolved = pairings.with_published_matches(group)
-            if (resolved.tournament.template == "swiss"
-                    and build_swiss_pairing_conflicts(resolved, teams)):
-                raise PayloadError("Publicerede Swiss-parringer afviger fra korrigerede resultater")
-        except (OSError, PayloadError, ValueError):
-            resolved = replace(resolved, tournament=replace(resolved.tournament,
-                pairing_error="De publicerede parringer kunne ikke verificeres."))
-        return resolved
-
-    groups = []
-    for group in scope.groups:
-        archived = tuple(
-            replace(revision, tournament=resolve(replace(group,
-                kind="tournament", teams=revision.teams, tournament=revision.tournament,
-                active_revision=revision.revision, archived_revisions=())).tournament)
-            for revision in group.archived_revisions
-        )
-        groups.append(replace(resolve(group), archived_revisions=archived))
-    return replace(scope, groups=tuple(groups))
+    return prepare_scope_export(scope, teams, TournamentPairingStore(paths.tournament_pairing_dir))
 
 
 def render_scope_actions(paths, manager, groups, teams, *, competition_id=None, read_only=False, extra_actions=None):

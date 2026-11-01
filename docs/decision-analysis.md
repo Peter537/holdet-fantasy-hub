@@ -17,7 +17,7 @@ Provenance indeholder anvendte runder, stikprøvestørrelse, manglende input og 
 | Historisk vækst pr. aktuel mio. | `total_growth / (value / 1_000_000)`. Kun pengespil; pris `<= 0` eller manglende vækst giver ingen værdi. |
 | Form 3/5 | Middel af de seneste præcis 3 eller 5 afsluttede observationer. Et ufuldstændigt vindue giver ingen værdi. Rundehuller interpoleres ikke. |
 | Stabilitet | På seneste højst fem afsluttede observationer og mindst tre: `sample_stdev(x)`, `scale=max(mean(abs(x)),1)`, `round(100/(1+dispersion/scale))`. 70–100 er stabil, 40–69 balanceret og under 40 boom/bust. |
-| Kaptajn | Faktisk bonus er `RoundSummary.captain_bonus`. Et alternativ summerer `round_change * (multiplier - 1)` for det verificerede kaptajnantal. Scenarier kræver præcis rundetrup og deaktiveres ved mismatch mod den officielle bonus. |
+| Kaptajn | Faktisk bonus er `RoundSummary.captain_bonus`. Et alternativ summerer `round_change * (multiplier - 1)` for det verificerede kaptajnantal; profiler med positiv bonus bruger først `max(0, round_change)`. Scenarier kræver præcis rundetrup og deaktiveres ved mismatch mod den officielle bonus. |
 | Bank | For bank `A` og investering `P`: `lost_interest=interest(A)-interest(A-P-fee(P))`; `break_even=fee(P)+lost_interest`; procenten er `break_even/P`. UI viser faktisk og regelberegnet rente samt andelen af spillere, hvis form 3/5 slog grænsen. |
 | Transfer | For sammenhængende afsluttede snapshots: `decision_delta=bought_growth-fee-sold_next_growth`; `no_trade=actual_change-decision_delta`. Sæsonsummen er kun summen af et-rundes kontrafaktiske beslutninger. |
 | Bedst/værst | Maksimum og minimum af verificerede transferdeltaer. Lighed afgøres af tidligste runde. Kaptajn og bank vises separat. |
@@ -93,7 +93,7 @@ flowchart LR
 | Form, stabilitet og vækst pr. mio. | `holdet_lib/decision_analysis.py` | `tests/test_decision_analysis.py` | Snapshotfelter er observerede; ingen sæsonregel kræves. |
 | Scouting, percentiler og ownership | `holdet_lib/scouting.py` | `tests/test_scouting.py` | Popularitet er et valgfrit offentligt payloadfelt og holdes ude af potentiale/risiko. |
 | Sikker formelmotor | `holdet_lib/player_formulas.py` | Angrebstests for AST, dybde, størrelse, nuldivision og ikke-endelige tal | Lukket fortolker uden vilkårlig Python. |
-| Kaptajn, bank og transfer | `GameRuleProfile`, rene builders | Formel-, mismatch-, rente-, afrundings- og transferhultests | [Holdet.dk](https://www.holdet.dk/da), tilgået 2026-08-07, gav ikke direkte tilstrækkelige konkrete regelsider; registeret er derfor tomt og UI fail-closed. |
+| Kaptajn, bank og transfer | `GameRuleProfile`, rene builders | Formel-, mismatch-, rente-, afrundings- og transferhultests | Der medfølger ingen sæsonprofiler; alle spil kræver egne lokalt gennemgåede regler. Regeltests bruger opdigtede profiler og HTML-eksempler. Ukendt afrunding giver ingen beregning, når beløbet kræver afrunding. |
 | Idealhold | Eksakt DFS branch-and-bound | Brute force, tie-break, timeout, infeasible og cirka 400 kandidater | Aktiveres først efter en auditeret sæsonprofil. |
 | Alarmer | `analysis_inbox.py`, refresh-hooks | Transition, deduplikering, persistence, backup/restore og separat spillerfallback | Feltet **solgt** er ikke dokumenteret og produceres ikke. |
 | Fixtures | `fixtures.py` | Offentlig-/parsergate, schema og officiel difficulty | [Tourspillet 2026](https://www.holdet.dk/da/fantasy/tour-de-france-2026/landing), tilgået 2026-08-07, dokumenterer ikke et godkendt fixture-/difficultyfelt; ingen adapter er registreret. |

@@ -112,6 +112,10 @@ def build_storage_inventory(paths: AppPaths) -> StorageInventory:
     collect(paths.manifest_dir, "Manifester/revisioner", scoped=True)
     collect(paths.group_revision_dir, "Manifester/revisioner", scoped=False)
     collect(paths.tournament_pairing_dir, "Manifester/revisioner", scoped=False)
+    if paths.rules_dir.exists():
+        for locale in paths.rules_dir.iterdir():
+            if locale.is_dir() and not locale.is_symlink():
+                collect(locale, "Regelkilder", scoped=True)
     collect(paths.import_dir, "Importerede data", scoped=False)
     collect(paths.player_export_dir, "Afledte eksporter", scoped=True)
     collect(paths.team_export_dir, "Afledte eksporter", scoped=True)

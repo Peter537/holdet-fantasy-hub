@@ -388,17 +388,22 @@ def build_captain_analysis(
     alternatives: tuple[CaptainAlternative, ...] = ()
     if not reasons and len(actual) == rules.captain_count:
         extra = rules.captain_multiplier - 1
-        computed = sum(entry.round_change * extra for entry in actual)
+        def bonus(entries):
+            return sum(
+                (max(0, entry.round_change) if rules.captain_positive_only else entry.round_change) * extra
+                for entry in entries
+            )
+        computed = bonus(actual)
         mismatch = computed != summary.captain_bonus
         if not mismatch:
             alternatives = tuple(
                 CaptainAlternative(
                     group[0].player_id,
                     ", ".join(entry.name for entry in group),
-                    sum(entry.round_change * extra for entry in group),
+                    bonus(group),
                     summary.change
                     - summary.captain_bonus
-                    + sum(entry.round_change * extra for entry in group),
+                    + bonus(group),
                     tuple(sorted(entry.player_id for entry in group)),
                 )
                 for group in sorted(
@@ -454,6 +459,8 @@ def build_bank_analysis(
         if remaining is not None and remaining >= 0
         else None
     )
+    if remaining is not None and remaining >= 0 and remaining_interest is None:
+        reasons.append("Bankrente eller afrunding for restsaldo er ikke verificeret")
     lost = (
         full_interest - remaining_interest
         if full_interest is not None and remaining_interest is not None
