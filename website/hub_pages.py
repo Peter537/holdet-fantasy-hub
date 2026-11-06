@@ -12,6 +12,8 @@ from pathlib import Path
 import altair as alt
 import pandas as pd
 import streamlit as st
+from holdet_lib.refresh_runs import exclusive_data_operation
+from holdet_lib.errors import PayloadError
 
 from website.navigation import PageId, page_link
 from website.preferences import tool_visible
@@ -1234,8 +1236,12 @@ def legacy_manager_view(
             int(tournament_semifinalist),
             int(round_win),
         )
-        settings_store.save(replace(settings, hall_of_fame_score=updated_score))
-        st.rerun()
+        try:
+            settings_store.save_if_current(settings, replace(settings, hall_of_fame_score=updated_score))
+        except (OSError, ValueError, PayloadError) as exc:
+            st.error(str(exc))
+        else:
+            st.rerun()
 
     options = _identity_options(teams)
     with st.expander("Saml manageraliaser", on_change="rerun") as exp:
@@ -1262,10 +1268,14 @@ def legacy_manager_view(
                     alias = ManagerAlias(
                         canonical, display_name.strip(), tuple(selected_keys)
                     )
-                    settings_store.save(
-                        replace(settings, manager_aliases=(*retained, alias))
-                    )
-                    st.rerun()
+                    try:
+                        settings_store.save_if_current(
+                            settings, replace(settings, manager_aliases=(*retained, alias))
+                        )
+                    except (OSError, ValueError, PayloadError) as exc:
+                        st.error(str(exc))
+                    else:
+                        st.rerun()
 
 
 def backup_view(paths: AppPaths) -> None:
@@ -1605,6 +1615,7 @@ def managers_view(
     with manager_slot:
         with st.skeleton(height=140):
             settings_store, settings = _manager_settings(paths)
+            stored_settings = settings
             settings = build_effective_manager_settings(settings, groups, teams)
             metadata, metadata_warnings = GameMetadataStore(
                 paths.game_metadata_dir
@@ -1642,7 +1653,8 @@ def managers_view(
         help="Publicerer kun komplette cachede resultater; navigationen skriver aldrig.",
     ):
         try:
-            published = HallOfFameStore(paths.hall_of_fame_dir).freeze_complete(live)
+            with exclusive_data_operation(paths.data_dir):
+                published = HallOfFameStore(paths.hall_of_fame_dir).freeze_complete(live)
         except Exception as exc:
             st.error(f"Historikken kunne ikke genopbygges: {exc}")
         else:
@@ -1752,19 +1764,24 @@ def managers_view(
                 round_win = int(st.number_input("Rundesejr", min_value=0, value=score.global_round_win))
                 save_score = st.form_submit_button("Gem pointprofil")
             if save_score:
-                settings_store.save(
-                    replace(
-                        settings,
-                        hall_of_fame_score=HallOfFameScoreProfile(
-                            group_points,
-                            winner,
-                            finalist,
-                            semifinalist,
-                            round_win,
+                try:
+                    settings_store.save_if_current(
+                        stored_settings,
+                        replace(
+                            settings,
+                            hall_of_fame_score=HallOfFameScoreProfile(
+                                group_points,
+                                winner,
+                                finalist,
+                                semifinalist,
+                                round_win,
+                            ),
                         ),
                     )
-                )
-                st.rerun()
+                except (OSError, ValueError, PayloadError) as exc:
+                    st.error(str(exc))
+                else:
+                    st.rerun()
 
     if medal_tab.open:
         with medal_tab:
@@ -2077,8 +2094,12 @@ def managers_view(
                         key=f"archive-season-{season.season_id}",
                     )
                 ):
-                    season_store.archive(seasons, season.season_id)
-                    st.rerun()
+                    try:
+                        season_store.archive(seasons, season.season_id)
+                    except (OSError, ValueError, PayloadError) as exc:
+                        st.error(str(exc))
+                    else:
+                        st.rerun()
             with st.expander("Opret s\u00e6son", on_change="rerun") as create_expander:
                 if create_expander.open:
                     competitions = {group.group_id: group.name for group in groups}
@@ -2243,7 +2264,7 @@ def managers_view(
                     )
                     try:
                         settings_store.set_manager_profiles(
-                            settings,
+                            stored_settings,
                             tuple(retained),
                         )
                     except Exception as exc:
@@ -2269,20 +2290,24 @@ def managers_view(
                     if not renamed.strip():
                         st.error("Visningsnavnet m\u00e5 ikke v\u00e6re tomt.")
                     else:
-                        settings_store.set_manager_profiles(
-                            settings,
-                            tuple(
-                                replace(
-                                    profile,
-                                    display_name=renamed.strip(),
-                                )
-                                if profile.manager_id
-                                == rename_profile.manager_id
-                                else profile
-                                for profile in profiles
-                            ),
-                        )
-                        st.rerun()
+                        try:
+                            settings_store.set_manager_profiles(
+                                stored_settings,
+                                tuple(
+                                    replace(
+                                        profile,
+                                        display_name=renamed.strip(),
+                                    )
+                                    if profile.manager_id
+                                    == rename_profile.manager_id
+                                    else profile
+                                    for profile in profiles
+                                ),
+                            )
+                        except (OSError, ValueError, PayloadError) as exc:
+                            st.error(str(exc))
+                        else:
+                            st.rerun()
 
                 st.subheader("Oph\u00e6v manuelle links")
                 unlink_profile = st.selectbox(
@@ -2366,7 +2391,7 @@ def managers_view(
                             )
                         try:
                             settings_store.set_manager_profiles(
-                                settings,
+                                stored_settings,
                                 tuple(retained),
                             )
                         except Exception as exc:

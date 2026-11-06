@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import ExitStack
 from dataclasses import replace
 import json
 from pathlib import Path
@@ -10,7 +11,7 @@ import unicodedata
 
 from .errors import PayloadError
 from .groups import GroupStore, HubConfiguration
-from .persistence import replace_text_atomically
+from .persistence import configuration_transaction, exclusive_configuration_update, replace_text_atomically
 from .models import AccountConfig
 from .teams import load_accounts, parse_account_profile_user_id
 
@@ -71,6 +72,7 @@ class AccountStore:
     def load(self) -> tuple[AccountConfig, ...]:
         return load_accounts(self.path)
 
+    @configuration_transaction
     def save(self, accounts: tuple[AccountConfig, ...]) -> None:
         accounts = tuple(accounts)
         _validate_accounts(accounts)
@@ -105,6 +107,7 @@ class AccountStore:
         _validate_accounts(updated)
         return updated, created
 
+    @configuration_transaction
     def create(self, label: str, profile_url: str) -> AccountConfig:
         accounts, created = self.prepare_create(label, profile_url)
         self.save(accounts)
@@ -124,11 +127,13 @@ class AccountStore:
                 return updated, renamed
         raise PayloadError(f"Ukendt konto: {key}")
 
+    @configuration_transaction
     def rename(self, key: str, label: str) -> AccountConfig:
         accounts, renamed = self.prepare_rename(key, label)
         self.save(accounts)
         return renamed
 
+    @configuration_transaction
     def delete(self, key: str) -> AccountConfig:
         accounts = self.load()
         removed = next((account for account in accounts if account.key == key), None)
@@ -146,6 +151,14 @@ def rename_account_and_groups(
 ) -> AccountConfig:
     """Rename an account and its live group labels as one recoverable operation."""
 
+    namespaces = {account_store.path.parent.resolve(), group_store.path.parent.resolve()}
+    with ExitStack() as stack:
+        for namespace in sorted(namespaces, key=lambda path: str(path).casefold()):
+            stack.enter_context(exclusive_configuration_update(namespace))
+        return _rename_account_and_groups_locked(account_store, group_store, key, label)
+
+
+def _rename_account_and_groups_locked(account_store, group_store, key, label):
     original_accounts = account_store.load()
     updated_accounts, renamed = account_store.prepare_rename(key, label)
     configuration = group_store.load_configuration()

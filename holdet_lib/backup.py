@@ -15,7 +15,7 @@ import shutil
 import stat
 import tempfile
 from typing import BinaryIO
-from uuid import uuid4
+from uuid import UUID, uuid4
 import zipfile
 
 from .errors import PayloadError
@@ -68,6 +68,21 @@ class RestoreResult:
     rollback_path: Path
 
 
+def is_refresh_run_file(relative: str) -> bool:
+    """Recognize journal data, including a run-owned immutable player stage."""
+
+    parts = PurePosixPath(relative).parts
+    name = parts[-1] if parts else ""
+    if name == "run.json" or (name.startswith("pending-") and name.endswith(".json")):
+        return True
+    if len(parts) != 2 or not name.startswith("player-") or not name.endswith(".json"):
+        return False
+    try:
+        return str(UUID(parts[0])) == parts[0] and str(UUID(name[7:-5])) == name[7:-5]
+    except ValueError:
+        return False
+
+
 def _canonical_files(paths: AppPaths) -> tuple[tuple[str, Path], ...]:
     operational_locks = {file_update_lock_path(paths.strategy_file), file_update_lock_path(paths.config_dir)}
     roots = (
@@ -91,7 +106,7 @@ def _canonical_files(paths: AppPaths) -> tuple[tuple[str, Path], ...]:
             if path.is_file() and not path.is_symlink():
                 if path.resolve() in operational_locks:
                     continue
-                if archive_root == "data/refresh-runs" and path.name != "run.json" and not (path.name.startswith("pending-") and path.suffix == ".json"):
+                if archive_root == "data/refresh-runs" and not is_refresh_run_file(path.relative_to(root).as_posix()):
                     continue
                 relative = path.relative_to(root).as_posix()
                 result.append((f"{archive_root}/{relative}", path))
@@ -174,10 +189,11 @@ def create_backup_bytes(
 ) -> tuple[bytes, BackupManifest]:
     """Compatibility facade; the archive itself is assembled on disk."""
 
-    generated = aware_local(now)
-    output = BytesIO()
-    manifest = _write_backup_zip(paths, output, now=generated)
-    return output.getvalue(), manifest
+    with exclusive_data_operation(paths.data_dir), exclusive_configuration_update(paths.config_dir):
+        generated = aware_local(now)
+        output = BytesIO()
+        manifest = _write_backup_zip(paths, output, now=generated)
+        return output.getvalue(), manifest
 
 
 def create_backup(
@@ -188,6 +204,11 @@ def create_backup(
 ) -> Path:
     """Create one ZIP outside the canonical config/data trees."""
 
+    with exclusive_data_operation(paths.data_dir), exclusive_configuration_update(paths.config_dir):
+        return _create_backup_locked(paths, destination, now=now)
+
+
+def _create_backup_locked(paths, destination, *, now):
     generated = aware_local(now)
     explicit_destination = destination is not None
     if destination is None:
@@ -300,11 +321,21 @@ def known_schema_error(path: str, data: bytes) -> str | None:
         return f"{path}: ukendt manifestschema"
     if path.startswith("data/refresh-runs/"):
         if path.endswith("/run.json"):
-            if version != 1 or not isinstance(payload.get("games"), list) or not isinstance(payload.get("run_id"), str):
+            if version not in {1, 2} or not isinstance(payload.get("games"), list) or not isinstance(payload.get("run_id"), str):
                 return f"{path}: ugyldig opdateringsjournal"
         elif "/pending-" in path:
             if version not in {1, 2, 3}:
                 return f"{path}: ukendt afventende manifestschema"
+        elif is_refresh_run_file(path.removeprefix("data/refresh-runs/")):
+            from .player_serialization import player_statistics_from_dict
+
+            try:
+                player_statistics_from_dict(payload)
+                generated = datetime.fromisoformat(payload["generated_at"])
+                if generated.tzinfo is None:
+                    raise ValueError("Stage-tidspunktet mangler tidszone")
+            except (KeyError, TypeError, ValueError, PayloadError):
+                return f"{path}: ugyldigt midlertidigt spillersnapshot"
         else:
             return f"{path}: ukendt journalfil"
     if path.startswith("data/group-revisions/") and version != 1:

@@ -17,6 +17,7 @@ import zipfile
 
 from .backup import RestoreResult, restore_backup, validate_backup
 from .errors import PayloadError
+from .filenames import collision_suffix
 from .output import sanitize_path_component
 from .paths import AppPaths
 from .persistence import publish_immutable
@@ -177,6 +178,108 @@ def _canonical_target(
     return target, identity
 
 
+class _CanonicalImportPlanner:
+    """Reserve distinct immutable targets across one canonical import preview."""
+
+    def __init__(self, paths: AppPaths) -> None:
+        self.paths = paths
+        self._families: dict[Path, tuple[tuple[Path, str, str], ...]] = {}
+        self._identities: dict[Path, dict[str, tuple[tuple[Path, str, str], ...]]] = {}
+        self._reserved: set[Path] = set()
+        self._next_collision: dict[Path, int] = {}
+
+    def _family(self, base: Path) -> tuple[tuple[Path, str, str], ...]:
+        if base not in self._families:
+            pattern = re.compile(
+                rf"{re.escape(base.stem)}(?:_[0-9]+)?\.json", re.IGNORECASE
+            )
+            existing: list[tuple[Path, str, str]] = []
+            for path in sorted(base.parent.glob(f"{base.stem}*.json")):
+                if pattern.fullmatch(path.name) is None:
+                    continue
+                try:
+                    if path.is_symlink():
+                        raise PayloadError("Snapshotmålet må ikke være et symbolsk link")
+                    content = path.read_bytes()
+                    payload = json.loads(content.decode("utf-8-sig"))
+                    if not isinstance(payload, dict):
+                        raise PayloadError("JSON-roden skal være et objekt")
+                    _, identity = _canonical_target(payload, self.paths)
+                except (OSError, UnicodeDecodeError, ValueError, TypeError, PayloadError) as exc:
+                    raise PayloadError(
+                        f"Eksisterende snapshot kunne ikke læses eller klassificeres: {path.name}: {exc}"
+                    ) from exc
+                existing.append((path.resolve(), hashlib.sha256(content).hexdigest(), identity))
+            self._families[base] = tuple(existing)
+        return self._families[base]
+
+    def _observations(self, base: Path, identity: str) -> tuple[tuple[Path, str, str], ...]:
+        teams = identity.startswith("teams:")
+        root = base.parents[2] if teams else base.parent
+        if root not in self._identities:
+            grouped: dict[str, list[tuple[Path, str, str]]] = {}
+            candidates = root.rglob("team-round*.json") if teams else root.glob("player-round*.json")
+            for path in sorted(candidates):
+                try:
+                    if path.is_symlink():
+                        continue
+                    content = path.read_bytes()
+                    payload = json.loads(content.decode("utf-8"))
+                    if not isinstance(payload, dict):
+                        continue
+                    if teams:
+                        team_from_dict(payload)
+                    else:
+                        player_statistics_from_dict(payload)
+                    _, observed_identity = _canonical_target(payload, self.paths)
+                except (OSError, UnicodeDecodeError, ValueError, TypeError, PayloadError):
+                    # Unrelated damaged snapshots are excluded by the store scan too.
+                    # Occupied files in the target family are checked strictly above.
+                    continue
+                grouped.setdefault(observed_identity, []).append(
+                    (path.resolve(), hashlib.sha256(content).hexdigest(), observed_identity)
+                )
+            self._identities[root] = {
+                key: tuple(values) for key, values in grouped.items()
+            }
+        return self._identities[root].get(identity, ())
+
+    def plan(
+        self, base: Path, identity: str, source_name: str, content: bytes
+    ) -> tuple[ImportOperation, str | None]:
+        base = base.resolve()
+        digest = hashlib.sha256(content).hexdigest()
+        try:
+            family = self._family(base)
+        except (OSError, PayloadError) as exc:
+            return ImportOperation(source_name, base, len(content), digest, "write"), str(exc)
+        family = (*family, *self._observations(base, identity))
+        for target, existing_digest, existing_identity in family:
+            if existing_identity == identity and existing_digest != digest:
+                return (
+                    ImportOperation(source_name, target, len(content), digest, "write"),
+                    f"Identitetskollision med andet indhold: {target.name}",
+                )
+        # Search the whole family before filling a gap left by retention.
+        for target, existing_digest, _ in family:
+            if existing_digest == digest:
+                return ImportOperation(source_name, target, len(content), digest, "skip"), None
+        collision_number = self._next_collision.get(base, 0)
+        while True:
+            target = base.with_name(
+                f"{base.stem}{collision_suffix(collision_number)}{base.suffix}"
+            )
+            paired_text = target.with_suffix(".txt")
+            occupied = target in self._reserved or target.exists() or target.is_symlink()
+            if identity.startswith("teams:"):
+                occupied = occupied or paired_text.exists() or paired_text.is_symlink()
+            if not occupied:
+                self._reserved.add(target)
+                self._next_collision[base] = collision_number + 1
+                return ImportOperation(source_name, target, len(content), digest, "write"), None
+            collision_number += 1
+
+
 def _single_file_preview(
     raw: bytes, filename: str, paths: AppPaths
 ) -> ImportPreview:
@@ -214,7 +317,7 @@ def _single_file_preview(
     if not isinstance(payload, dict):
         return ImportPreview(filename, "invalid", digest, (), ("JSON-roden skal være et objekt.",))
     try:
-        target, _ = _canonical_target(payload, paths)
+        target, identity = _canonical_target(payload, paths)
     except (PayloadError, ValueError, TypeError):
         target = paths.import_dir / "legacy-json" / f"{digest[:16]}-{_safe_filename(filename)}"
         operation, error = _operation(target, filename, raw)
@@ -230,7 +333,7 @@ def _single_file_preview(
             False,
             ((target, raw),),
         )
-    operation, error = _operation(target, filename, raw)
+    operation, error = _CanonicalImportPlanner(paths).plan(target, identity, filename, raw)
     return ImportPreview(
         filename,
         "canonical_snapshots",
@@ -239,7 +342,7 @@ def _single_file_preview(
         (() if error is None else (error,)),
         (),
         True,
-        ((target, raw),),
+        ((operation.target, raw),),
     )
 
 
@@ -332,6 +435,7 @@ def _snapshot_package_preview(raw: bytes, filename: str, paths: AppPaths) -> Imp
     operations: list[ImportOperation] = []
     payloads: list[tuple[Path, bytes]] = []
     identities: set[str] = set()
+    planner = _CanonicalImportPlanner(paths)
     try:
         archive = zipfile.ZipFile(BytesIO(raw))
     except zipfile.BadZipFile as exc:
@@ -428,9 +532,9 @@ def _snapshot_package_preview(raw: bytes, filename: str, paths: AppPaths) -> Imp
                 errors.append(f"Snapshotpakken har en duplikeret identitet: {member}")
                 continue
             identities.add(identity)
-            operation, collision = _operation(target, member, content)
+            operation, collision = planner.plan(target, identity, member, content)
             operations.append(operation)
-            payloads.append((target, content))
+            payloads.append((operation.target, content))
             if collision:
                 errors.append(collision)
         unexpected = set(names) - {manifest_name} - expected_names
@@ -490,13 +594,16 @@ def apply_import(
     raw = _source_bytes(source)
     if hashlib.sha256(raw).hexdigest() != preview.checksum:
         raise PayloadError("Importfilen har ændret sig siden forhåndsvisningen")
-    current = preview_import(raw, paths, filename=preview.filename)
-    if not current.can_apply or current.kind != preview.kind:
-        raise PayloadError("Importen kan ikke længere anvendes: " + "; ".join(current.errors))
-    if current.kind == "backup":
+    if preview.kind == "backup":
+        current = preview_import(raw, paths, filename=preview.filename)
+        if not current.can_apply or current.kind != preview.kind:
+            raise PayloadError("Importen kan ikke længere anvendes: " + "; ".join(current.errors))
         restored = restore_backup(raw, paths)
         return ImportResult("backup", restored.restored_files, 0, restored)
     with exclusive_data_operation(paths.data_dir):
+        current = preview_import(raw, paths, filename=preview.filename)
+        if not current.can_apply or current.kind != preview.kind:
+            raise PayloadError("Importen kan ikke længere anvendes: " + "; ".join(current.errors))
         published: list[Path] = []
         try:
             for operation, (target, content) in zip(current.operations, current._payloads, strict=True):

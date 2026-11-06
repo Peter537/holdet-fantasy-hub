@@ -216,6 +216,29 @@ def validate_capture(capture: object, game: GameUrl) -> dict:
     return capture
 
 
+def reviewed_rule_profile(game: GameUrl, capture: dict, raw_profile: dict, note: str) -> GameRuleProfile:
+    """Validate a review without creating evidence, audit files, or locks."""
+
+    validate_capture(capture, game)
+    if not capture["extraction_complete"]:
+        raise PayloadError("Incomplete rules capture cannot be audited")
+    if not isinstance(note, str) or not note.strip():
+        raise PayloadError("A review note explaining the checked rules is required")
+    allowed = game_rule_to_dict(GameRuleProfile(game.locale, game.slug, game.slug)).keys()
+    if unknown := raw_profile.keys() - allowed:
+        raise PayloadError(f"Unknown rule fields: {', '.join(sorted(unknown))}")
+    locale = raw_profile.get("game_locale", game.locale)
+    if not isinstance(locale, str) or locale.casefold() != game.locale.casefold() or raw_profile.get("game_slug", game.slug) != game.slug:
+        raise PayloadError("Rule profile belongs to another game")
+    raw = {
+        **raw_profile, "game_locale": game.locale.casefold(), "game_slug": game.slug,
+        "verified": True, "source_url": capture["source_url"],
+        "document_url": capture["document_url"], "source_sha256": capture["source_sha256"],
+        "accessed_on": datetime.fromisoformat(capture["fetched_at"]).date().isoformat(),
+    }
+    return game_rule_from_dict(raw)
+
+
 class RulePageStore:
     """Immutable evidence and explicitly reviewed season profiles."""
 
@@ -241,24 +264,7 @@ class RulePageStore:
         return validate_capture(raw, game) if raw is not None else None
 
     def audit(self, game: GameUrl, capture: dict, raw_profile: dict, note: str) -> GameRuleProfile:
-        validate_capture(capture, game)
-        if not capture["extraction_complete"]:
-            raise PayloadError("Incomplete rules capture cannot be audited")
-        if not isinstance(note, str) or not note.strip():
-            raise PayloadError("A review note explaining the checked rules is required")
-        allowed = game_rule_to_dict(GameRuleProfile(game.locale, game.slug, game.slug)).keys()
-        if unknown := raw_profile.keys() - allowed:
-            raise PayloadError(f"Unknown rule fields: {', '.join(sorted(unknown))}")
-        locale = raw_profile.get("game_locale", game.locale)
-        if not isinstance(locale, str) or locale.casefold() != game.locale.casefold() or raw_profile.get("game_slug", game.slug) != game.slug:
-            raise PayloadError("Rule profile belongs to another game")
-        raw = {
-            **raw_profile, "game_locale": game.locale.casefold(), "game_slug": game.slug,
-            "verified": True, "source_url": capture["source_url"],
-            "document_url": capture["document_url"], "source_sha256": capture["source_sha256"],
-            "accessed_on": datetime.fromisoformat(capture["fetched_at"]).date().isoformat(),
-        }
-        profile = game_rule_from_dict(raw)
+        profile = reviewed_rule_profile(game, capture, raw_profile, note)
         reviewed_at = aware_local()
         stamp = reviewed_at.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
         path = self._root(game) / f"audit-{stamp}.json"

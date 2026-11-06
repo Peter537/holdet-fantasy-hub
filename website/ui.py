@@ -140,6 +140,7 @@ from holdet_lib.refresh import (
     build_refresh_plan,
 )
 from holdet_lib.storage import RefreshManifest
+from holdet_lib.refresh_runs import RefreshRunBusyError, exclusive_data_operation
 
 
 def _configure_paths() -> None:
@@ -182,22 +183,23 @@ def _freeze_complete_hall_of_fame(
     include_round_wins: bool,
 ) -> int:
     try:
-        settings = HubSettingsStore(APP_PATHS.hub_settings_file).load()
-        metadata, _ = GameMetadataStore(APP_PATHS.game_metadata_dir).scan()
-        final_rounds = {
-            item.identity: item.final_round
-            for item in metadata
-            if item.final_round is not None
-        }
-        events = build_live_hall_of_fame_events(
-            groups,
-            SnapshotStore(OUTPUT_DIR).scan(),
-            settings,
-            final_rounds=final_rounds,
-        )
-        if not include_round_wins:
-            events = tuple(item for item in events if item.kind != "round_win")
-        paths = HallOfFameStore(APP_PATHS.hall_of_fame_dir).freeze_complete(events)
+        with exclusive_data_operation(APP_PATHS.data_dir):
+            settings = HubSettingsStore(APP_PATHS.hub_settings_file).load()
+            metadata, _ = GameMetadataStore(APP_PATHS.game_metadata_dir).scan()
+            final_rounds = {
+                item.identity: item.final_round
+                for item in metadata
+                if item.final_round is not None
+            }
+            events = build_live_hall_of_fame_events(
+                groups,
+                SnapshotStore(OUTPUT_DIR).scan(),
+                settings,
+                final_rounds=final_rounds,
+            )
+            if not include_round_wins:
+                events = tuple(item for item in events if item.kind != "round_win")
+            paths = HallOfFameStore(APP_PATHS.hall_of_fame_dir).freeze_complete(events)
     except Exception as exc:
         st.session_state["hall_of_fame_freeze_warning"] = str(exc)
         return 0
@@ -1228,14 +1230,14 @@ def _player_failure_details(error: object) -> tuple[str, int | None, bool]:
 def _fetch_player_statistics(game: GameUrl, round_number: int | None) -> None:
     error_key = (game.locale.casefold(), game.slug)
     snapshot_store = PlayerStatisticsStore(OUTPUT_DIR)
-    before_index = snapshot_store.scan(game)
     alert_warning: str | None = None
     try:
-        with st.spinner(
+        with exclusive_data_operation(APP_PATHS.data_dir), st.spinner(
             "Henter seneste spillerstatistik …"
             if round_number is None
             else f"Henter spillerstatistik for runde {round_number} …"
         ):
+            before_index = snapshot_store.scan(game)
             _save_game_metadata_if_available(game)
 
             statistics = _client().fetch_players(game, round_number=round_number)
@@ -2130,19 +2132,23 @@ def _player_statistics_panel(
                         key=f"batch-fetch-{game.locale}-{game.slug}-{empty_label}",
                         disabled=to_round < from_round,
                     ):
-                        with st.spinner(
-                            f"Henter manglende runder {from_round}-{to_round} ..."
-                        ):
-                            result = _fetch_missing_player_rounds(
-                                game,
-                                from_round,
-                                to_round,
-                                store=store,
-                            )
-                        st.session_state.setdefault(
-                            "player_statistics_batch_results", {}
-                        )[identity] = result
-                        st.rerun()
+                        try:
+                            with exclusive_data_operation(APP_PATHS.data_dir), st.spinner(
+                                f"Henter manglende runder {from_round}-{to_round} ..."
+                            ):
+                                result = _fetch_missing_player_rounds(
+                                    game,
+                                    from_round,
+                                    to_round,
+                                    store=store,
+                                )
+                        except (OSError, RefreshRunBusyError) as exc:
+                            st.error(f"Runderne kunne ikke hentes: {exc}")
+                        else:
+                            st.session_state.setdefault(
+                                "player_statistics_batch_results", {}
+                            )[identity] = result
+                            st.rerun()
 
         rounds = index.rounds_for(game)
         if not rounds:
@@ -2414,43 +2420,6 @@ def _manager_game_refresh_dialog(
     player_store = PlayerStatisticsStore(OUTPUT_DIR)
     manifest_store = ManifestStore(MANIFEST_DIR)
     metadata_store = GameMetadataStore(APP_PATHS.game_metadata_dir)
-    pending_manifest_key = f"pending-refresh-manifest:{identity}"
-    pending_manifest = st.session_state.get(pending_manifest_key)
-    if isinstance(pending_manifest, RefreshManifest):
-        st.error(
-            "Datakilderne blev behandlet, men manifestet kunne ikke gemmes. "
-            "Genprøv kun den lokale manifestskrivning; der bruges ikke netværk."
-        )
-        with st.container(horizontal=True, horizontal_alignment="right"):
-            if st.button(
-                "Luk",
-                key=f"pending-manifest-close:{pending_manifest.run_id}",
-            ):
-                st.rerun()
-            retry_manifest_write = st.button(
-                "Prøv manifest igen",
-                type="primary",
-                icon=":material/save:",
-                key=f"pending-manifest-retry:{pending_manifest.run_id}",
-            )
-        if retry_manifest_write:
-            try:
-                manifest_path = manifest_store.write(pending_manifest)
-            except Exception as exc:
-                st.error(f"Manifestet kunne stadig ikke gemmes: {exc}")
-            else:
-                st.session_state.pop(pending_manifest_key, None)
-                st.session_state["game_refresh_notice"] = {
-                    "severity": (
-                        "warning" if pending_manifest.failures else "success"
-                    ),
-                    "message": (
-                        "Manifestet blev gemt uden nye netværkskald: "
-                        f"{manifest_path.name}."
-                    ),
-                }
-                st.rerun()
-        return
     latest_manifest = manifest_store.load_latest(
         manager_game.game.slug,
         game_locale=manager_game.game.locale,
@@ -2551,18 +2520,6 @@ def _game_round_center_tab(
         for group in groups
         if _game_identity(group.game) == manager_game.identity
     )
-    if notice := st.session_state.pop("game_refresh_notice", None):
-        if isinstance(notice, dict):
-            message = str(notice.get("message", "Opdateringen er afsluttet."))
-            severity = str(notice.get("severity", "success"))
-            if severity == "error":
-                st.error(message)
-            elif severity == "warning":
-                st.warning(message)
-            else:
-                st.success(message)
-        else:
-            st.success(str(notice))
     resolved_groups, pairing_warnings = _with_published_tournament_pairings(
         game_groups, index
     )
@@ -2752,7 +2709,7 @@ def _game_settings_tab(
             if members:
                 settings_store.set_own_team(settings, OwnTeamSelection(manager_game.game.locale.casefold(), manager_game.game.slug, members[0].team_id))
             else:
-                settings_store.save(replace(settings, own_teams=tuple(item for item in settings.own_teams if (item.game_locale.casefold(), item.game_slug) != manager_game.identity)))
+                settings_store.save_if_current(settings, replace(settings, own_teams=tuple(item for item in settings.own_teams if (item.game_locale.casefold(), item.game_slug) != manager_game.identity)))
         except (OSError, PayloadError, ValueError) as exc:
             st.error(str(exc))
         else:
@@ -3414,22 +3371,6 @@ def _tournament_view(
         _entity_header(context.selected_game, context.groups, index, group=group, read_only=context.read_only or updates_running(APP_PATHS))
     else:
         st.title(group.name, anchor=f"gruppe-{group.group_id}")
-    notice = st.session_state.pop(
-        f"tournament-refresh-notice-{group.group_id}", None
-    )
-    if notice:
-        st.success(
-            f"{notice['successes']} hold opdateret. "
-            f"{notice['fallbacks']} bruger cache. Manifest: {notice['manifest']}"
-        )
-        for team_name, error in notice["failures"]:
-            st.error(f"{team_name}: {error or 'Opdateringen mislykkedes'}")
-        if notice.get("pairing"):
-            level, message = notice["pairing"]
-            if level == "error":
-                st.error(f"Swiss-parringen kunne ikke publiceres: {message}")
-            else:
-                st.success(message)
 
     rounds = list(range(group.tournament.start_round, group.tournament.final_round + 1))
     if round_key not in st.session_state or st.session_state[round_key] not in rounds:
@@ -3523,7 +3464,7 @@ def _team_error_key(reference: TeamReference) -> tuple[str, str, int]:
 def _fetch_team_statistics(reference: TeamReference) -> None:
     key = _team_error_key(reference)
     try:
-        with st.spinner(f"Henter {reference.team_name} …"):
+        with exclusive_data_operation(APP_PATHS.data_dir), st.spinner(f"Henter {reference.team_name} …"):
             _save_game_metadata_if_available(reference.game)
             team = _client().fetch_team(reference)
             saved = SnapshotStore(OUTPUT_DIR).save_team_json(team)
@@ -4133,8 +4074,9 @@ def _remember_game_info(game: GameUrl, info: object) -> None:
 
 
 def _fetch_and_remember_game_info(game: GameUrl) -> object:
-    info = _client().fetch_game_info(game)
-    _remember_game_info(game, info)
+    with exclusive_data_operation(APP_PATHS.data_dir):
+        info = _client().fetch_game_info(game)
+        _remember_game_info(game, info)
     return info
 
 
@@ -4725,9 +4667,9 @@ def _manage_game(
                             official_link_type=(
                                 official_link_type if official_url.strip() else None
                             ),
-                        )
+                        ), expected=group,
                     )
-                except PayloadError as exc:
+                except (OSError, ValueError, PayloadError) as exc:
                     st.error(str(exc))
                 else:
                     st.rerun()
@@ -5007,7 +4949,7 @@ def _manage_game(
                             st.session_state["pending_tournament_rebuild"] = pending
                             _confirm_tournament_rebuild(store, *pending)
                         else:
-                            store.update(replace(group, name=renamed.strip()))
+                            store.update(replace(group, name=renamed.strip()), expected=group)
                             st.success("Turneringens navn blev gemt.")
                             st.rerun()
                     except (PayloadError, ValueError) as exc:
@@ -5049,7 +4991,7 @@ def _manage_game(
                         members.extend(_parse_direct_lines(direct, group.game))
                         store.update(replace(
                             group, name=renamed.strip(), teams=tuple(members),
-                        ))
+                        ), expected=group)
                     except (PayloadError, ValueError) as exc:
                         st.error(str(exc))
                     else:
@@ -5198,6 +5140,8 @@ def render_sidebar(context: UiContext, page_id: PageId) -> None:
 def render_shared_shell(context: UiContext, page_id: PageId) -> None:
     if notice := st.session_state.pop("created-group-notice", None):
         st.success(notice)
+    if warning := st.session_state.pop("hall_of_fame_freeze_warning", None):
+        st.warning(f"Historikken kunne ikke fryses: {warning}")
     _warning_panel(context.index)
     for warning in (*context.configuration_warnings, *context.pairing_warnings):
         st.warning(warning)

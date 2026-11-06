@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import hashlib
+from io import BytesIO
 import json
 from pathlib import Path
 import re
 from urllib.parse import urlparse
+import zipfile
 
 import pytest
 from playwright.sync_api import Page, expect
@@ -117,6 +119,38 @@ def test_downloads_include_full_catalog_and_only_scope_teams_without_writes_or_n
     assert _files(ui_server.data_root) == before
     assert not (ui_server.data_root / "remote-attempts.log").exists()
     assert not [url for url in requests if urlparse(url).scheme in {"http", "https"} and urlparse(url).hostname not in {"127.0.0.1", "localhost", "::1"}]
+
+
+@pytest.mark.ui
+def test_support_download_requires_preparation_for_current_privacy_profile(page: Page, ui_server: UiServer) -> None:
+    page.set_viewport_size({"width": 1920, "height": 1080})
+    before = _files(ui_server.data_root)
+    page.goto(ui_server.base_url + "/data?section=exports", wait_until="domcontentloaded")
+    prepare_report = page.get_by_role("button", name="Forbered managerspilrapport", exact=True)
+    expect(prepare_report).to_be_visible(timeout=20_000)
+    prepare_report.click()
+    prepare_support = page.get_by_role("button", name="Forbered anonymiseret ZIP", exact=True)
+    expect(prepare_support).to_be_visible()
+    prepare_support.click()
+    download = page.get_by_role("button", name="Download supportpakke", exact=True)
+
+    def read_support():
+        with page.expect_download(timeout=20_000) as event:
+            download.click()
+        content = Path(event.value.path()).read_bytes()
+        with zipfile.ZipFile(BytesIO(content)) as archive:
+            return json.loads(archive.read("support-manifest.json")), json.loads(archive.read("data-package.json"))
+
+    manifest, package = read_support()
+    assert manifest["privacy_profile"] == package["privacy_profile"] == "share"
+    page.get_by_text("Fejlsøgning", exact=True).click()
+    expect(download).to_have_count(0)
+    prepare_support.click()
+    manifest, package = read_support()
+    assert manifest["privacy_profile"] == package["privacy_profile"] == "debug"
+    assert manifest["restorable"] is False and package["restorable"] is False
+    assert _files(ui_server.data_root) == before
+    assert not (ui_server.data_root / "remote-attempts.log").exists()
 
 
 @pytest.mark.ui

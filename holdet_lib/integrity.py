@@ -7,9 +7,10 @@ import hashlib
 import json
 from pathlib import Path
 
-from .backup import known_schema_error
+from .backup import is_refresh_run_file, known_schema_error
 from .paths import AppPaths
-from .persistence import file_update_lock_path, replace_text_atomically
+from .persistence import exclusive_configuration_update, file_update_lock_path, replace_text_atomically
+from .refresh_runs import exclusive_data_operation
 
 
 INTEGRITY_INDEX_SCHEMA_VERSION = 1
@@ -80,7 +81,7 @@ def canonical_local_files(paths: AppPaths) -> tuple[tuple[str, Path], ...]:
         if not root.exists():
             continue
         for path in root.rglob("*"):
-            if prefix == "data/refresh-runs" and path.name != "run.json" and not (path.name.startswith("pending-") and path.suffix == ".json"):
+            if prefix == "data/refresh-runs" and not is_refresh_run_file(path.relative_to(root).as_posix()):
                 continue
             if not path.is_file() or path.is_symlink():
                 continue
@@ -311,8 +312,9 @@ def repair_integrity_index(
 ) -> Path:
     """Atomically replace only the derived index after rechecking the preview."""
 
-    current = preview_integrity_repair(paths)
-    if current.content != preview.content:
-        raise ValueError("Filerne har ændret sig siden forhåndsvisningen")
-    replace_text_atomically(paths.integrity_index_file, preview.content)
-    return paths.integrity_index_file.resolve()
+    with exclusive_data_operation(paths.data_dir), exclusive_configuration_update(paths.config_dir):
+        current = preview_integrity_repair(paths)
+        if current.content != preview.content:
+            raise ValueError("Filerne har ændret sig siden forhåndsvisningen")
+        replace_text_atomically(paths.integrity_index_file, preview.content)
+        return paths.integrity_index_file.resolve()

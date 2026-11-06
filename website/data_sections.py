@@ -2,6 +2,12 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
+from dataclasses import dataclass
+from datetime import datetime
+import hashlib
+import json
+
 from holdet_lib.refresh_runs import RefreshRunBusyError
 
 from pathlib import Path
@@ -12,6 +18,7 @@ import streamlit as st
 from website.presentation import dataframe
 
 from holdet_lib.backup import create_backup
+from holdet_lib.data_packages import DataPackage, package_to_dict
 from holdet_lib.errors import PayloadError
 from holdet_lib.groups import GroupStore, HubConfiguration
 from holdet_lib.hall_of_fame import HallOfFameStore
@@ -150,7 +157,76 @@ def render_overview(
     )
 
 
-def _report_actions(package, *, title: str, stem: str, paths: AppPaths, key: str) -> None:
+@dataclass(frozen=True, slots=True)
+class _PreparedReport:
+    identity: tuple[str, str] | str
+    package: DataPackage
+    title: str
+    stem: str
+    signature: str
+    prepared_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class _SavedReport:
+    signature: str
+    artifact_id: str
+    filename: str
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedSupport:
+    signature: str
+    privacy_profile: str
+    content: bytes
+    prepared_at: datetime
+
+
+def _report_signature(package: DataPackage, title: str, stem: str) -> str:
+    canonical = json.dumps(
+        {"package": package_to_dict(package), "title": title, "stem": stem},
+        ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _prepare_report(
+    identity: tuple[str, str] | str, package: DataPackage, title: str, stem: str
+) -> _PreparedReport:
+    snapshot = deepcopy(package)
+    return _PreparedReport(
+        identity, snapshot, title, stem, _report_signature(snapshot, title, stem),
+        datetime.now().astimezone(),
+    )
+
+
+def _prepared_report(
+    key: str, identity: tuple[str, str] | str, title: str, stem: str
+) -> _PreparedReport | None:
+    prepared = st.session_state.get(key)
+    if (
+        isinstance(prepared, _PreparedReport)
+        and prepared.identity == identity
+        and prepared.title == title
+        and prepared.stem == stem
+        and prepared.signature == _report_signature(prepared.package, title, stem)
+    ):
+        st.caption(
+            f"Rapporten er et øjebliksbillede forberedt "
+            f"{prepared.prepared_at.strftime('%d.%m.%Y %H:%M:%S')}. "
+            "Forbered rapporten igen for at medtage senere ændringer."
+        )
+        return prepared
+    st.session_state.pop(key, None)
+    return None
+
+
+def _report_actions(package: DataPackage, *, title: str, stem: str, paths: AppPaths, key: str) -> None:
+    signature = _report_signature(package, title, stem)
+    artifact_key = f"{key}-artifact"
+    artifact = st.session_state.get(artifact_key)
+    if not isinstance(artifact, _SavedReport) or artifact.signature != signature:
+        st.session_state.pop(artifact_key, None)
     content = render_html_report(package, title=title).encode("utf-8")
     st.download_button(
         "Download HTML-rapport",
@@ -170,13 +246,15 @@ def _report_actions(package, *, title: str, stem: str, paths: AppPaths, key: str
         except (OSError, ValueError, PayloadError, RefreshRunBusyError) as exc:
             st.error(f"Rapporten kunne ikke gemmes: {exc}")
         else:
-            st.session_state[f"{key}-artifact"] = (registered.artifact_id, artifact.path.name)
+            st.session_state[artifact_key] = _SavedReport(
+                signature, registered.artifact_id, artifact.path.name
+            )
             st.success(f"Rapporten er gemt som {artifact.path.name}.")
-    artifact = st.session_state.get(f"{key}-artifact")
-    if isinstance(artifact, tuple) and len(artifact) == 2:
+    artifact = st.session_state.get(artifact_key)
+    if isinstance(artifact, _SavedReport):
         st.link_button(
-            f"Download gemt rapport ({artifact[1]})",
-            f"/downloads/{artifact[0]}",
+            f"Download gemt rapport ({artifact.filename})",
+            f"/downloads/{artifact.artifact_id}",
             icon=":material/download:",
         )
 
@@ -192,13 +270,29 @@ def _report_actions(package, *, title: str, stem: str, paths: AppPaths, key: str
         "Pakken er ikke-gendannelig og har ingen reversibel pseudonymnøgle. "
         "Fejlsøgning fjerner desuden stier, URL'er, noter, tags og genkendelige labels."
     )
+    privacy_profile = str(profile or "share")
+    support_key = f"{key}-support"
+    support = st.session_state.get(support_key)
+    if (
+        not isinstance(support, _PreparedSupport)
+        or support.signature != signature
+        or support.privacy_profile != privacy_profile
+    ):
+        st.session_state.pop(support_key, None)
     if st.button("Forbered anonymiseret ZIP", icon=":material/privacy_tip:", key=f"{key}-prepare-support"):
-        st.session_state[f"{key}-support"] = build_support_bundle(package, str(profile or "share"))
-    support = st.session_state.get(f"{key}-support")
-    if isinstance(support, bytes):
+        st.session_state[support_key] = _PreparedSupport(
+            signature, privacy_profile, build_support_bundle(package, privacy_profile),
+            datetime.now().astimezone(),
+        )
+    support = st.session_state.get(support_key)
+    if isinstance(support, _PreparedSupport):
+        st.caption(
+            f"Supportpakken er forberedt {support.prepared_at.strftime('%d.%m.%Y %H:%M:%S')} "
+            f"med profilen {'Fejlsøgning' if support.privacy_profile == 'debug' else 'Deling'}."
+        )
         st.download_button(
             "Download supportpakke",
-            support,
+            support.content,
             file_name=f"{stem}-support.zip",
             mime="application/zip",
             icon=":material/download:",
@@ -230,17 +324,20 @@ def render_exports(
             st.info("Tilføj et managerspil, før en managerspilrapport kan bygges.")
             return
         selected = st.selectbox("Managerspil", games, format_func=lambda item: item.name, key="data-report-game")
+        title = f"Managerspil – {selected.name}"
+        stem = f"managerspil-{selected.game.slug}"
         if st.button("Forbered managerspilrapport", icon=":material/description:", key="prepare-manager-report"):
-            st.session_state["prepared-manager-report"] = (
+            st.session_state["prepared-manager-report"] = _prepare_report(
                 selected.identity,
                 build_manager_game_report_package(selected, configuration.groups, index),
+                title, stem,
             )
-        prepared = st.session_state.get("prepared-manager-report")
-        if isinstance(prepared, tuple) and prepared[0] == selected.identity:
+        prepared = _prepared_report("prepared-manager-report", selected.identity, title, stem)
+        if prepared is not None:
             _report_actions(
-                prepared[1],
-                title=f"Managerspil – {selected.name}",
-                stem=f"managerspil-{selected.game.slug}",
+                prepared.package,
+                title=prepared.title,
+                stem=prepared.stem,
                 paths=paths,
                 key="manager-report",
             )
@@ -259,17 +356,20 @@ def render_exports(
         st.info("Der er ingen sæsoner at rapportere endnu.")
         return
     season = st.selectbox("Sæson", seasons, format_func=lambda item: item.name, key="data-report-season")
+    title = f"Sæson – {season.name}"
+    stem = f"season-{season.season_id}"
     if st.button("Forbered sæsonrapport", icon=":material/description:", key="prepare-season-report"):
-        st.session_state["prepared-season-report"] = (
+        st.session_state["prepared-season-report"] = _prepare_report(
             season.season_id,
             build_season_report_package(season, events, settings.hall_of_fame_score),
+            title, stem,
         )
-    prepared = st.session_state.get("prepared-season-report")
-    if isinstance(prepared, tuple) and prepared[0] == season.season_id:
+    prepared = _prepared_report("prepared-season-report", season.season_id, title, stem)
+    if prepared is not None:
         _report_actions(
-            prepared[1],
-            title=f"Sæson – {season.name}",
-            stem=f"season-{season.season_id}",
+            prepared.package,
+            title=prepared.title,
+            stem=prepared.stem,
             paths=paths,
             key="season-report",
         )
@@ -305,6 +405,11 @@ def _show_import_preview(preview: ImportPreview) -> None:
             key="import-preview-table",
             column_config={"Størrelse": st.column_config.NumberColumn(format="bytes")},
         )
+
+
+def _clear_integrity_state() -> None:
+    st.session_state.pop("full-integrity-result", None)
+    st.session_state.pop("integrity-repair-preview", None)
 
 
 def render_import_backup(paths: AppPaths) -> None:
@@ -378,6 +483,7 @@ def render_import_backup(paths: AppPaths) -> None:
             except (OSError, ValueError, PayloadError, RefreshRunBusyError) as exc:
                 st.error(f"Importen blev ikke udført: {exc}")
             else:
+                _clear_integrity_state()
                 st.cache_data.clear()
                 st.session_state["data-action-message"] = (
                     f"Importen er gennemført: {result.written_files} filer skrevet og "
@@ -410,6 +516,7 @@ def _archive_dialog(
         except (OSError, ValueError, RefreshRunBusyError) as exc:
             st.error(f"Arkiveringen blev afbrudt: {exc}")
         else:
+            _clear_integrity_state()
             message = (
                 f"{result.archived_files} filer blev arkiveret i {result.path.name}; "
                 f"{result.removed_files} kilder blev fjernet."
@@ -507,7 +614,7 @@ def _integrity_panel(paths: AppPaths) -> None:
                     st.error(f"Indekset blev ikke repareret: {exc}")
                 else:
                     st.session_state["data-action-message"] = f"Det afledte indeks er erstattet atomisk: {path.name}."
-                    st.session_state.pop("integrity-repair-preview", None)
+                    _clear_integrity_state()
                     st.rerun()
 
 

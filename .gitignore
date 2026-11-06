@@ -8,6 +8,7 @@ pytest-cache-files-*/
 pytest-plan-*/
 .streamlit/secrets.toml
 /tests/_test-*/
+/tests/._test-*.lock
 /tests/ui/baselines/
 /tests/ui/artifacts/
 /test-results/

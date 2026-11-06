@@ -277,6 +277,16 @@ def _selected_round_control(
     return selected, invalid
 
 
+def _return_to_current_round(manager_game: ManagerGame) -> None:
+    state_key = (
+        f"round-center-view:{manager_game.game.locale}:"
+        f"{manager_game.game.slug}"
+    )
+    st.query_params.pop("round", None)
+    st.session_state[state_key] = None
+    st.session_state[f"{state_key}:query"] = ""
+
+
 def _manifest_latest(
     paths: AppPaths,
     manager_game: ManagerGame,
@@ -1022,20 +1032,16 @@ def render_round_center(
         )
         historical = selected_round is not None
         if historical:
-            if st.button(
+            st.button(
                 "Tilbage til nu",
                 icon=":material/history_toggle_off:",
                 key=(
                     f"round-center-now:{manager_game.game.locale}:"
                     f"{manager_game.game.slug}"
                 ),
-            ):
-                st.query_params.pop("round", None)
-                st.session_state[
-                    f"round-center-view:{manager_game.game.locale}:"
-                    f"{manager_game.game.slug}"
-                ] = None
-                st.rerun()
+                on_click=_return_to_current_round,
+                args=(manager_game,),
+            )
         else:
             refresh_requested = st.button(
                 "Opdater managerspil",

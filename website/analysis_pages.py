@@ -6,6 +6,7 @@ from website.preferences import tool_visible
 from holdet_lib.hub_settings import HubFeature
 
 from datetime import datetime
+from dataclasses import dataclass
 import pandas as pd
 import streamlit as st
 
@@ -45,6 +46,9 @@ from holdet_lib import (
     rule_profile_for_game,
     simulate_transfer_scenario,
 )
+from holdet_lib.decision_analysis import IdealTeamResult
+from holdet_lib.models import ScrapedGame
+from holdet_lib.rules import GameRuleProfile
 
 
 def _format(value: int | float | None, *, percent: bool = False) -> str:
@@ -577,10 +581,33 @@ def _group_panel(manager_game, groups, snapshots, player_index, paths) -> None:
         st.info("Ingen dækkede rundetrupper er tilgængelige for eksponering.")
 
 
+@dataclass(frozen=True, slots=True)
+class _IdealInputs:
+    game_locale: str
+    game_slug: str
+    round_number: int
+    snapshot_path: str
+    snapshot_generated_at: datetime
+    statistics: ScrapedGame
+    rules: GameRuleProfile
+    timeout_seconds: float
+
+
+@dataclass(frozen=True, slots=True)
+class _IdealCalculation:
+    inputs: _IdealInputs
+    result: IdealTeamResult
+
+
 def _ideal_panel(manager_game, player_index, rules) -> None:
     st.subheader(
         "Idealhold for en afsluttet runde", anchor="idealhold-afsluttet-runde"
     )
+    game = manager_game.game
+    result_key = f"ideal-result:{game.locale.casefold()}:{game.slug}"
+    for key in tuple(st.session_state):
+        if str(key).startswith(f"ideal-result-{game.slug}-"):
+            st.session_state.pop(key, None)
     rounds = tuple(
         round_number
         for round_number in player_index.rounds_for(manager_game.game)
@@ -588,31 +615,43 @@ def _ideal_panel(manager_game, player_index, rules) -> None:
         and snapshot.statistics.round_status == "complete"
     )
     if not rounds:
+        st.session_state.pop(result_key, None)
         st.info("Hent en afsluttet spillerunde for at beregne idealholdet.")
         return
-    round_number = st.selectbox("Afsluttet runde", rounds, key=f"ideal-round-{manager_game.game.slug}")
+    round_number = st.selectbox("Afsluttet runde", rounds, key=f"ideal-round-{game.locale.casefold()}-{game.slug}")
     if not rules.verified:
+        st.session_state.pop(result_key, None)
         st.warning(
             "Idealhold er låst, indtil budget-, trups-, formations- og "
             "klubregler er verificeret for denne sæson."
         )
         return
     timeout = st.slider("Tidsgrænse i sekunder", 1, 30, 5)
-    result_key = f"ideal-result-{manager_game.game.slug}-{round_number}"
+    snapshot = player_index.newest(game, int(round_number))
+    assert snapshot is not None
+    inputs = _IdealInputs(
+        game.locale.casefold(), game.slug, int(round_number), str(snapshot.path),
+        snapshot.generated_at, snapshot.statistics, rules, float(timeout),
+    )
+    prepared = st.session_state.get(result_key)
+    if not isinstance(prepared, _IdealCalculation) or prepared.inputs != inputs:
+        st.session_state.pop(result_key, None)
     if st.button("Beregn idealhold", type="primary"):
-        snapshot = player_index.newest(manager_game.game, int(round_number))
-        assert snapshot is not None
         with st.spinner("Søger efter den eksakte optimale trup …"):
-            st.session_state[result_key] = optimize_ideal_team(
-                snapshot.statistics.entries,
-                rules,
-                round_number=int(round_number),
-                round_complete=True,
-                timeout_seconds=float(timeout),
+            st.session_state[result_key] = _IdealCalculation(
+                inputs,
+                optimize_ideal_team(
+                    snapshot.statistics.entries,
+                    rules,
+                    round_number=int(round_number),
+                    round_complete=True,
+                    timeout_seconds=float(timeout),
+                ),
             )
-    result = st.session_state.get(result_key)
-    if result is None:
+    prepared = st.session_state.get(result_key)
+    if not isinstance(prepared, _IdealCalculation):
         return
+    result = prepared.result
     if result.status == "optimal":
         st.success("Idealholdet er bevist optimalt.")
     elif result.status == "timeout":

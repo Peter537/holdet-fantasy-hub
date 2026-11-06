@@ -23,6 +23,78 @@ def plan_for(manager, *args, **kwargs):
         (RefreshStep("players", "players", "Spillere", True, True, "Mangler"),))
 
 
+def test_uncertain_source_also_selects_postprocess(monkeypatch):
+    with temporary_directory() as root:
+        paths = make_paths(root)
+        manager = holdet.GroupStore(paths.groups_file, paths.group_revision_dir).create_manager_game(sample_team(1).reference.game, "Spil")
+        def plan(manager, *args, **kwargs):
+            return RefreshPlan(manager, RefreshMode.STALE_ONLY, datetime.now(timezone.utc), 3,
+                (RefreshStep("team:1", "team", "Hold", False, False, "Aktuel", team_id=1),
+                 RefreshStep("postprocess", "postprocess", "Efterbehandling", False, False, "Aktuel")),
+                include_postprocess=True, catch_up=True)
+        def catchup(*args, **kwargs):
+            steps = {step.step_id: step for step in kwargs["plan"].steps}
+            assert steps["team:1"].selected
+            assert steps["postprocess"].selected
+            return SimpleNamespace(cancelled=False, manifest=SimpleNamespace(failures=()), manifest_path=paths.manifest_dir / "child.json", warnings=())
+        monkeypatch.setattr(refresh_service, "build_refresh_plan", plan)
+        monkeypatch.setattr(refresh, "catch_up_manager_game", catchup)
+        coordinator = refresh_service.create_refresh_coordinator(paths, client_factory=lambda: object())
+        coordinator.action({"key": "game", "locale": "da", "game": manager.game.slug},
+            cancelled=lambda: False, progress=lambda event: None,
+            checkpoint={"run_id": "00000000-0000-0000-0000-000000000001", "manifest_paths": [],
+                        "uncertain": True, "progress": {"source": "team:1", "status": "fetched"}})
+
+
+def test_resume_after_player_publication_preserves_alert_transition(monkeypatch):
+    from datetime import timedelta
+    from tests.test_player_statistics import sample_statistics
+    from tests.test_refresh_foundation import _future_metadata
+    from tests.test_refresh_runs import wait_for
+    from holdet_lib.refresh_transition import PlayerTransition, RecoveryCheckpointError
+
+    with temporary_directory() as root:
+        paths = make_paths(root)
+        team = sample_team(1, current_round=3)
+        config = holdet.GroupStore(paths.groups_file, paths.group_revision_dir)
+        manager = config.create_manager_game(team.reference.game, "Spil")
+        config.create("Liga", manager.game, (holdet.GroupTeam(1, team.team_name, team.reference.source_url),), group_id="league")
+        now = datetime.now(timezone.utc)
+        adverse = replace(sample_statistics(3), round_status="complete")
+        healthy = replace(adverse.entries[0], is_active=True, is_disabled=False, is_injured=False, has_suspension=False)
+        baseline = replace(adverse, entries=(healthy,))
+        holdet.PlayerStatisticsStore(paths.snapshot_dir).save(baseline, now=now - timedelta(hours=1))
+        holdet.GameMetadataStore(paths.game_metadata_dir).save(_future_metadata(manager.game, now))
+        holdet.HubSettingsStore(paths.hub_settings_file).save(holdet.HubSettings(
+            enabled_features=("alerts",), watchlist=(holdet.watchlist_entry(manager.game, healthy),)))
+        calls = []
+        class Client:
+            def fetch_game_info(self, game):
+                return _future_metadata(game, now)
+            def fetch_players(self, _game, *, round_number=None):
+                calls.append(round_number)
+                return adverse
+            def fetch_team(self, reference):
+                return sample_team(reference.team_id, current_round=3)
+        publish = PlayerTransition.publish
+        def crash_after_publish(self, *args, **kwargs):
+            result = publish(self, *args, **kwargs)
+            raise RecoveryCheckpointError("simulated interruption")
+        monkeypatch.setattr(PlayerTransition, "publish", crash_after_publish)
+        coordinator = refresh_service.create_refresh_coordinator(paths, client_factory=Client)
+        run_id = coordinator.start([{"key": "game", "locale": "da", "game": manager.game.slug, "force": True}])["run_id"]
+        failed = wait_for(coordinator, run_id, lambda value: value["status"] == "failed")
+        assert failed["games"][0]["player_transition"]["snapshot_path"]
+        monkeypatch.setattr(PlayerTransition, "publish", publish)
+        holdet.HubSettingsStore(paths.hub_settings_file).save(holdet.HubSettings())
+        coordinator.resume(run_id)
+        done = wait_for(coordinator, run_id, lambda value: value["status"] == "success")
+        assert done["games"][0]["player_transition"]["alerts_complete"]
+        assert calls == [None]
+        alerts = holdet.AnalysisInboxStore(paths.analysis_inbox_file).load()
+        assert alerts
+
+
 def test_scope_archives_guard_and_worker_resources(monkeypatch):
     with temporary_directory() as root:
         paths = make_paths(root)

@@ -657,7 +657,7 @@ def serialize_player_export(document: PlayerExportDocument, format: str) -> byte
 
 
 class PlayerExportStore:
-    """Explicitly publish immutable filtered player exports."""
+    """Publish immutable files, removing this call's new files on failure."""
 
     MIME_TYPES = {
         "txt": "text/plain; charset=utf-8",

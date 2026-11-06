@@ -137,7 +137,7 @@ Seeds fryses ved oprettelse. Schema 8 bruger fortsat `TournamentConfig` som runt
 - eventledger schema 2 ejer rå managerresultater og revisioner.
 - `GameMetadata` schema 2 ejer schedule, deadlines og en fail-closed sæsonregelprojektion, som kalender og analyser læser uden fetch.
 - Uforanderlige metadatarevisioner ejer regel- og scheduleændringer, mens `RefreshManifest` schema 3 ejer udfald, cacheprovenance, ønskede runder, annullering og retryrelationer for eksplicitte opdateringer. Manifest schema 1, 2 og 3 læses side om side uden startup-write.
-- `RefreshRunCoordinator` gemmer schema-1-kørselsjournaler og ventende manifester under `data/refresh-runs/`. En proceslås uden for den udskiftelige datamappe deles med restore, import og retention.
+- `RefreshRunCoordinator` skriver schema-2-kørselsjournaler og læser schema 1 uden opstartsskrivning. Ventende manifester og uforanderlige spillerstages ligger under `data/refresh-runs/`. Recovery fastholder kildevalg, oprindelige alarmbaselines og bestilte regler gennem genplanlægning og genoptagelse. En proceslås uden for den udskiftelige datamappe deles med direkte hentehandlinger, backup, restore, import, indeksreparation og retention; konfigurationsændringer koordineres af en separat navnerumslås.
 - `ResolvedScope` er den fælles medlemsafgrænsning for indhentning og samlet JSON. JSON schema 1 er en ren cacheprojektion og uafhængig af tabelfiltre.
 - `DataPackage` schema 1 er den fælles, rene tabulære projektion for CSV, XLSX, Parquet og rapporter.
 - `integrity-index.json` schema 1 er et afledt checksumindeks, der kan genopbygges uden at ændre kanoniske filer.

@@ -12,7 +12,7 @@ from typing import Literal
 
 from .errors import PayloadError
 from .hub_settings import WatchRule, WatchlistEntry, player_identity
-from .persistence import aware_local, replace_text_atomically
+from .persistence import aware_local, configuration_transaction, replace_text_atomically
 from .storage import PlayerStatisticsIndex, PlayerStatisticsSnapshot
 
 
@@ -350,6 +350,7 @@ class AnalysisInboxStore:
             raise PayloadError("Alarmindbakken mangler alerts-listen")
         return tuple(_alert_from_dict(item, index) for index, item in enumerate(items))
 
+    @configuration_transaction
     def save(self, alerts: tuple[WatchlistAlert, ...]) -> None:
         unique = {item.alert_id: item for item in alerts}
         ordered = tuple(
@@ -364,6 +365,7 @@ class AnalysisInboxStore:
             json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
         )
 
+    @configuration_transaction
     def merge(self, alerts: tuple[WatchlistAlert, ...]) -> tuple[WatchlistAlert, ...]:
         existing = self.load()
         by_id = {item.alert_id: item for item in existing}
@@ -377,6 +379,7 @@ class AnalysisInboxStore:
             self.save(result)
         return result
 
+    @configuration_transaction
     def mark_read(self, alert_id: str, *, now: datetime | None = None) -> tuple[WatchlistAlert, ...]:
         timestamp = aware_local(now)
         updated = tuple(
@@ -387,6 +390,7 @@ class AnalysisInboxStore:
         self.save(updated)
         return updated
 
+    @configuration_transaction
     def dismiss(self, alert_id: str, *, now: datetime | None = None) -> tuple[WatchlistAlert, ...]:
         timestamp = aware_local(now)
         updated = tuple(
@@ -397,6 +401,7 @@ class AnalysisInboxStore:
         self.save(updated)
         return updated
 
+    @configuration_transaction
     def clear_dismissed(
         self,
         *,

@@ -3,6 +3,7 @@ from pathlib import Path
 import os
 import subprocess
 import sys
+import threading
 from unittest.mock import patch
 
 import pytest
@@ -92,14 +93,28 @@ def test_restore_with_busy_configuration_leaves_settings_untouched_and_releases_
     StrategyStore(paths.strategy_file).set(GAME, 101, TeamStrategy(transfer_policy="fixed"))
     backup, _ = create_backup_bytes(paths, now=NOW)
     before = {path.relative_to(paths.config_dir): path.read_bytes() for path in paths.config_dir.rglob("*") if path.is_file()}
-    with exclusive_configuration_update(paths.config_dir), patch(
-        "holdet_lib.backup.exclusive_configuration_update",
-        side_effect=lambda path: exclusive_configuration_update(path, timeout=0),
-    ):
-        with pytest.raises(TimeoutError, match="busy"):
-            restore_backup(backup, paths, now=NOW)
-        with exclusive_data_operation(paths.data_dir):
-            pass
+    held, release = threading.Event(), threading.Event()
+
+    def hold_configuration():
+        with exclusive_configuration_update(paths.config_dir):
+            held.set()
+            assert release.wait(10)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        owner = pool.submit(hold_configuration)
+        try:
+            assert held.wait(5)
+            with patch(
+                "holdet_lib.backup.exclusive_configuration_update",
+                side_effect=lambda path: exclusive_configuration_update(path, timeout=0),
+            ):
+                with pytest.raises(TimeoutError, match="busy"):
+                    restore_backup(backup, paths, now=NOW)
+                with exclusive_data_operation(paths.data_dir):
+                    pass
+        finally:
+            release.set()
+        owner.result(timeout=5)
     assert {path.relative_to(paths.config_dir): path.read_bytes() for path in paths.config_dir.rglob("*") if path.is_file()} == before
     assert not paths.backup_dir.exists()
     restore_backup(backup, paths, now=NOW)

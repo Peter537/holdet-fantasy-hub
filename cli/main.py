@@ -12,7 +12,7 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from holdet_lib.errors import ScraperError
-from holdet_lib.refresh_runs import RefreshRunBusyError
+from holdet_lib.refresh_runs import RefreshRunBusyError, exclusive_data_operation
 from holdet_lib.http import HttpClient
 from holdet_lib.client import HoldetClient
 from holdet_lib.models import TeamReference
@@ -486,17 +486,24 @@ def main(
     if args.command == "teams":
         args.accounts_file = args.accounts_file or app_paths.accounts_file
         args.output_dir = args.output_dir or app_paths.team_export_dir
-        return _run_teams(
-            args,
-            service_factory=service_factory or TeamDataService,
-            snapshot_store=SnapshotStore(app_paths.snapshot_dir),
-        )
-    args.output_dir = args.output_dir or app_paths.player_export_dir
-    return _run_players(
-        args,
-        player_scraper=player_scraper or _fetch_and_export_players,
-        snapshot_dir=app_paths.snapshot_dir,
-    )
+    else:
+        args.output_dir = args.output_dir or app_paths.player_export_dir
+    try:
+        with exclusive_data_operation(app_paths.data_dir):
+            if args.command == "teams":
+                return _run_teams(
+                    args,
+                    service_factory=service_factory or TeamDataService,
+                    snapshot_store=SnapshotStore(app_paths.snapshot_dir),
+                )
+            return _run_players(
+                args,
+                player_scraper=player_scraper or _fetch_and_export_players,
+                snapshot_dir=app_paths.snapshot_dir,
+            )
+    except (OSError, RefreshRunBusyError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

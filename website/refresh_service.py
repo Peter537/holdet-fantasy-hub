@@ -6,7 +6,6 @@ running operation.
 """
 from __future__ import annotations
 
-from dataclasses import replace
 import json
 from pathlib import Path
 import threading
@@ -19,9 +18,10 @@ from holdet_lib.game_metadata import GameMetadataStore
 from holdet_lib.groups import GroupStore
 from holdet_lib.hall_of_fame import HallOfFameStore, build_live_hall_of_fame_events
 from holdet_lib.hub_settings import HubFeature, HubSettingsStore, feature_enabled
-from holdet_lib.refresh import RefreshMode, build_refresh_plan
+from holdet_lib.refresh import RefreshMode, build_refresh_plan, select_recovery_step
 from holdet_lib.persistence import replace_text_atomically
 from holdet_lib.refresh_runs import RefreshRunCoordinator, RefreshRunResult
+from holdet_lib.refresh_transition import PlayerTransition
 from holdet_lib.scopes import resolve_scope
 from holdet_lib.storage import ManifestStore, PlayerStatisticsStore, SnapshotStore
 from holdet_lib.tournament import (
@@ -120,7 +120,7 @@ def _previous_manifest(checkpoint: dict[str, Any], store: ManifestStore, run_roo
 
 def create_refresh_coordinator(paths, *, client_factory=HoldetClient):
     """Return a coordinator; creation and polling are side-effect free."""
-    def action(task, *, cancelled, progress, checkpoint):
+    def action(task, *, cancelled, progress, checkpoint, save_checkpoint=None):
         # Resolve every value again on the worker, never reuse a page/session object.
         config = GroupStore(paths.groups_file, paths.group_revision_dir).load_configuration()
         locale, slug = task.get("locale"), task.get("game")
@@ -168,6 +168,17 @@ def create_refresh_coordinator(paths, *, client_factory=HoldetClient):
         )
         if completed_manifest and not previous.failures:
             return RefreshRunResult("success", detail="Det gemte manifest er allerede afsluttet")
+        alerts_enabled = feature_enabled(settings, HubFeature.ALERTS)
+        if (alerts_enabled and checkpoint.get("journal_schema_version") == 1
+            and checkpoint.get("uncertain") and not completed_manifest
+            and not checkpoint.get("player_transition")):
+            raise PayloadError("Den gamle afbrudte opdatering mangler oplysninger til sikker gendannelse af statusalarmer")
+        transition = None
+        if (alerts_enabled or checkpoint.get("player_transition")) and save_checkpoint is not None:
+            transition = PlayerTransition(paths.data_dir, checkpoint["run_id"], manager.game,
+                                          players, checkpoint.get("player_transition"), save_checkpoint)
+            if transition.record is not None and transition.record["snapshot_path"] and not transition.record["alerts_complete"]:
+                transition.publish()
         try:
             metadata = metadata_store.load(manager.game)
         except (OSError, ValueError, PayloadError):
@@ -184,10 +195,12 @@ def create_refresh_coordinator(paths, *, client_factory=HoldetClient):
         uncertain = checkpoint.get("uncertain") and not completed_manifest and checkpoint.get("progress")
         if uncertain:
             step_id = uncertain.get("source")
-            if step_id not in {step.step_id for step in plan.steps if step.available}:
+            if not isinstance(step_id, str) or not step_id:
                 raise PayloadError("Det afbrudte kildetrin kan ikke genskabes sikkert")
-            plan = replace(plan, steps=tuple(replace(step, selected=True, stale=True,
-                reason="Afbrudt trin skal kontrolleres") if step.step_id == step_id else step for step in plan.steps))
+            plan = select_recovery_step(plan, step_id)
+        if transition is not None and transition.record is not None and not transition.record["alerts_complete"]:
+            pending_step = "postprocess" if transition.record["snapshot_path"] else "players"
+            plan = select_recovery_step(plan, pending_step)
         if not plan.selected_steps:
             return RefreshRunResult("success", detail="Alle lokale data er aktuelle")
 
@@ -216,7 +229,7 @@ def create_refresh_coordinator(paths, *, client_factory=HoldetClient):
                 settings=settings, inbox_store=AnalysisInboxStore(paths.analysis_inbox_file),
                 metadata_store=metadata_store, plan=plan, progress=report,
                 postprocess=postprocess, cancelled=cancellation_requested,
-                alerts_enabled=feature_enabled(settings, HubFeature.ALERTS))
+                alerts_enabled=alerts_enabled, player_transition=transition)
         except ManifestWriteError as exc:
             # Preserve the full completed child result even when the ordinary
             # manifest directory is unavailable; a retry must not refetch it.
@@ -239,4 +252,4 @@ def create_refresh_coordinator(paths, *, client_factory=HoldetClient):
             details.append(f"{first.label}: {first.error or first.reason or first.status}")
         return RefreshRunResult(status, (*paths_written, _reference(result.manifest_path, paths.data_dir)), " | ".join((*details, *warnings)) or None)
 
-    return RefreshRunCoordinator(paths.data_dir / "refresh-runs", action)
+    return RefreshRunCoordinator(paths.data_dir / "refresh-runs", action, durable_checkpoint=True)

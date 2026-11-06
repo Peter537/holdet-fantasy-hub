@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import datetime
+from functools import wraps
+from inspect import get_annotations
 import errno
 import os
 from pathlib import Path
@@ -14,6 +16,7 @@ from uuid import uuid4
 
 _FILE_UPDATE_LOCKS: dict[str, threading.Lock] = {}
 _FILE_UPDATE_GUARD = threading.Lock()
+_OWNED_FILE_LOCKS = threading.local()
 
 
 def file_update_lock_path(path: Path) -> Path:
@@ -31,9 +34,14 @@ def exclusive_file_update(path: Path, *, timeout: float = 5.0):
     if timeout < 0:
         raise ValueError("File update timeout must be non-negative")
     resolved = Path(path).resolve()
+    key = os.path.normcase(str(resolved))
+    owned = getattr(_OWNED_FILE_LOCKS, "paths", None)
+    if owned is not None and key in owned:
+        yield
+        return
     deadline = time.monotonic() + timeout
     with _FILE_UPDATE_GUARD:
-        thread_lock = _FILE_UPDATE_LOCKS.setdefault(os.path.normcase(str(resolved)), threading.Lock())
+        thread_lock = _FILE_UPDATE_LOCKS.setdefault(key, threading.Lock())
     busy = f"Settings file is busy; try again: {resolved.name}"
     if not thread_lock.acquire(timeout=max(0, deadline - time.monotonic())):
         raise TimeoutError(busy)
@@ -70,7 +78,14 @@ def exclusive_file_update(path: Path, *, timeout: float = 5.0):
                 handle.seek(0)
                 handle.write(b"0")
                 handle.flush()
-                yield
+                if owned is None:
+                    owned = set()
+                    _OWNED_FILE_LOCKS.paths = owned
+                owned.add(key)
+                try:
+                    yield
+                finally:
+                    owned.remove(key)
             finally:
                 unlock()
     finally:
@@ -81,11 +96,23 @@ def exclusive_file_update(path: Path, *, timeout: float = 5.0):
 def exclusive_configuration_update(config_dir: Path, *, timeout: float = 5.0):
     """Lock the config namespace using a sibling outside the replaced directory.
 
-    Strategy saves and restore must acquire this before creating or reading
-    configuration, and retain it through publication or rollback.
+    Writers retain this through read/modify/write or rollback. Same-thread
+    nesting lets a composed transaction call another store's guarded methods.
     """
     with exclusive_file_update(config_dir, timeout=timeout):
         yield
+
+
+def configuration_transaction(method):
+    """Hold a store's configuration namespace through its complete mutation."""
+
+    @wraps(method)
+    def guarded(store, *args, **kwargs):
+        with exclusive_configuration_update(store.path.parent):
+            return method(store, *args, **kwargs)
+
+    guarded.__annotations__ = get_annotations(method, eval_str=True)
+    return guarded
 
 
 def aware_local(value: datetime | None = None) -> datetime:

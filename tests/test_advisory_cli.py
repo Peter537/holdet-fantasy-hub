@@ -597,6 +597,8 @@ def test_rules_audit_rejects_malformed_rounding_without_publishing(seeded, capsy
 
 
 def test_busy_strategy_save_is_a_cli_error_and_preserves_saved_policy(seeded, capsys, tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
     from holdet_lib.persistence import exclusive_configuration_update
     from holdet_lib.strategies import StrategyStore
     paths, _ = seeded
@@ -604,11 +606,25 @@ def test_busy_strategy_save_is_a_cli_error_and_preserves_saved_policy(seeded, ca
     before = paths.strategy_file.read_bytes()
     source = tmp_path / "strategy.json"
     source.write_text(json.dumps({"transfer_policy": "active"}), encoding="utf-8")
-    with exclusive_configuration_update(paths.config_dir), patch(
-        "holdet_lib.strategies.exclusive_configuration_update",
-        side_effect=lambda path: exclusive_configuration_update(path, timeout=0),
-    ):
-        status, result, errors = run_cli(capsys, paths, ["strategy", GAME.slug, "--team", "101", "--set", str(source)])
+    held, release = threading.Event(), threading.Event()
+
+    def hold_configuration():
+        with exclusive_configuration_update(paths.config_dir):
+            held.set()
+            assert release.wait(10)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        owner = pool.submit(hold_configuration)
+        try:
+            assert held.wait(5)
+            with patch(
+                "holdet_lib.strategies.exclusive_configuration_update",
+                side_effect=lambda path: exclusive_configuration_update(path, timeout=0),
+            ):
+                status, result, errors = run_cli(capsys, paths, ["strategy", GAME.slug, "--team", "101", "--set", str(source)])
+        finally:
+            release.set()
+        owner.result(timeout=5)
     assert status == 1 and result is None and "busy" in errors
     assert "Traceback" not in errors and paths.strategy_file.read_bytes() == before
     status, result, errors = run_cli(capsys, paths, ["strategy", GAME.slug, "--team", "101", "--set", str(source)])

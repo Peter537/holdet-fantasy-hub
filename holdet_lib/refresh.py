@@ -26,6 +26,7 @@ from .hub_settings import HubSettings
 from .models import GameUrl, ScrapedTeam
 from .output import sanitize_path_component
 from .persistence import aware_local
+from .refresh_transition import RecoveryCheckpointError
 from .scopes import resolve_scope
 from .storage import (
     ManifestStore,
@@ -124,6 +125,7 @@ class RefreshPlan:
     catch_up: bool = False
     competition_id: str | None = None
     warnings: tuple[str, ...] = ()
+    recovery_step_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "mode", RefreshMode(self.mode))
@@ -836,6 +838,24 @@ def build_refresh_plan(
     )
 
 
+def select_recovery_step(plan: RefreshPlan, step_id: str | None) -> RefreshPlan:
+    """Keep an interrupted source and its downstream work in a rebuilt plan."""
+    if step_id is None:
+        return plan
+    if not any(step.step_id == step_id and step.available for step in plan.steps):
+        raise PayloadError("Det afbrudte kildetrin kan ikke genskabes sikkert")
+    steps = tuple(
+        replace(step, selected=True, stale=True,
+                reason="Afbrudt trin skal kontrolleres")
+        if step.step_id == step_id else
+        replace(step, selected=True, stale=True,
+                reason="Køres efter det afbrudte kildetrin")
+        if step.source == "postprocess" else step
+        for step in plan.steps
+    )
+    return replace(plan, steps=steps, recovery_step_ids=tuple(dict.fromkeys((*plan.recovery_step_ids, step_id))))
+
+
 def _revalidate_stale_plan_after_metadata(
     plan: RefreshPlan,
     groups: tuple[GroupDefinition, ...],
@@ -883,7 +903,7 @@ def _revalidate_stale_plan_after_metadata(
         for item in rebuilt.steps
         if item.source != "metadata"
     )
-    return replace(
+    rebuilt = replace(
         rebuilt,
         created_at=plan.created_at,
         steps=(
@@ -891,6 +911,10 @@ def _revalidate_stale_plan_after_metadata(
             *downstream,
         ),
     )
+    for step_id in plan.recovery_step_ids:
+        if completed_metadata.step_id != step_id:
+            rebuilt = select_recovery_step(rebuilt, step_id)
+    return rebuilt
 
 
 def _group_refresh_state(
@@ -1107,6 +1131,7 @@ def refresh_manager_game(
     cancelled: Callable[[], bool] | None = None,
     alerts_enabled: bool | None = None,
     catch_up: bool = False,
+    player_transition=None,
     now: datetime | None = None,
 ) -> GameRefreshResult:
     """Refresh a previewed subset while retaining the legacy call contract."""
@@ -1128,6 +1153,8 @@ def refresh_manager_game(
         and feature_enabled(settings, "alerts")
         and alerts_enabled is not False
     )
+    if player_transition is not None and player_transition.record is not None:
+        evaluate_alerts = evaluate_alerts or not player_transition.record["alerts_complete"]
     metadata_load_error: str | None = None
     if metadata_store is None:
         before_metadata = None
@@ -1226,7 +1253,11 @@ def refresh_manager_game(
     warnings = list(plan.warnings)
     changes: tuple[RefreshMetadataChange, ...] = ()
 
-    alert_snapshot_reference: str | None = None
+    alert_snapshot_reference: str | None = (
+        None if player_transition is None or player_transition.record is None
+        or player_transition.record["alerts_complete"]
+        else player_transition.record["snapshot_path"]
+    )
 
     def snapshot_reference(snapshot: PlayerStatisticsSnapshot) -> str | None:
         return _relative_reference(
@@ -1258,10 +1289,15 @@ def refresh_manager_game(
         if current_index is None:
             return None, None, None
         current_snapshot = snapshots[current_index]
+        baseline_snapshots = (
+            player_transition.baseline(before_players.for_game(manager_game.game))
+            if player_transition is not None and player_transition.record is not None
+            else before_players.for_game(manager_game.game)
+        )
         previous_snapshot = max(
             (
                 item
-                for item in before_players.for_game(manager_game.game)
+                for item in baseline_snapshots
                 if item.statistics.round_number <= current_snapshot.statistics.round_number
                 and _instant(item.generated_at) < _instant(current_snapshot.generated_at)
             ),
@@ -1271,7 +1307,7 @@ def refresh_manager_game(
         prior_snapshot = max(
             (
                 item
-                for item in before_players.for_game(manager_game.game)
+                for item in baseline_snapshots
                 if previous_snapshot is not None
                 and item.generated_at < previous_snapshot.generated_at
                 and item.statistics.round_number <= previous_snapshot.statistics.round_number
@@ -1296,24 +1332,33 @@ def refresh_manager_game(
             raise PayloadError(
                 "Spillersnapshottet til statusalarmer er ikke tilgængeligt"
             )
+        if player_transition is not None and player_transition.record is not None:
+            baseline = player_transition.baseline(before_players.for_game(manager_game.game))
+            form_index = PlayerStatisticsIndex((*baseline, current_snapshot))
+        else:
+            form_index = player_store.scan(manager_game.game)
         alerts = build_watchlist_alerts(
             previous_snapshot,
             current_snapshot,
-            settings.watchlist,
+            (player_transition.alert_settings().watchlist
+             if player_transition is not None and player_transition.record is not None
+             else settings.watchlist),
             now=started_at,
             prior=prior_snapshot,
             previous_forms=(
                 watch_form_signals(
-                    player_store.scan(manager_game.game), previous_snapshot
+                    form_index, previous_snapshot
                 )
                 if previous_snapshot is not None
                 else None
             ),
             current_forms=watch_form_signals(
-                player_store.scan(manager_game.game), current_snapshot
+                form_index, current_snapshot
             ),
         )
         inbox_store.merge(alerts)
+        if player_transition is not None and player_transition.record is not None:
+            player_transition.complete_alerts()
         return len(alerts)
 
     def emit(
@@ -1406,6 +1451,9 @@ def refresh_manager_game(
             break
         step_started = aware_local(now)
         emit(step, "running", started=step_started)
+        if cancelled is not None and cancelled():
+            step_index -= 1
+            continue
         if step.source == "metadata":
             if metadata_store is None:
                 error = "MetadataStore er ikke tilgængelig"
@@ -1481,7 +1529,15 @@ def refresh_manager_game(
             continue
         if step.source == "players":
             try:
+                use_transition = (player_transition is not None and step.step_id == "players"
+                                  and evaluate_alerts)
+                if use_transition:
+                    player_transition.prepare(before_players.for_game(manager_game.game), step.requested_round, settings)
+                staged_result = (player_transition.publish(step.requested_round)
+                                 if use_transition and player_transition.staged() else None)
                 statistics = (
+                    staged_result[0]
+                    if staged_result is not None else
                     client.fetch_players(manager_game.game)
                     if step.requested_round is None
                     else client.fetch_players(
@@ -1514,10 +1570,19 @@ def refresh_manager_game(
                         f"Runde {statistics.round_number} er afsluttet, "
                         "men kilden returnerede ikke endelige spillerdata."
                     )
-                player_path = player_store.save(statistics, now=started_at)
-                if step.step_id == "players" and step.requested_round is None:
-                    previous_rounds = before_players.rounds_for(manager_game.game)
-                    if not previous_rounds or statistics.round_number >= max(previous_rounds):
+                if use_transition:
+                    if staged_result is None:
+                        player_transition.stage(statistics, started_at)
+                        staged_result = player_transition.publish(step.requested_round)
+                    statistics, player_path = staged_result
+                else:
+                    player_path = player_store.save(statistics, now=started_at)
+                if step.step_id == "players" and (step.requested_round is None or use_transition):
+                    previous_rounds = (tuple(item.statistics.round_number for item in
+                        player_transition.baseline(before_players.for_game(manager_game.game)))
+                        if use_transition else before_players.rounds_for(manager_game.game))
+                    if ((not use_transition or not player_transition.record["alerts_complete"])
+                        and (not previous_rounds or statistics.round_number >= max(previous_rounds))):
                         alert_snapshot_reference = _relative_reference(
                             player_store.snapshot_dir, player_path, "snapshots"
                         )
@@ -1577,11 +1642,16 @@ def refresh_manager_game(
                         ),
                         warnings=history_warnings,
                     )
+                    for recovery_step_id in plan.recovery_step_ids:
+                        if recovery_step_id not in manifest_steps:
+                            plan = select_recovery_step(plan, recovery_step_id)
                     warnings = list(history_warnings)
                     total_steps = completed_steps + sum(
                         item.selected and item.step_id not in manifest_steps
                         for item in plan.steps
                     )
+            except RecoveryCheckpointError:
+                raise
             except Exception as exc:
                 error = str(exc)
                 cached_rounds = before_players.rounds_for(manager_game.game)
@@ -1713,8 +1783,9 @@ def refresh_manager_game(
                 )
                 retrying_alerts = bool(
                     prior_postprocess is not None
-                    and prior_postprocess.error
-                    and "Statusalarmer:" in prior_postprocess.error
+                    and (prior_postprocess.status == "cancelled" or (
+                        prior_postprocess.error
+                        and "Statusalarmer:" in prior_postprocess.error))
                 )
                 if retrying_alerts and alert_snapshot_reference is None:
                     prior_players = next(
@@ -1729,11 +1800,15 @@ def refresh_manager_game(
                         ),
                         None,
                     )
-                    if prior_players is not None:
+                    if prior_players is not None and (
+                        prior_postprocess.status != "cancelled" or prior_players.status == "fetched"
+                    ):
                         alert_snapshot_reference = (
                             prior_players.data_reference
                             or prior_players.cache_reference
                         )
+                    elif prior_postprocess.status == "cancelled":
+                        retrying_alerts = False
             try:
                 if alert_snapshot_reference is not None or retrying_alerts:
                     alert_count = merge_player_alerts(
@@ -2035,6 +2110,7 @@ def catch_up_manager_game(
     postprocess: Callable[[], None] | None = None,
     cancelled: Callable[[], bool] | None = None,
     alerts_enabled: bool = False,
+    player_transition=None,
     now: datetime | None = None,
 ) -> GameRefreshResult:
     """Catch up one local scope with the normal, sequential refresh executor.
@@ -2075,6 +2151,7 @@ def catch_up_manager_game(
         settings=settings, inbox_store=inbox_store, metadata_store=metadata_store,
         plan=plan, progress=progress, postprocess=postprocess,
         cancelled=cancelled, alerts_enabled=alerts_enabled, catch_up=True, now=now,
+        player_transition=player_transition,
     )
 
 

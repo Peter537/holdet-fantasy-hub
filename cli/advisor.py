@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import nullcontext
 from dataclasses import asdict
 from datetime import date, datetime
 import json
@@ -19,7 +20,8 @@ from holdet_lib.hub_settings import HubSettingsStore
 from holdet_lib.paths import APP_NAME, PathOverrides, resolve_paths
 from holdet_lib.persistence import replace_text_atomically
 from holdet_lib.refresh import RefreshMode, build_refresh_plan
-from holdet_lib.rule_pages import fetch_rule_page, public_capture, validate_capture
+from holdet_lib.refresh_runs import exclusive_data_operation
+from holdet_lib.rule_pages import fetch_rule_page, public_capture, reviewed_rule_profile, validate_capture
 from holdet_lib.rules import game_rule_to_dict
 from holdet_lib.storage import ManifestStore, PlayerStatisticsStore
 from holdet_lib.strategies import strategy_from_dict, strategy_to_dict
@@ -246,17 +248,26 @@ def run(args, paths):
                 raise ValueError("--save requires --fetch")
             if args.capture and not args.audit or args.review_note and not args.audit:
                 raise ValueError("--capture and --review-note require --audit")
-            capture = fetch_rule_page(manager.game) if args.fetch else data.rule_pages.latest(manager.game)
-            if args.fetch and args.save:
-                data.rule_pages.save(manager.game, capture)
+            supplied_capture = validate_capture(load_json(args.capture), manager.game) if args.capture else None
+            raw = load_json(args.audit) if args.audit else None
             if args.audit:
-                capture = validate_capture(load_json(args.capture), manager.game) if args.capture else capture
-                if capture is None:
-                    raise ValueError("Fetch and save rules evidence before auditing a profile")
-                raw = load_json(args.audit)
                 if not isinstance(raw, dict):
                     raise ValueError("Rule profile must be an object")
-                data.rule_pages.audit(manager.game, capture, raw, args.review_note)
+                preflight = supplied_capture or data.rule_pages.latest(manager.game)
+                if preflight is not None:
+                    reviewed_rule_profile(manager.game, preflight, raw, args.review_note)
+            with exclusive_data_operation(paths.data_dir) if args.save or args.audit else nullcontext():
+                capture = fetch_rule_page(manager.game) if args.fetch else data.rule_pages.latest(manager.game)
+                if args.audit:
+                    review_capture = supplied_capture or capture
+                    if review_capture is None:
+                        raise ValueError("Fetch and save rules evidence before auditing a profile")
+                    reviewed_rule_profile(manager.game, review_capture, raw, args.review_note)
+                if args.fetch and args.save:
+                    data.rule_pages.save(manager.game, capture)
+                if args.audit:
+                    data.rule_pages.audit(manager.game, review_capture, raw, args.review_note)
+                    capture = review_capture
             warnings = []
             try:
                 metadata = GameMetadataStore(paths.game_metadata_dir).load(manager.game)

@@ -114,6 +114,8 @@ Refresh-manifest schema 2 forklarer udfald, cachegenbrug, fejl og retryrelation 
 
 Schema 3 bevarer desuden den ønskede runde for hvert trin og kan registrere afbrudte trin, der ikke blev forsøgt. Schema 1–3 læses uden omskrivning. Ved en samlet opdatering gemmes en separat journal i `refresh-runs`, så et afbrudt eller delvist forsøg kan identificeres og genoptages. Et gemt snapshot er ikke i sig selv bevis for, at hele opdateringen blev fuldført.
 
+Kørselsjournalen skriver schema 2 og læser fortsat schema 1 uden startup-migration. En ventende spillertransition fastholder de oprindelige snapshotreferencer, alarmregler og en entydig forsøgsidentitet. Det validerede kildesvar stages uforanderligt som `refresh-runs/<run-id>/player-<attempt-id>.json`, før det publiceres som snapshot. Genoptagelse genbruger dette svar og gentager den nødvendige idempotente efterbehandling, også efter stop mellem spillerhentning og alarmbehandling. Reglerne for det allerede bestilte arbejde fastholdes; ændrede alarmindstillinger gælder nye opdateringer. Manglende bevis i en ældre afbrudt journal giver en synlig fejl frem for en påstået fuldført alarmbehandling. Journaler og stages medtages i backup og integritetskontrol.
+
 En metadatarevision er en uforanderlig indsamling, mens den aktuelle metadatafil viser den værdi, der er anvendt. Revisionen skrives før den aktuelle fil; hvis den sidste skrivning fejler, bevares den tidligere aktuelle værdi. En revision nyere end den aktuelle fil er ikke bekræftet som anvendt, og for ældre revisioner kan anvendelse ikke dokumenteres ud fra revisionen alene. Revisioner er derfor ikke en fuldstændig log over anvendte værdier.
 
 ## Backup og gendannelse
@@ -129,7 +131,11 @@ En metadatarevision er en uforanderlig indsamling, mens den aktuelle metadatafil
 - størrelse- eller checksumfejl;
 - ugyldig JSON eller ukendt schema-version.
 
-Efter brugerens bekræftelse oprettes først en rollback-ZIP. Nye `config`- og `data`-træer stages og erstatter de aktive træer samlet. Ved enhver fejl rulles der tilbage; efter succes ryddes Streamlit-caches, og appen genindlæses. En rigtig restore bør kun afprøves mod test-ejede `AppPaths`, ikke direkte mod aktive brugerdata.
+Efter brugerens bekræftelse oprettes først en valideret rollback-ZIP. Nye `config`- og `data`-træer stages og installeres med hver sine mappeflytninger. En fanget fejl udløser tilbagerulning af de gennemførte flytninger. Hvis tilbagerulningen også fejler, angiver fejlmeddelelsen den bevarede rollback-ZIP. Denne garanti gælder fangede undtagelser; der er ingen varig restorejournal, som automatisk genopretter installationen efter processtop eller strømsvigt midt i flytningerne. Efter succes ryddes Streamlit-caches, og appen genindlæses. En rigtig restore bør kun afprøves mod test-ejede `AppPaths`.
+
+Offentlig backup og indeksreparation tager datalåsen og derefter konfigurationslåsen. Konfigurationsstores og appens direkte hentehandlinger deltager i de samme ejerskabsgrænser, så backup ikke indsamler en halv konto-/gruppeændring eller overlapper en igangværende publicering. Den interne ZIP-writer tager ikke nye låse, når restore allerede ejer begge. Låsene koordinerer Hub-kald; eksterne programmer, som redigerer filerne direkte, er fortsat dækket af filstabilitets- og checksumkontrollerne.
+
+Indstillings- og sæsonredigeringer sammenligner deres indlæste grundlag med den aktuelle fil under konfigurationslåsen. Et forældet grundlag afvises med besked om at genindlæse; det overskriver ikke nyere ændringer eller en netop gendannet konfiguration. Stores' eksplicitte `save()` bevarer funktionen som fuld erstatning, mens almindelige redigeringer bruger `save_if_current()`.
 
 Der er ingen automatisk eller cloud-baseret backup. ZIP-backup er altid en manuel handling.
 

@@ -177,10 +177,12 @@ class RefreshRunCoordinator:
     """
 
     def __init__(self, root: Path, action: Callable[..., RefreshRunResult], *,
-                 executor_factory: Callable[..., Any] = ThreadPoolExecutor) -> None:
+                 executor_factory: Callable[..., Any] = ThreadPoolExecutor,
+                 durable_checkpoint: bool = False) -> None:
         self.root = Path(root)
         self.action = action
         self.executor_factory = executor_factory
+        self.durable_checkpoint = durable_checkpoint
 
     def _directory(self, run_id: str) -> Path:
         return self.root / _run_id(run_id)
@@ -196,7 +198,7 @@ class RefreshRunCoordinator:
                     if attempt == 19:
                         raise
                     time.sleep(0.01)
-        if (not isinstance(value, dict) or value.get("schema_version") != 1
+        if (not isinstance(value, dict) or value.get("schema_version") not in {1, 2}
             or value.get("run_id") != run_id or not isinstance(value.get("games"), list)
             or not isinstance(value.get("created_at"), str)
             or value.get("status") not in _TERMINAL | {"running", "unstarted"}):
@@ -263,10 +265,11 @@ class RefreshRunCoordinator:
         lease = _Lease(self.root, run_id)
         lease.acquire()
         try:
-            run = {"schema_version": 1, "run_id": run_id, "scope": scope,
+            run = {"schema_version": 2, "run_id": run_id, "scope": scope,
                    "created_at": _now(), "updated_at": _now(), "status": "unstarted",
                    "games": [{"game": game, "status": "unstarted", "progress": None,
-                              "uncertain": False, "manifest_paths": [], "detail": None} for game in selected]}
+                              "uncertain": False, "manifest_paths": [], "detail": None,
+                              "player_transition": None} for game in selected]}
             self._write(run)
             self._submit(run, lease)
         except BaseException:
@@ -323,6 +326,7 @@ class RefreshRunCoordinator:
                     break
                 checkpoint = _json_copy(entry)
                 checkpoint["run_id"] = run_id
+                checkpoint["journal_schema_version"] = run["schema_version"]
                 entry["status"] = "running"
                 self._write(run)
 
@@ -336,8 +340,16 @@ class RefreshRunCoordinator:
                     self._write(run)
 
                 try:
-                    result = self.action(_json_copy(entry["game"]), cancelled=marker.exists,
-                                         progress=progress, checkpoint=checkpoint)
+                    def save_checkpoint(transition: dict[str, Any]) -> None:
+                        entry["player_transition"] = _json_copy(transition)
+                        run["schema_version"] = 2
+                        self._write(run)
+
+                    options = {"cancelled": marker.exists, "progress": progress,
+                               "checkpoint": checkpoint}
+                    if self.durable_checkpoint:
+                        options["save_checkpoint"] = save_checkpoint
+                    result = self.action(_json_copy(entry["game"]), **options)
                     if not isinstance(result, RefreshRunResult):
                         raise TypeError("Opdateringen returnerede et ugyldigt resultat")
                     entry["status"] = result.status

@@ -1987,6 +1987,17 @@ class DashboardTests(unittest.TestCase):
                 self.assertEqual(after, before)
                 self.assertEqual(client_type.mock_calls, [])
 
+                button(app, "Tilbage til nu").click().run(timeout=15)
+                self.assertFalse(app.exception)
+                self.assertIsNone(widget(app, "selectbox", "Vis Rundecenter").value)
+                self.assertEqual(query_param_values(app, "round"), [])
+                round_state = (
+                    f"round-center-view:{manager_game.game.locale}:"
+                    f"{manager_game.game.slug}"
+                )
+                self.assertEqual(app.session_state[f"{round_state}:query"], "")
+                self.assertEqual(client_type.mock_calls, [])
+
     def test_player_statistics_rows_use_dynamic_labels_status_and_numeric_values(self) -> None:
         cycling = sample_statistics()
         rows, numeric = dashboard._player_statistics_rows(cycling)

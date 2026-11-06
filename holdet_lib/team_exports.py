@@ -524,7 +524,7 @@ def serialize_team_export(document: TeamExportDocument, format: str) -> bytes:
 
 
 class TeamExportStore:
-    """Explicitly publish immutable team exports in one atomic format set."""
+    """Publish immutable files, removing this call's new files on failure."""
 
     MIME_TYPES = {
         "txt": "text/plain; charset=utf-8",

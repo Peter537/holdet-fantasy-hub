@@ -10,7 +10,7 @@ from uuid import uuid4
 from .errors import PayloadError
 from .hall_of_fame import HallOfFameEvent, build_hall_of_fame
 from .hub_settings import HallOfFameScoreProfile
-from .persistence import aware_local, replace_text_atomically
+from .persistence import aware_local, configuration_transaction, replace_text_atomically
 
 
 SEASON_SCHEMA_VERSION = 1
@@ -140,6 +140,7 @@ class SeasonStore:
             raise PayloadError("S\u00e6son-ID'er skal v\u00e6re entydige")
         return tuple(seasons)
 
+    @configuration_transaction
     def save(self, seasons: tuple[SeasonDefinition, ...]) -> None:
         ids = [item.season_id for item in seasons]
         if len(ids) != len(set(ids)):
@@ -161,6 +162,15 @@ class SeasonStore:
             json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
         )
 
+    @configuration_transaction
+    def save_if_current(
+        self, expected: tuple[SeasonDefinition, ...], candidate: tuple[SeasonDefinition, ...]
+    ) -> None:
+        """Reject an edit based on seasons superseded by another writer."""
+        if self.path.exists() and self.load() != expected:
+            raise ValueError("Sæsonerne er ændret; genindlæs og prøv igen")
+        self.save(candidate)
+
     def create(
         self,
         seasons: tuple[SeasonDefinition, ...],
@@ -173,7 +183,7 @@ class SeasonStore:
             raise PayloadError("En sæson skal have et navn og mindst én konkurrence")
         season = SeasonDefinition(uuid4().hex[:12], normalized_name, normalized_competitions)
         updated = (*seasons, season)
-        self.save(updated)
+        self.save_if_current(seasons, updated)
         return updated, season
 
 
@@ -214,7 +224,7 @@ class SeasonStore:
         if not found:
             raise PayloadError(f"Ukendt s\u00e6son: {season_id}")
         result = tuple(updated)
-        self.save(result)
+        self.save_if_current(seasons, result)
         return result
 
     def archive(
@@ -234,7 +244,7 @@ class SeasonStore:
         if not found:
             raise PayloadError("Ukendt sæson")
         result = tuple(updated)
-        self.save(result)
+        self.save_if_current(seasons, result)
         return result
 
 

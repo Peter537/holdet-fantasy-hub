@@ -12,7 +12,7 @@ from urllib.parse import urlsplit
 
 from .errors import PayloadError
 from .models import GameUrl, TeamReference
-from .persistence import publish_immutable_text, replace_text_atomically
+from .persistence import configuration_transaction, publish_immutable_text, replace_text_atomically
 from .players import normalize_game_url
 from .teams import parse_direct_team_url
 from .storage import TeamSnapshot
@@ -636,6 +636,7 @@ class GroupStore:
 
         return self.load_configuration().groups
 
+    @configuration_transaction
     def save_configuration(self, configuration: HubConfiguration) -> None:
         group_ids = [group.group_id for group in configuration.groups]
         if len(group_ids) != len(set(group_ids)):
@@ -663,6 +664,7 @@ class GroupStore:
             self.path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
         )
 
+    @configuration_transaction
     def save(self, groups: tuple[GroupDefinition, ...]) -> None:
         """Save groups while preserving all persistent manager games."""
 
@@ -676,6 +678,7 @@ class GroupStore:
                 known.add(identity)
         self.save_configuration(HubConfiguration(tuple(games), groups))
 
+    @configuration_transaction
     def create_manager_game(
         self, source: str | GameUrl, name: str = ""
     ) -> ManagerGame:
@@ -688,6 +691,7 @@ class GroupStore:
         )
         return manager_game
 
+    @configuration_transaction
     def rename_manager_game(self, game: GameUrl, name: str) -> ManagerGame:
         configuration = self.load_configuration()
         resolved_name = name.strip() or game.slug
@@ -700,6 +704,7 @@ class GroupStore:
                 return renamed
         raise PayloadError(f"Ukendt managerspil: {game.slug}")
 
+    @configuration_transaction
     def archive_manager_game(
         self, game: GameUrl, *, now: datetime | None = None
     ) -> ManagerGame:
@@ -719,6 +724,7 @@ class GroupStore:
             return archived
         raise PayloadError(f"Ukendt managerspil: {game.slug}")
 
+    @configuration_transaction
     def restore_manager_game(self, game: GameUrl) -> ManagerGame:
         configuration = self.load_configuration()
         games = list(configuration.games)
@@ -733,6 +739,7 @@ class GroupStore:
             return restored
         raise PayloadError(f"Ukendt managerspil: {game.slug}")
 
+    @configuration_transaction
     def delete_manager_game(self, game: GameUrl) -> None:
         configuration = self.load_configuration()
         identity = _game_identity(game)
@@ -747,6 +754,7 @@ class GroupStore:
             raise PayloadError(f"Ukendt managerspil: {game.slug}")
         self.save_configuration(replace(configuration, games=remaining))
 
+    @configuration_transaction
     def create(
         self,
         name: str,
@@ -835,6 +843,7 @@ class GroupStore:
             "Kunne ikke finde en ny lodtrækning; prøv at generere et nyt seed"
         )
 
+    @configuration_transaction
     def create_tournament(
         self,
         name: str,
@@ -874,12 +883,15 @@ class GroupStore:
             tournament=config,
         )
 
-    def update(self, updated: GroupDefinition) -> None:
+    @configuration_transaction
+    def update(self, updated: GroupDefinition, *, expected: GroupDefinition | None = None) -> None:
         configuration = self.load_configuration()
         current = list(configuration.groups)
         for index, group in enumerate(current):
             if group.group_id != updated.group_id:
                 continue
+            if expected is not None and group != expected:
+                raise ValueError("Gruppen er ændret; genindlæs og prøv igen")
             if not updated.name.strip():
                 raise PayloadError("Gruppens navn må ikke være tomt")
             candidate = replace(
@@ -906,6 +918,7 @@ class GroupStore:
             return
         raise PayloadError(f"Ukendt gruppe: {updated.group_id}")
 
+    @configuration_transaction
     def rebuild_tournament(
         self, group_id: str, teams: tuple[GroupTeam, ...], *, final_round: int,
         name: str | None = None, now: datetime | None = None,
@@ -1010,6 +1023,7 @@ class GroupStore:
             return rebuilt
         raise PayloadError(f"Ukendt gruppe: {group_id}")
 
+    @configuration_transaction
     def delete(self, group_id: str) -> None:
         configuration = self.load_configuration()
         remaining = tuple(

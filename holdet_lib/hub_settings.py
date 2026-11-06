@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 
 from .errors import PayloadError
 from .models import GameUrl, PlayerEntry
-from .persistence import replace_text_atomically
+from .persistence import configuration_transaction, replace_text_atomically
 from .player_formulas import ComputedPlayerColumn
 from .player_exports import (
     PlayerStatisticsQuery,
@@ -990,12 +990,20 @@ class HubSettingsStore:
             raise PayloadError("Hub-indstillinger indeholder ugyldig JSON") from exc
         return _settings_from_dict(payload)
 
+    @configuration_transaction
     def save(self, settings: HubSettings) -> None:
         payload = _settings_to_dict(settings)
         replace_text_atomically(
             self.path,
             json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
         )
+
+    @configuration_transaction
+    def save_if_current(self, expected: HubSettings, candidate: HubSettings) -> None:
+        """Reject an edit based on settings superseded by another writer."""
+        if self.path.exists() and _settings_to_dict(self.load()) != _settings_to_dict(expected):
+            raise ValueError("Indstillingerne er ændret; genindlæs og prøv igen")
+        self.save(candidate)
 
     def set_enabled_features(
         self,
@@ -1005,7 +1013,7 @@ class HubSettingsStore:
         """Save visibility preferences without changing any feature's stored records."""
 
         updated = replace(settings, enabled_features=_normalized_features(features))
-        self.save(updated)
+        self.save_if_current(settings, updated)
         return updated
 
     def set_watchlist(
@@ -1016,7 +1024,7 @@ class HubSettingsStore:
             settings,
             watchlist=tuple(sorted(unique.values(), key=lambda item: item.player_key)),
         )
-        self.save(updated)
+        self.save_if_current(settings, updated)
         return updated
 
     def set_manager_profiles(
@@ -1035,7 +1043,7 @@ class HubSettingsStore:
                 )
             ),
         )
-        self.save(updated)
+        self.save_if_current(settings, updated)
         return updated
 
     def apply_player_bulk_update(
@@ -1089,7 +1097,7 @@ class HubSettingsStore:
                 sorted(selected_annotations, key=lambda item: item.player_key)
             ),
         )
-        self.save(updated)
+        self.save_if_current(settings, updated)
         return updated
 
     def set_computed_player_columns(
@@ -1098,7 +1106,7 @@ class HubSettingsStore:
         columns: tuple[ComputedPlayerColumn, ...],
     ) -> HubSettings:
         updated = replace(settings, computed_player_columns=columns)
-        self.save(updated)
+        self.save_if_current(settings, updated)
         return updated
 
     def set_player_annotations(
@@ -1113,7 +1121,7 @@ class HubSettingsStore:
                 sorted(unique.values(), key=lambda item: item.player_key)
             ),
         )
-        self.save(updated)
+        self.save_if_current(settings, updated)
         return updated
 
     def set_saved_player_filters(
@@ -1144,7 +1152,7 @@ class HubSettingsStore:
                 )
             ),
         )
-        self.save(updated)
+        self.save_if_current(settings, updated)
         return updated
 
     def set_own_team(
@@ -1165,7 +1173,7 @@ class HubSettingsStore:
                 sorted(values, key=lambda item: (item.game_locale, item.game_slug))
             ),
         )
-        self.save(updated)
+        self.save_if_current(settings, updated)
         return updated
 
     def set_experimental_game(
@@ -1181,5 +1189,5 @@ class HubSettingsStore:
         else:
             values.discard(identity)
         updated = replace(settings, experimental_games=tuple(sorted(values)))
-        self.save(updated)
+        self.save_if_current(settings, updated)
         return updated
