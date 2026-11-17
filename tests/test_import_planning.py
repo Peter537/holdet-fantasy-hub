@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 import hashlib
 from io import BytesIO
 import json
+import os
 from pathlib import Path
 import zipfile
 
@@ -210,30 +211,38 @@ def test_player_import_finds_observations_published_under_recovery_filenames(
 
 
 @pytest.mark.parametrize("kind", ("players", "teams"))
-def test_snapshot_package_scans_existing_observation_identities_once_per_game_and_type(
+def test_snapshot_package_bounds_directory_enumeration_for_existing_observations(
     tmp_path: Path, monkeypatch, kind: str
 ) -> None:
     paths = paths_for(tmp_path / "hub")
     original = snapshot_bytes(kind, NOW)
     first = holdet.preview_import(original, paths, filename="original.json")
-    holdet.apply_import(first, original, paths)
-    root = first.operations[0].target.parents[2] if kind == "teams" else first.operations[0].target.parent
-    method_name = "rglob" if kind == "teams" else "glob"
-    scan = getattr(Path, method_name)
+    target = first.operations[0].target
+    root = target.parents[2] if kind == "teams" else target.parent
+    existing = target.with_name(f"{target.stem.split('_', 1)[0]}_recovery-00000000-0000-4000-8000-000000000001.json")
+    existing.parent.mkdir(parents=True)
+    existing.write_bytes(original)
+    scandir = os.scandir
     scans = []
 
-    def count_identity_scans(path, pattern, *args, **kwargs):
-        if path == root and pattern in {"team-round*.json", "player-round*.json"}:
-            scans.append(pattern)
-        return scan(path, pattern, *args, **kwargs)
+    def count_snapshot_scans(path):
+        if not isinstance(path, int) and Path(os.fsdecode(path)).is_relative_to(root):
+            scans.append(path)
+        return scandir(path)
 
-    monkeypatch.setattr(Path, method_name, count_identity_scans)
-    raw = snapshot_package(tuple(
-        snapshot_bytes(kind, NOW.replace(second=second)) for second in (2, 3, 4)
-    ))
-    preview = holdet.preview_import(raw, paths, filename="snapshots.zip")
-    assert preview.can_apply and preview.write_count == 3
-    assert len(scans) == 1
+    monkeypatch.setattr(os, "scandir", count_snapshot_scans)
+    small = holdet.preview_import(snapshot_package((original,)), paths, filename="small.zip")
+    assert small.can_apply and small.skipped_count == 1
+    assert small.operations[0].target == existing
+    small_scan_count = len(scans)
+    scans.clear()
+
+    # The observations have distinct identities and share a canonical filename family.
+    additions = tuple(snapshot_bytes(kind, NOW.replace(microsecond=value)) for value in (200, 300, 400))
+    large = holdet.preview_import(snapshot_package((original, *additions)), paths, filename="large.zip")
+    assert large.can_apply and large.write_count == 3 and large.skipped_count == 1
+    assert large.operations[0].target == existing
+    assert len(scans) <= small_scan_count
 
 
 @pytest.mark.parametrize("problem", ("invalid", "unreadable"))
@@ -367,7 +376,7 @@ def test_failed_package_publication_preserves_existing_files_and_releases_lease(
         pass
 
 
-def test_backup_import_delegates_data_ownership_to_restore(tmp_path: Path, monkeypatch) -> None:
+def test_backup_import_restores_file_contents(tmp_path: Path) -> None:
     source = paths_for(tmp_path / "source")
     source.import_dir.mkdir(parents=True)
     (source.import_dir / "notes.txt").write_text("saved data", encoding="utf-8")
@@ -376,10 +385,6 @@ def test_backup_import_delegates_data_ownership_to_restore(tmp_path: Path, monke
     preview = holdet.preview_import(raw, target, filename="backup.zip")
     assert preview.kind == "backup" and preview.can_apply
 
-    def forbidden_nested_acquisition(_data_dir):
-        raise AssertionError("backup import must delegate lease ownership")
-
-    monkeypatch.setattr(imports, "exclusive_data_operation", forbidden_nested_acquisition)
     result = holdet.apply_import(preview, raw, target)
     assert result.kind == "backup" and result.written_files == 1
     assert (target.import_dir / "notes.txt").read_text(encoding="utf-8") == "saved data"

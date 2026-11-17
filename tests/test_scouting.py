@@ -126,8 +126,10 @@ def test_scouting_scores_peers_similarity_and_ownership_are_transparent() -> Non
     assert peer is not None
     assert len(peer.alternatives) == 5
     assert dict(peer.medians)["value"] is not None
-    similar = holdet.find_similar_players(metrics, target.player_key)
-    assert len(similar) == 5
+    similar = holdet.find_similar_players(reversed(metrics), target.player_key)
+    assert [item.player_key for item in similar] == [
+        target.player_key.removesuffix("1") + str(number) for number in range(2, 7)
+    ]
     assert all(item.shared_metrics >= 2 for item in similar)
 
     fractional = tuple(

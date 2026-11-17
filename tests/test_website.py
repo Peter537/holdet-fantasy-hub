@@ -184,61 +184,27 @@ class DashboardTests(unittest.TestCase):
                 ("Åben", "da", "unicode-game"),
             ],
         )
-    def test_navigation_card_is_native_escaped_accessible_and_reload_free(self) -> None:
-        game_name = "Spil " + chr(0xC5) + "r & test"
-        with (
-            patch.object(dashboard.st, "container") as container,
-            patch.object(dashboard.st, "html") as render,
-            patch.object(dashboard.st, "button", return_value=True) as card_button,
-            patch.object(dashboard, "_navigate") as navigate_to_game,
-        ):
-            dashboard._navigation_card(
-                card_key="game-da-test",
-                title="<" + chr(0xC5) + "ge & Co>",
-                subtitle="slug",
-                detail="2 grupper",
-                color="#123456",
-                foreground="#ffffff",
-                aria_label=chr(0xC5) + 'bn "test"',
-                view="game",
-                locale="da",
-                game=game_name,
-            )
-        container.assert_called_once_with(key="nav-card-game-da-test")
-        expected_label = (
-            "**\\<" + chr(0xC5) + "ge & Co\\>**  \n"
-            ":small[slug]  \n"
-            "2 grupper  \n"
-            "**" + chr(0xC5) + "bn " + chr(0x2192) + "**"
-        )
-        card_button.assert_called_once_with(
-            expected_label,
-            key="open-card-game-da-test",
-            help=chr(0xC5) + 'bn "test"',
-            icon=None,
-            type="tertiary",
-            width="stretch",
-        )
-        navigate_to_game.assert_called_once_with(
-            "game", locale="da", game=game_name
-        )
-        markup = render.call_args.args[0]
-        self.assertNotIn("<a", markup)
-        self.assertNotIn("href=", markup)
-        self.assertIn(".st-key-nav-card-game-da-test button", markup)
-        self.assertEqual(dashboard._markdown_literal("<A_[x]*>"), "\\<A\\_\\[x\\]\\*\\>")
 
-        with patch.object(dashboard.st, "html") as render_styles:
-            dashboard._styles()
-        css = render_styles.call_args.args[0]
-        self.assertIn('[class*="st-key-nav-card-"]', css)
-        self.assertIn('[class*="st-key-sidebar-group-"]', css)
-        self.assertIn("margin-left: 1.25rem", css)
-        self.assertIn("button:hover {", css)
-        self.assertIn("button:focus-visible {", css)
-        self.assertIn("prefers-reduced-motion: reduce", css)
-        self.assertNotIn("data-testid", css)
-        self.assertNotIn(".stApp", css)
+    def test_archive_navigation_card_escapes_its_name_and_opens_the_selected_game(self) -> None:
+        with website_environment() as (config, _output):
+            store = holdet.GroupStore(config / "groups.json")
+            name = "<År_[spil]* & Co>"
+            for locale in ("da", "en-GB"):
+                manager = store.create_manager_game(
+                    f"https://www.holdet.dk/{locale}/fantasy/test-2026", name
+                )
+                store.archive_manager_game(manager.game)
+
+            app = AppTest.from_file(APP_PATH).run(timeout=15)
+            navigate(app, "archive")
+            card = app.button(key="open-card-game-en-GB-test-2026")
+            self.assertIn(r"\<År\_\[spil\]\* & Co\>", card.label)
+            card.click().run(timeout=15)
+
+            self.assertFalse(app.exception)
+            self.assertEqual(query_param_values(app, "locale"), ["en-GB"])
+            self.assertEqual(query_param_values(app, "game"), ["test-2026"])
+            self.assertEqual([title.value for title in app.title], [name])
 
     def test_sidebar_orders_manager_actions_and_nested_groups(self) -> None:
         team = sample_team(58, name="Menupunkt")
@@ -360,75 +326,10 @@ class DashboardTests(unittest.TestCase):
             navigate_to_group.call_args_list,
             [call("group", group="sidebar-id")],
         )
-    def test_manager_and_group_cards_use_stable_native_keys(self) -> None:
-        team = sample_team(55, name="Nøglehold")
-        manager_game = holdet.ManagerGame(team.reference.game, "Nøglespil")
-        group = holdet.GroupDefinition(
-            "gruppe-id",
-            "Nøglegruppe",
-            team.reference.game,
-            (holdet.GroupTeam(55, team.team_name, team.reference.source_url),),
-        )
-        with patch.object(dashboard, "_navigation_card") as render:
-            dashboard._manager_game_card(
-                manager_game, (group,), holdet.SnapshotIndex(())
-            )
-            dashboard._group_card(group, holdet.SnapshotIndex(()))
-
-        self.assertEqual(
-            render.call_args_list[0].kwargs["card_key"],
-            f"game-{team.reference.game.locale}-{team.reference.game.slug}",
-        )
-        self.assertEqual(
-            render.call_args_list[1].kwargs["card_key"], "group-gruppe-id"
-        )
-        self.assertIn("1 gruppe ·", render.call_args_list[0].kwargs["detail"])
-        game_card = render.call_args_list[0].kwargs
-        self.assertIn("Spillerdata mangler", game_card["signals"])
-        self.assertIn("Tidsplan er ikke verificeret", game_card["signals"])
-        self.assertNotIn("runde 0", game_card["detail"].casefold())
-        self.assertEqual(game_card["icon"], ":material/directions_bike:")
-        self.assertEqual(game_card["subtitle"], "Cykling")
-        self.assertEqual(game_card["metadata"], team.reference.game.slug)
-        self.assertEqual(game_card["action"], chr(0xC5) + "bn managerspil")
-
     def test_manager_game_group_count_uses_danish_singular_and_plural(self) -> None:
         self.assertEqual(dashboard._group_count_label(0), "0 grupper")
         self.assertEqual(dashboard._group_count_label(1), "1 gruppe")
         self.assertEqual(dashboard._group_count_label(2), "2 grupper")
-
-    def test_tournament_card_uses_danish_match_singular_and_plural(self) -> None:
-        team = sample_team(56, name="Turneringshold")
-        group = holdet.GroupDefinition(
-            "turnering-id",
-            "Turnering",
-            team.reference.game,
-            (holdet.GroupTeam(56, team.team_name, team.reference.source_url),),
-            "tournament",
-            SimpleNamespace(),
-        )
-        for count, expected in ((1, "1 kamp"), (3, "3 kampe")):
-            state = SimpleNamespace(
-                champion_id=None,
-                next_matches=tuple(
-                    SimpleNamespace(round_numbers=(2,)) for _ in range(count)
-                ),
-                phase="Gruppespil",
-            )
-            with (
-                self.subTest(count=count),
-                patch.object(
-                    dashboard, "build_tournament_state", return_value=state
-                ),
-                patch.object(
-                    dashboard, "latest_tournament_round", return_value=1
-                ),
-                patch.object(dashboard, "_navigation_card") as render,
-            ):
-                dashboard._group_card(group, holdet.SnapshotIndex(()))
-                detail = render.call_args.kwargs["detail"]
-                self.assertIn(f"({expected})", detail)
-                self.assertNotIn("kamp(e)", detail)
 
     def test_danish_user_facing_copy_has_no_parenthesis_plurals(self) -> None:
         pattern = re.compile(r"\((?:e|er|r)\)")
@@ -1085,8 +986,9 @@ class DashboardTests(unittest.TestCase):
         with website_environment():
             app = AppTest.from_file(APP_PATH).run(timeout=15)
             button(app, "Arkiverede managerspil").click().run(timeout=15)
-            self.assertTrue(
-                any(item.value == "Arkiverede managerspil" for item in app.title)
+            self.assertIn(
+                ("Arkiverede managerspil", "arkiverede-managerspil"),
+                [(item.value, item.anchor) for item in app.title],
             )
             self.assertTrue(
                 any("ingen arkiverede managerspil" in item.value.lower() for item in app.info)
@@ -1227,6 +1129,7 @@ class DashboardTests(unittest.TestCase):
                 self.assertEqual(len(add_buttons), 1)
                 self.assertTrue(any(item.label == add_label for item in app.get("page_link")))
                 navigate(app, "manage-games")
+                self.assertEqual(app.title[0].anchor, "administrer-managerspil")
                 widget(app, "text_input", "Holdet-URL eller slug").input(
                     "super-manager-fall-2026"
                 )
@@ -1284,7 +1187,7 @@ class DashboardTests(unittest.TestCase):
             navigate(app, "data")
 
             self.assertFalse(app.exception)
-            self.assertTrue(any(item.value == "Data og lager" for item in app.title))
+            self.assertIn(("Data og lager", "data-og-lager"), [(item.value, item.anchor) for item in app.title])
             self.assertEqual([item.label for item in app.tabs], [])
             area = next(item for item in app.selectbox if item.label == "Område")
             self.assertEqual(area.value, "accounts")
@@ -2493,6 +2396,7 @@ class DashboardTests(unittest.TestCase):
 
             app = AppTest.from_file(APP_PATH).run(timeout=15)
             navigate(app, "players")
+            self.assertEqual(app.title[0].anchor, "spillerstatistik")
             player_game = widget(app, "selectbox", "Spil eller Holdet-URL")
             self.assertIsNone(player_game.value)
             self.assertFalse(app.dataframe)
@@ -2507,6 +2411,7 @@ class DashboardTests(unittest.TestCase):
             )
 
             navigate(app, "teams")
+            self.assertEqual(app.title[0].anchor, "holdstatistik")
             team_game = widget(app, "selectbox", "Spil eller Holdet-URL")
             self.assertIsNone(team_game.value)
             self.assertEqual([item.value for item in app.title], ["Holdstatistik"])
@@ -2678,19 +2583,6 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(config["server"]["address"], "127.0.0.1")
         self.assertNotIn("port", config["server"])
         self.assertEqual(config["client"]["toolbarMode"], "viewer")
-        app_source = UI_PATH.read_text(encoding="utf-8")
-        data_source = (PROJECT_ROOT / "website" / "data_page.py").read_text(
-            encoding="utf-8"
-        )
-        for anchor in (
-            "spillerstatistik",
-            "holdstatistik",
-            "arkiverede-managerspil",
-            "administrer-managerspil",
-        ):
-            self.assertIn(f'anchor="{anchor}"', app_source)
-        self.assertIn('anchor="data-og-lager"', data_source)
-
         readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
         command = ".\\.venv\\Scripts\\python.exe -m streamlit run .\\website\\server.py"
         self.assertIn(command, readme)

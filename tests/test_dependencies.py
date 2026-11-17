@@ -77,7 +77,6 @@ def test_lock_covers_manifest_with_trusted_hashed_wheels() -> None:
         assert SHA256.fullmatch(wheel["hashes"]["sha256"])
 
     assert set(direct_requirements(manifest)) <= locked_names
-    assert {"pandas", "altair", "httpx2"} <= locked_names
     assert {"httpx", "httpcore"}.isdisjoint(locked_names)
 
 

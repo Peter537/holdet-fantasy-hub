@@ -41,19 +41,35 @@ class TeamExportTests(unittest.TestCase):
         )
 
     def test_selected_formats_share_collision_suffix_and_download_bytes(self) -> None:
-        document = build_team_export(self.team, generated_at=self.now)
-        with fixtures.writable_test_directory() as root:
-            store = TeamExportStore(root)
-            first = store.save(document, ("txt", "json", "md"))
-            second = store.save(document, ("txt", "json", "md"))
-            self.assertEqual(
-                {item.path.stem for item in first}, {"team-round3_0709_080706"}
-            )
-            self.assertEqual(
-                {item.path.stem for item in second}, {"team-round3_0709_080706_1"}
-            )
-            for artifact in first + second:
-                self.assertEqual(artifact.path.read_bytes(), artifact.content)
+        source_time = self.now.replace(hour=6)
+        roster_time = self.now.replace(hour=5)
+        document = build_team_export(
+            self.team, generated_at=self.now,
+            source_generated_at=source_time, roster_generated_at=roster_time,
+        )
+        for formats in (("txt", "json"), ("md", "txt", "json")):
+            with self.subTest(formats=formats), fixtures.writable_test_directory() as root:
+                store = TeamExportStore(root)
+                for suffix in ("", "_1"):
+                    artifacts = store.save(document, formats)
+                    self.assertEqual(
+                        [artifact.path.name for artifact in artifacts],
+                        [f"team-round3_0709_080706{suffix}.{fmt}" for fmt in formats],
+                    )
+                    for artifact in artifacts:
+                        self.assertEqual(artifact.path.read_bytes(), artifact.content)
+                    paths = {artifact.path.suffix: artifact.path for artifact in artifacts}
+                    text = paths[".txt"].read_text(encoding="utf-8")
+                    self.assertIn("Spillerværdi: 300", text)
+                    self.assertIn("Søren Ægir", text)
+                    payload = json.loads(paths[".json"].read_text(encoding="utf-8"))
+                    self.assertEqual(payload["schema_version"], 1)
+                    self.assertIn("Søren Ægir", [entry["name"] for entry in payload["roster"]])
+                    self.assertEqual(payload["team"]["id"], fixtures.FICTIONAL_TEAM_ID)
+                    self.assertEqual(payload["history"][0]["overall_rank"], 80)
+                    self.assertEqual(payload["generated_at"], self.now.isoformat())
+                    self.assertEqual(payload["source_generated_at"], source_time.isoformat())
+                    self.assertEqual(payload["roster_generated_at"], roster_time.isoformat())
 
     def test_missing_round_summary_is_an_error(self) -> None:
         with self.assertRaisesRegex(Exception, "ingen runde 99"):

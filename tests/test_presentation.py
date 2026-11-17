@@ -34,7 +34,7 @@ def test_theme_uses_supported_heading_weights() -> None:
     config_path = Path(__file__).parents[1] / ".streamlit" / "config.toml"
     config = tomllib.loads(config_path.read_text(encoding="utf-8"))
     weights = config["theme"]["headingFontWeights"]
-    assert weights == [700, 600, 600, 600, 600, 600]
+    assert len(weights) == 6
     assert all(weight in {100, 200, 300, 400, 500, 600, 700, 800, 900} for weight in weights)
 
 

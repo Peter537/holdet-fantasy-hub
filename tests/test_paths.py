@@ -22,7 +22,8 @@ class _FakePlatformDirs:
         self.appauthor = appauthor
         self.version = version
         self.roaming = roaming
-        self.ensure_exists = ensure_exists
+        if ensure_exists:
+            raise AssertionError("Path resolution requested directory creation")
         base = Path("R:/Roaming") if roaming else Path("L:/Local")
         self.user_config_path = base / appname
         self.user_data_path = base / appname
@@ -32,9 +33,11 @@ class _FakePlatformDirs:
 
 class AppPathTests(unittest.TestCase):
     def test_windows_roaming_local_split_is_side_effect_free(self) -> None:
-        paths = holdet.resolve_paths(
-            environ={}, platform_dirs_factory=_FakePlatformDirs
-        )
+        with patch.object(Path, "mkdir") as mkdir:
+            paths = holdet.resolve_paths(
+                environ={}, platform_dirs_factory=_FakePlatformDirs
+            )
+        mkdir.assert_not_called()
         self.assertEqual(
             paths.accounts_file,
             Path("R:/Roaming/Holdet Fantasy Hub/config/accounts.json"),
@@ -47,8 +50,6 @@ class AppPathTests(unittest.TestCase):
             paths.export_dir,
             Path("L:/Local/Holdet Fantasy Hub/exports"),
         )
-        self.assertFalse(paths.config_dir.exists())
-        self.assertFalse(paths.data_dir.exists())
 
     def test_unified_root_and_specific_overrides_have_clear_precedence(self) -> None:
         paths = holdet.resolve_paths(

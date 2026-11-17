@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import ast
 from contextlib import ExitStack
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from streamlit.testing.v1 import AppTest
 
 import holdet_lib as holdet
+from tests.test_player_statistics import sample_statistics
+from tests.test_website import APP_PATH, navigate, website_environment, widget
 from website import navigation
 from website import ui
 
@@ -97,8 +102,7 @@ def test_navigation_helpers_preserve_and_escape_query_context() -> None:
     )
 
 
-def test_all_streamlit_dataframes_have_stable_explicit_keys() -> None:
-    forbidden_fragments = ("generated_at", "timestamp", "round_number")
+def test_all_streamlit_dataframes_have_explicit_keys() -> None:
     calls: list[tuple[Path, ast.Call]] = []
     for path in (PROJECT_ROOT / "website").rglob("*.py"):
         tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -112,11 +116,51 @@ def test_all_streamlit_dataframes_have_stable_explicit_keys() -> None:
     assert calls
     for path, call in calls:
         key = next((item.value for item in call.keywords if item.arg == "key"), None)
-        assert key is not None, f"{path}:{call.lineno} mangler dataframe-key"
-        source = ast.unparse(key)
-        assert not any(value in source for value in forbidden_fragments), (
-            f"{path}:{call.lineno} har en flygtig dataframe-key: {source}"
-        )
+        assert key is not None and not (
+            isinstance(key, ast.Constant) and not key.value
+        ), f"{path}:{call.lineno} mangler dataframe-key"
+
+
+def test_player_table_keeps_identity_across_sort_and_new_snapshot() -> None:
+    sample = sample_statistics()
+    expensive = replace(sample.entries[0], source_index=1)
+    inexpensive = replace(
+        expensive, source_index=0, name="Zoe", entry_id=10, person_id=20, value=10_000_000,
+    )
+    original = replace(sample, entries=(inexpensive, expensive))
+    generated_at = datetime(2026, 8, 4, 12, tzinfo=timezone.utc)
+    with website_environment() as (_, output):
+        store = holdet.PlayerStatisticsStore(output)
+        store.save(original, now=generated_at)
+        with patch("holdet_lib.HoldetClient", side_effect=AssertionError("unexpected network request")):
+            app = AppTest.from_file(APP_PATH).run(timeout=15)
+            navigate(app, "players")
+            app.session_state["standalone-player-game"] = original.game.original
+            app.run(timeout=15)
+            assert not app.exception
+            table, = app.dataframe
+            table_id = table.proto.id
+            assert table_id
+            assert table.value["Pris"].tolist() == [12_345_000, 10_000_000]
+
+            widget(app, "selectbox", "Sortering").set_value("name").run(timeout=15)
+            assert not app.exception
+            table, = app.dataframe
+            assert table.value["Pris"].tolist() == [10_000_000, 12_345_000]
+            assert table.proto.id == table_id
+
+            refreshed = replace(
+                original,
+                round_number=original.round_number + 1,
+                entries=(inexpensive, replace(expensive, value=13_345_000)),
+            )
+            store.save(refreshed, now=generated_at + timedelta(days=1))
+            app.query_params["round"] = str(refreshed.round_number)
+            app.run(timeout=15)
+            assert not app.exception
+            table, = app.dataframe
+            assert table.value["Pris"].tolist() == [10_000_000, 13_345_000]
+            assert table.proto.id == table_id
 
 
 class _Tab:

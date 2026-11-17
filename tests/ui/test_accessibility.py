@@ -34,7 +34,6 @@ def test_accessibility_smoke(page: Page, ui_server: UiServer) -> None:
         "nodes => nodes.map(node => Number(node.tagName.slice(1)))"
     )
     levels = levels[levels.index(1) :]
-    assert levels[0] == 1
     assert all(current <= previous + 1 for previous, current in zip(levels, levels[1:]))
 
     unnamed = page.get_by_role("button").evaluate_all(

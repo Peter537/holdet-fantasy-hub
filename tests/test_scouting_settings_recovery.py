@@ -58,7 +58,11 @@ def test_unreadable_settings_cannot_be_overwritten_by_scouting_edits(
             scouting_page.render_player_bulk_controls(
                 scope="test", selected_keys=(key,), game=GAME, entries={key: player}, paths=paths
             )
-            assert all(call.kwargs["disabled"] for call in ui.form_submit_button.call_args_list)
+            ui.caption.assert_called_once_with(
+                "Watchlist og noter kan kun ændres, når spillet er aktivt og indstillingerne kan læses."
+            )
+            ui.form.assert_not_called()
+            ui.form_submit_button.assert_not_called()
         else:
             scouting_page._formula_editor(
                 GAME, HubSettingsStore(paths.hub_settings_file), HubSettings(), paths

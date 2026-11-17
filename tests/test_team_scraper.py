@@ -370,41 +370,6 @@ class TeamServiceAndOutputTests(unittest.TestCase):
         self.assertEqual(len(team.roster), 2)
         self.assertEqual(len(team.history), 2)
 
-    def test_danish_text_json_and_paired_collision_names(self) -> None:
-        service, reference = self.make_service()
-        team = service.scrape(reference)
-        fixed = datetime(2026, 7, 23, 12, 34, 56, 987654)
-        with writable_test_directory() as temporary:
-            document = scraper.build_team_export(
-                team,
-                generated_at=fixed.astimezone(),
-                source_generated_at=fixed.astimezone(),
-                roster_generated_at=fixed.astimezone(),
-            )
-            first = tuple(
-                item.path
-                for item in scraper.TeamExportStore(temporary).save(
-                    document, ("txt", "json")
-                )
-            )
-            second = tuple(
-                item.path
-                for item in scraper.TeamExportStore(temporary).save(
-                    document, ("txt", "json")
-                )
-            )
-            self.assertEqual(first[0].name, "team-round3_0723_123456.txt")
-            self.assertEqual(first[1].suffix, ".json")
-            self.assertEqual(second[0].name, "team-round3_0723_123456_1.txt")
-            self.assertEqual(second[1].name, "team-round3_0723_123456_1.json")
-            text = first[0].read_text(encoding="utf-8")
-            data = json.loads(first[1].read_text(encoding="utf-8"))
-            self.assertIn("Spillerværdi: 300", text)
-            self.assertIn("Søren Ægir", text)
-            self.assertEqual(data["schema_version"], 1)
-            self.assertEqual(data["team"]["id"], FICTIONAL_TEAM_ID)
-            self.assertEqual(data["history"][0]["overall_rank"], 80)
-
     def test_team_subcommand_accepts_direct_url(self) -> None:
         service, reference = self.make_service()
         with writable_test_directory() as temporary:

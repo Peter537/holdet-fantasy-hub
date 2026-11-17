@@ -107,7 +107,7 @@ def test_rank_axis_is_reversed_with_integer_labels():
     assert encoding["y"]["scale"]["reverse"] is True
     axis = encoding["y"]["axis"]
     assert axis.get("format") == "d" or ".0f" in axis.get("labelExpr", "")
-    assert encoding["y"]["axis"].get("tickMinStep", 1) >= 1
+    assert axis["tickMinStep"] >= 1
 
 
 def test_value_axis_is_zoomed_and_explicit_about_money_units():

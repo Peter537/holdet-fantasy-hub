@@ -43,7 +43,7 @@ class TeamEdgeCaseTests(unittest.TestCase):
             scraper.filter_team_references([reference], ["nordlysholdet"]),
             (reference,),
         )
-        self.assertEqual(scraper.filter_team_references([reference], ["stjerneskud"]), ())
+        self.assertEqual(scraper.filter_team_references([reference], ["nordlys"]), ())
 
 
 if __name__ == "__main__":

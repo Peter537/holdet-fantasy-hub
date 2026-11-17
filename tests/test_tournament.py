@@ -449,7 +449,6 @@ class TournamentResultTests(unittest.TestCase):
         )
         knockout = [match for match in summary.matches if match.phase == "Semifinaler"]
         self.assertEqual([match.round_number for match in knockout], [4, 5])
-        self.assertEqual(len(knockout), 2)
         self.assertEqual(knockout[-1].advanced_by_seed_id, 1)
         self.assertEqual(summary.played, 3)
 

@@ -81,7 +81,7 @@ def test_visual_baseline(
         state="detached",
         timeout=20_000,
     )
-    if name == "player-list-dense-1280":
+    if name.startswith("home-") or name == "player-list-dense-1280":
         # Streamlit can finish its rerun before the dataframe canvas is laid out.
         page.wait_for_function(
             """() => {
@@ -92,6 +92,9 @@ def test_visual_baseline(
             }""",
             timeout=20_000,
         )
+    if name == "scouting-375":
+        expect(page.locator("[data-testid='stDataFrame'] canvas").first).to_be_visible(timeout=20_000)
+        expect(page.get_by_role("textbox", name="Fritekst", exact=True)).to_have_value("Følg næste prisbevægelse")
     if name == "history-1920":
         expect(page.locator("[data-testid='stVegaLiteChart'] svg").first).to_be_visible(timeout=20_000)
     if name.startswith("round-center-"):

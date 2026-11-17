@@ -78,9 +78,19 @@ def test_unchanged_support_remains_downloadable_and_debug_can_be_prepared(tmp_pa
     with patch.object(data_sections, "build_support_bundle", wraps=data_sections.build_support_bundle) as build:
         ui.button.side_effect = lambda label, **_: label == "Forbered anonymiseret ZIP"
         render_report(ui, paths, package())
+        (prepared,) = (
+            call.args[1] for call in ui.download_button.call_args_list
+            if call.args[0] == "Download supportpakke"
+        )
+        assert isinstance(prepared, bytes) and prepared.startswith(b"PK\x03\x04")
+        ui.download_button.reset_mock()
         ui.button.side_effect = None
         ui.button.return_value = False
         render_report(ui, paths, package())
+        assert [
+            call.args[1] for call in ui.download_button.call_args_list
+            if call.args[0] == "Download supportpakke"
+        ] == [prepared]
         assert build.call_count == 1
         ui.segmented_control.return_value = "debug"
         ui.button.side_effect = lambda label, **_: label == "Forbered anonymiseret ZIP"

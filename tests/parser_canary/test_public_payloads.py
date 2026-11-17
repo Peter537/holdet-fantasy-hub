@@ -55,6 +55,48 @@ def _public_rows(html: str) -> tuple[dict[str, object], ...]:
     return max(candidates, key=len)
 
 
+def _expected_stats(raw: dict | list) -> dict[str, float]:
+    if isinstance(raw, dict):
+        pairs = raw.items()
+    else:
+        def first(item, keys):
+            return next((item[k] for k in keys if item.get(k) is not None), None)
+
+        pairs = (
+            (first(item, ("name", "key", "title", "label", "stat")),
+             first(item, ("value", "score", "total")))
+            for item in raw if isinstance(item, dict)
+        )
+    result = {}
+    seen = set()
+    for name, value in pairs:
+        if not isinstance(name, str):
+            continue
+        name = name.strip()
+        if (not name or len(name) > 80 or any(ord(c) < 32 for c in name)
+                or name.casefold() in seen or isinstance(value, bool)
+                or not isinstance(value, (int, float)) or not isfinite(value)):
+            continue
+        result[name] = float(value)
+        seen.add(name.casefold())
+    return result
+
+
+def _assert_player_stats(raw_rows, entries):
+    for raw, entry in zip(raw_rows, entries, strict=True):
+        if raw.get("id") is not None:
+            assert int(raw["id"]) == entry.entry_id
+        for field, parsed in (("stats", entry.stats), ("totalStats", entry.total_stats)):
+            source = raw.get(field)
+            assert isinstance(source, (dict, list)), (entry.name, field)
+            expected = _expected_stats(source)
+            assert len(parsed) == len(expected), (entry.name, field)
+            assert {stat.name: stat.value for stat in parsed} == expected, (entry.name, field)
+    for field, attribute in (("stats", "stats"), ("totalStats", "total_stats")):
+        if any(raw[field] for raw in raw_rows):
+            assert any(getattr(entry, attribute) for entry in entries), field
+
+
 @pytest.mark.parser_canary
 @pytest.mark.parametrize(("url", "expected_format", "expected_unit"), PUBLIC_GAMES)
 def test_current_public_player_contract(
@@ -86,13 +128,7 @@ def test_current_public_player_contract(
     assert len(raw_rows) == len(result.entries), (
         "Den offentlige statisticssides rækker matcher ikke parserresultatet"
     )
-    raw_stats = {
-        field: all(
-            field in item and isinstance(item[field], (dict, list))
-            for item in raw_rows
-        )
-        for field in ("stats", "totalStats")
-    }
+    _assert_player_stats(raw_rows, result.entries)
     optional_contract: dict[str, bool] = {}
     for field, attribute in (
         ("popularity", "popularity"),
@@ -119,20 +155,6 @@ def test_current_public_player_contract(
             else:
                 aligned_values = aligned_values and parsed_value is None
         optional_contract[field] = found and aligned_values
-    optional_contract.update(
-        {
-            "stats": raw_stats["stats"]
-            and (
-                not any(item["stats"] not in ({}, []) for item in raw_rows)
-                or any(item.stats for item in result.entries)
-            ),
-            "totalStats": raw_stats["totalStats"]
-            and (
-                not any(item["totalStats"] not in ({}, []) for item in raw_rows)
-                or any(item.total_stats for item in result.entries)
-            ),
-        }
-    )
     assert all(optional_contract.values()), (
         "Offentlig spillerpayload har ændret de research-gated scoutingfelter: "
         f"{optional_contract}. Produktionsparseren skal fortsat være fail-closed."

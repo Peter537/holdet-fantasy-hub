@@ -27,15 +27,14 @@ def test_uncertain_source_also_selects_postprocess(monkeypatch):
     with temporary_directory() as root:
         paths = make_paths(root)
         manager = holdet.GroupStore(paths.groups_file, paths.group_revision_dir).create_manager_game(sample_team(1).reference.game, "Spil")
+        executed_steps = []
         def plan(manager, *args, **kwargs):
             return RefreshPlan(manager, RefreshMode.STALE_ONLY, datetime.now(timezone.utc), 3,
                 (RefreshStep("team:1", "team", "Hold", False, False, "Aktuel", team_id=1),
                  RefreshStep("postprocess", "postprocess", "Efterbehandling", False, False, "Aktuel")),
                 include_postprocess=True, catch_up=True)
         def catchup(*args, **kwargs):
-            steps = {step.step_id: step for step in kwargs["plan"].steps}
-            assert steps["team:1"].selected
-            assert steps["postprocess"].selected
+            executed_steps.append(tuple(step.step_id for step in kwargs["plan"].selected_steps))
             return SimpleNamespace(cancelled=False, manifest=SimpleNamespace(failures=()), manifest_path=paths.manifest_dir / "child.json", warnings=())
         monkeypatch.setattr(refresh_service, "build_refresh_plan", plan)
         monkeypatch.setattr(refresh, "catch_up_manager_game", catchup)
@@ -44,6 +43,7 @@ def test_uncertain_source_also_selects_postprocess(monkeypatch):
             cancelled=lambda: False, progress=lambda event: None,
             checkpoint={"run_id": "00000000-0000-0000-0000-000000000001", "manifest_paths": [],
                         "uncertain": True, "progress": {"source": "team:1", "status": "fetched"}})
+        assert executed_steps == [("team:1", "postprocess")]
 
 
 def test_resume_after_player_publication_preserves_alert_transition(monkeypatch):

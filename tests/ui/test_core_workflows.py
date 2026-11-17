@@ -31,6 +31,27 @@ def _download(page: Page) -> dict:
 
 
 @pytest.mark.ui
+def test_archive_card_opens_named_game_without_reloading(page: Page, ui_server: UiServer) -> None:
+    page.goto(ui_server.base_url + "/archive", wait_until="domcontentloaded")
+    card = page.get_by_role("button", name=re.compile(r"Arkivspil.*Åbn arkivspillet", re.I))
+    expect(card).to_be_visible(timeout=20_000)
+    document_start = page.evaluate("performance.timeOrigin")
+    card.hover()
+    assert card.evaluate(
+        """button => {
+            const style = getComputedStyle(button);
+            return style.transform === 'none' &&
+                style.transitionDuration.split(',').every(value => parseFloat(value) === 0);
+        }"""
+    ), "Hovering the archive card should respect the reduced-motion preference"
+    card.focus()
+    expect(card).to_be_focused()
+    page.keyboard.press("Enter")
+    expect(page.get_by_role("heading", name="Arkivspil", exact=True)).to_be_visible(timeout=20_000)
+    assert page.evaluate("performance.timeOrigin") == document_start
+
+
+@pytest.mark.ui
 def test_home_game_picker_supports_keyboard_in_current_tab(page: Page, ui_server: UiServer) -> None:
     page.set_viewport_size({"width": 1920, "height": 910})
     page.goto(ui_server.base_url + "/", wait_until="domcontentloaded")

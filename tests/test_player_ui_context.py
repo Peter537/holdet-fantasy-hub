@@ -68,7 +68,7 @@ def player_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     return paths
 
 
-def _list_app(root: str) -> None:
+def _list_app(root: str, fetch_time: str | None = None) -> None:
     from pathlib import Path
 
     from holdet_lib import PlayerStatisticsStore
@@ -77,7 +77,10 @@ def _list_app(root: str) -> None:
     from website import ui
 
     paths = resolve_paths(overrides=PathOverrides(data_root=Path(root)))
-    selected = PlayerStatisticsStore(paths.snapshot_dir).scan(GAME).newest(GAME, 3)
+    index = PlayerStatisticsStore(paths.snapshot_dir).scan(GAME)
+    selected = index.newest(GAME, 3) if fetch_time is None else next(
+        item for item in index.for_game(GAME) if item.generated_at.isoformat() == fetch_time
+    )
     ui._player_list_panel(selected, "test")
 
 
@@ -139,7 +142,12 @@ def test_exported_computed_form_uses_the_selected_round_and_fetch(player_paths):
         store.load(),
         (holdet.ComputedPlayerColumn("da", GAME.slug, "form", "Historical form", "form_3"),),
     )
-    app = AppTest.from_function(_list_app, args=(str(player_paths.config_dir.parent),)).run()
+    holdet.PlayerStatisticsStore(player_paths.snapshot_dir).save(
+        statistics(3, growth_factor=7), now=NOW + timedelta(minutes=3, seconds=30)
+    )
+    app = AppTest.from_function(
+        _list_app, args=(str(player_paths.config_dir.parent), (NOW + timedelta(minutes=3)).isoformat())
+    ).run()
     widget(app, "multiselect", "Beregnede kolonner").set_value(["form"]).run()
     button(app, "Opret eksport").click().run()
 

@@ -1204,18 +1204,26 @@ def test_retry_marks_players_stale_when_target_round_is_missing() -> None:
     assert plan.selected_steps[0].reason == "Spillerdata for runde 3 mangler"
 
 
-def test_manifest_scan_uses_run_id_as_equal_timestamp_tie_break() -> None:
+def test_manifest_scan_uses_run_id_as_equal_timestamp_tie_break(monkeypatch) -> None:
     current = datetime(2026, 8, 9, 12, tzinfo=timezone.utc)
     low_id = "00000000-0000-0000-0000-000000000001"
     high_id = "00000000-0000-0000-0000-000000000002"
     with temporary_directory() as root:
         store = holdet.ManifestStore(root / "manifests")
-        store.write(
-            replace(_manifest(current), run_id=high_id, origin_run_id=high_id)
-        )
-        store.write(
+        low_path = store.write(
             replace(_manifest(current), run_id=low_id, origin_run_id=low_id)
         )
+        high_path = store.write(
+            replace(_manifest(current), run_id=high_id, origin_run_id=high_id)
+        )
+        original_glob = Path.glob
+
+        def ascending_run_ids(path, pattern):
+            if path == low_path.parent and pattern == "refresh-round*.json":
+                return iter((low_path, high_path))
+            return original_glob(path, pattern)
+
+        monkeypatch.setattr(Path, "glob", ascending_run_ids)
         values, warnings = store.scan("demo", game_locale="da")
         assert not warnings
         assert [item.run_id for item in values] == [high_id, low_id]

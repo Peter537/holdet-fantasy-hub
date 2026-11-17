@@ -47,6 +47,7 @@ def test_schema_three_round_and_cancelled_survive_roundtrip(tmp_path):
     loaded = store.load(store.write(manifest))
     assert loaded.schema_version == 3
     assert loaded.steps[0].requested_round == 2
+    assert loaded.steps[0].status == 'cancelled'
     assert loaded.steps[0].retryable
     assert loaded.result == 'failed'
     with pytest.raises(ValueError):

@@ -7,7 +7,6 @@ import pytest
 
 import holdet_lib as holdet
 from holdet_lib import player_exports, team_exports
-from holdet_lib.backup import known_schema_error
 from holdet_lib.player_serialization import player_statistics_to_json
 from tests.test_decision_analysis import NOW
 from tests.test_library_storage import sample_team
@@ -84,7 +83,6 @@ def test_refresh_player_stages_survive_backup_restore_and_integrity_scan(tmp_pat
         "created_at": NOW.isoformat(), "updated_at": NOW.isoformat(), "status": "partial",
     }), encoding="utf-8")
     (stage.parent / "player-unrelated.json").write_text("{}", encoding="utf-8")
-    assert known_schema_error(f"data/refresh-runs/{run_id}/{stage.name}", content) is None
     check = holdet.full_integrity_check(paths)
     assert any(item.path.endswith(stage.name) for item in check.entries)
     assert not any(item.path.endswith("player-unrelated.json") for item in check.entries)

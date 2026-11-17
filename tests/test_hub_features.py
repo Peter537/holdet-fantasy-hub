@@ -507,21 +507,41 @@ def test_backup_checksums_traversal_and_restore(tmp_path: Path) -> None:
     assert holdet.AnalysisInboxStore(target_paths.analysis_inbox_file).load() == ()
 
     bad = BytesIO()
-    with zipfile.ZipFile(bad, "w") as archive:
+    with zipfile.ZipFile(BytesIO(data)) as original, zipfile.ZipFile(bad, "w") as archive:
+        for info in original.infolist():
+            archive.writestr(info, original.read(info.filename))
         archive.writestr("../escape.json", "{}")
-        archive.writestr("backup-manifest.json", "{}")
-    assert not holdet.validate_backup(bad.getvalue()).is_valid
+    invalid = holdet.validate_backup(bad.getvalue())
+    assert not invalid.is_valid
+    assert "Usikker sti i ZIP: ../escape.json" in invalid.errors
+    assert invalid.manifest == validation.manifest
 
     tampered = BytesIO()
     with zipfile.ZipFile(BytesIO(data)) as original, zipfile.ZipFile(tampered, "w") as changed:
         for info in original.infolist():
             payload = original.read(info.filename)
             if info.filename == "config/groups.json":
-                payload += b"x"
+                payload = payload.replace(b'"schema_version": 7', b'"schema_version": 6')
             changed.writestr(info, payload)
     invalid = holdet.validate_backup(tampered.getvalue())
     assert not invalid.is_valid
-    assert any("Checksum" in error or "Filst" in error for error in invalid.errors)
+    assert "Checksum matcher ikke: config/groups.json" in invalid.errors
+    assert not any("størrelse" in error for error in invalid.errors)
+
+    incorrect_size = BytesIO()
+    with zipfile.ZipFile(BytesIO(data)) as original, zipfile.ZipFile(incorrect_size, "w") as changed:
+        for info in original.infolist():
+            payload = original.read(info.filename)
+            if info.filename == "backup-manifest.json":
+                metadata = json.loads(payload)
+                groups = next(file for file in metadata["files"] if file["path"] == "config/groups.json")
+                groups["size"] += 1
+                payload = json.dumps(metadata).encode("utf-8")
+            changed.writestr(info, payload)
+    invalid = holdet.validate_backup(incorrect_size.getvalue())
+    assert not invalid.is_valid
+    assert "Filstørrelsen matcher ikke: config/groups.json" in invalid.errors
+    assert not any("Checksum" in error for error in invalid.errors)
 
 
 def test_settings_and_metadata_are_additive_and_versioned(tmp_path: Path) -> None:
@@ -604,11 +624,13 @@ def test_context_routes_are_cache_only_and_old_routes_are_not_found() -> None:
                 "quality",
                 "backup",
             ):
-                navigate(app, route)
-                assert not app.exception, route
+                retired = AppTest.from_file(APP_PATH)
+                retired.query_params["view"] = route
+                retired.run(timeout=15)
+                assert not retired.exception, route
                 assert any(
-                    item.value == "Siden findes ikke" for item in app.title
-                )
+                    item.value == "Siden findes ikke" for item in retired.title
+                ), route
             for section in (
                 "round-center",
                 "groups",

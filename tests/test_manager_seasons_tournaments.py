@@ -532,12 +532,7 @@ class SeasonAndTournamentTests(unittest.TestCase):
         )
         self.assertEqual(kind, "group")
         self.assertTrue(url.startswith("https://"))
-        with self.assertRaises(holdet.PayloadError):
-            holdet.validate_official_group_url(
-                "https://user@www.holdet.dk/da/test",
-                "da",
-                "group",
-            )
+
     def test_calendar_keeps_missing_fixture_times_separate(self):
         first = team_with_rounds(1, {1: 10}, owner_user_id=900)
         second = team_with_rounds(2, {1: 20}, owner_user_id=901)

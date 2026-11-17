@@ -30,9 +30,11 @@ def test_season_update_rejects_stale_baseline_and_preserves_newer_value(tmp_path
 
 def test_absent_file_accepts_supplied_baseline(tmp_path):
     store = HubSettingsStore(tmp_path / "hub-settings.json")
-    baseline = replace(HubSettings(), enabled_features=("alerts",))
+    baseline = HubSettings(enabled_features=("alerts",), experimental_games=(("da", "demo"),))
     updated = store.set_enabled_features(baseline, ("managers",))
-    assert store.load() == updated
+    expected = replace(baseline, enabled_features=("managers",))
+    assert updated == expected
+    assert store.load() == expected
 
 
 def test_group_update_rejects_stale_baseline(tmp_path):
