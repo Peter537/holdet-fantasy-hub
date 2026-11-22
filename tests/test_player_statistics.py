@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 import shutil
@@ -112,6 +112,90 @@ def sample_nfl_statistics(round_number: int = 0) -> holdet.ScrapedGame:
 
 
 class PlayerPayloadTests(unittest.TestCase):
+    def test_handball_client_loads_schedule_and_round_trips_player_snapshot(self) -> None:
+        game_url = (
+            "https://www.holdet.dk/da/fantasy/womens-euro-handball-2026/handball"
+        )
+        season_url = "https://www.holdet.dk/da/season/womens-euro-handball-2026"
+        api_url = "https://www.holdet.dk/api/fantasy"
+        now = datetime(2026, 11, 22, tzinfo=timezone.utc)
+        text_payloads = {
+            game_url: "<h1>Kvinde EM Håndbold 2026</h1>",
+            season_url: flight_html({"variant": "handball"}),
+            f"{season_url}/handball/statistics": flight_html(
+                {
+                    "rows": [
+                        {
+                            "id": 22,
+                            "person": {"id": 47, "fullName": "Maria Nordlys"},
+                            "team": {"name": "Danmark"},
+                            "position": {"title": "Fløj"},
+                            "score": 7_500_000,
+                        }
+                    ],
+                    "round": 1,
+                }
+            ),
+        }
+        json_payloads = {
+            f"{api_url}/cartridges/womens-euro-handball-2026": {
+                "gameId": 17,
+                "_embedded": {
+                    "games": {"17": {"id": 17, "rulesetId": 18, "scheduleId": 634}},
+                    "rulesets": {
+                        "18": {
+                            "id": 18,
+                            "salaryCap": 50_000_000,
+                            "properties": {"Format": "handball"},
+                        }
+                    },
+                },
+            },
+            f"{api_url}/schedules/634": {
+                "rounds": [
+                    {
+                        "round": round_number,
+                        "start": f"2026-12-{day:02d}T10:00:00Z",
+                        "close": f"2026-12-{day:02d}T16:30:00Z",
+                        "end": f"2026-12-{day:02d}T23:50:00Z",
+                    }
+                    for round_number, day in enumerate(range(3, 19, 2), start=1)
+                ]
+            },
+        }
+        client = holdet.HoldetClient(
+            text_fetcher=text_payloads.__getitem__,
+            json_fetcher=json_payloads.__getitem__,
+            clock=lambda: now,
+        )
+
+        info = client.fetch_game_info(game_url)
+        self.assertEqual(info.salary_cap, 50_000_000)
+        self.assertEqual(info.final_round, 8)
+        self.assertEqual(
+            tuple(item.round_number for item in info.rounds), tuple(range(1, 9))
+        )
+
+        statistics = client.fetch_players(game_url)
+        self.assertEqual(
+            (statistics.variant, statistics.format, statistics.unit),
+            ("handball", "handball", "money"),
+        )
+        self.assertEqual(
+            (statistics.round_number, statistics.round_status), (1, "in_progress")
+        )
+        self.assertEqual(statistics.round_end_at, info.rounds[0].end)
+        (entry,) = statistics.entries
+        self.assertEqual(
+            (entry.name, entry.team, entry.position), ("Maria Nordlys", "Danmark", "Fløj")
+        )
+        self.assertEqual((entry.entry_id, entry.person_id, entry.value), (22, 47, 7_500_000))
+
+        snapshot = json.loads(
+            holdet.player_statistics_to_json(statistics, generated_at=now)
+        )
+        self.assertEqual(holdet.player_statistics_from_dict(snapshot), statistics)
+
     def test_parses_ids_growth_unicode_and_statuses(self) -> None:
         entries, round_number = holdet.extract_entries_and_round(statistics_html())
         self.assertEqual(round_number, 7)

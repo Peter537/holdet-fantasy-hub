@@ -35,7 +35,7 @@ https://www.holdet.dk/<locale>/fantasy/<slug>/...
 
 En bar slug bruger locale `da`. Ukendte hosts og ugyldige stier afvises før en netværksanmodning. Den offentlige spilside hentes fra `https://www.holdet.dk/<locale>/season/<slug>`. `GameUrl.season_root_url` bygger adressen; `nexus_root_url` er et kompatibilitetsalias til samme adresse. JSON-data hentes fra `https://www.holdet.dk/api/fantasy`, herunder `/cartridges/<slug>` til spilmetadata. Den tidligere `/api/season`-adresse returnerer en HTML-side og må ikke bruges til JSON-hentninger.
 
-Cartridge-data leverer ruleset og metadata. Biblioteket skelner mellem rå route-variant, normaliseret format (`soccer`, `cycling`, `formula1`, `golf`, `nfl`) og enhed (`money`, `points`). `salaryCap > 0` betyder penge; `salaryCap = 0` betyder point. Det er nødvendigt for cykling, hvor route-navnet alene ikke afgør enheden.
+Cartridge-data leverer ruleset og metadata. Biblioteket skelner mellem rå route-variant, normaliseret format (`soccer`, `cycling`, `formula1`, `golf`, `nfl`, `handball`) og enhed (`money`, `points`). `salaryCap > 0` betyder penge; `salaryCap = 0` betyder point. Det er nødvendigt for cykling, hvor route-navnet alene ikke afgør enheden.
 
 ## Spillerstatistik
 
@@ -47,7 +47,7 @@ Statistiksiden hentes fra:
 
 Next.js Flight-strenge samles fra scripts, og parseren finder den gyldige `rows`-liste og runde. Hele serverpayloaden bruges uanset den virtualiserede tabels synlige rækker. Et eksplicit spiller-refresh gemmer både det komplette spillersnapshot og de tilgængelige spilmetadata.
 
-De obligatoriske identitets-, hold-, positions-, pris- og statusfelter valideres strengt. De offentlige felter `popularity`, `popularityChange`, `trend`, `index`, `stats` og `totalStats` er valgfrie. I preseason-payloads valideres de fire numeriske scoutingfelter pr. værdi: `null` mappes til `None`, og et endeligt tal mappes til den tilsvarende numeriske værdi. Korte, entydige statnavne og endelige statværdier bevares i snapshot schema 4. Ukendt form, ikke-endelige tal eller kildedrift ignoreres fail-closed for det valgfrie felt, så den almindelige spillerparser fortsat kan levere de obligatoriske data. Parser-canaryen overvåger felterne separat på de syv aktuelle spil, inklusive Premier League og Football Fantasy 2026 (`nfl`).
+De obligatoriske identitets-, hold-, positions-, pris- og statusfelter valideres strengt. De offentlige felter `popularity`, `popularityChange`, `trend`, `index`, `stats` og `totalStats` er valgfrie. I preseason-payloads valideres de fire numeriske scoutingfelter pr. værdi: `null` mappes til `None`, og et endeligt tal mappes til den tilsvarende numeriske værdi. Korte, entydige statnavne og endelige statværdier bevares i snapshot schema 4. Ukendt form, ikke-endelige tal eller kildedrift ignoreres fail-closed for det valgfrie felt, så den almindelige spillerparser fortsat kan levere de obligatoriske data. Parser-canaryen overvåger felterne separat på de otte aktuelle spil, inklusive Premier League, Football Fantasy 2026 (`nfl`) og Kvinde EM Håndbold 2026 (`handball`).
 
 **Mellem runder** sammenligner det nyeste lokale snapshot i valgt og foregående tilgængelige runde. **Mellem hentninger** sammenligner de to seneste kronologiske snapshots uden at kollapse samme rundenummer. Begge er rene cacheberegninger.
 

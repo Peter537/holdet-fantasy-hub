@@ -24,6 +24,11 @@ PUBLIC_GAMES = (
     ("https://www.holdet.dk/da/fantasy/motor-manager-2026", "formula1", "money"),
     ("https://www.holdet.dk/da/fantasy/golf-manager-2026", "golf", "points"),
     ("https://www.holdet.dk/da/fantasy/football-fantasy-2026", "nfl", "money"),
+    (
+        "https://www.holdet.dk/da/fantasy/womens-euro-handball-2026/handball",
+        "handball",
+        "money",
+    ),
 )
 
 

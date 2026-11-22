@@ -159,6 +159,12 @@ _ADAPTERS = (
         SportCapabilities(True, True, False, True, True),
     ),
     _adapter(
+        "handball",
+        ("handball",),
+        "money",
+        SportCapabilities(True, True, False, True, True),
+    ),
+    _adapter(
         "cycling",
         ("cycling", "cycling_world_tour"),
         "money",
