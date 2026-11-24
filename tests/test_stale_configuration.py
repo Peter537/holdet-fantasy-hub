@@ -5,6 +5,8 @@ import pytest
 from holdet_lib.hub_settings import HubSettings, HubSettingsStore
 from holdet_lib.groups import GroupStore, GroupTeam
 from holdet_lib.seasons import SeasonStore
+from holdet_lib.backup import create_backup_bytes, restore_backup
+from holdet_lib.paths import PathOverrides, resolve_paths
 from tests.test_decision_analysis import GAME
 
 
@@ -28,13 +30,35 @@ def test_season_update_rejects_stale_baseline_and_preserves_newer_value(tmp_path
     assert store.load() == changed
 
 
-def test_absent_file_accepts_supplied_baseline(tmp_path):
+def test_explicit_save_initializes_a_nondefault_baseline(tmp_path):
     store = HubSettingsStore(tmp_path / "hub-settings.json")
     baseline = HubSettings(enabled_features=("alerts",), experimental_games=(("da", "demo"),))
+    store.save(baseline)
     updated = store.set_enabled_features(baseline, ("managers",))
     expected = replace(baseline, enabled_features=("managers",))
     assert updated == expected
     assert store.load() == expected
+
+
+def test_restore_to_absent_files_rejects_old_settings_and_season_edits(tmp_path):
+    paths = resolve_paths(overrides=PathOverrides(data_root=tmp_path), environ={})
+    source, _ = create_backup_bytes(paths)
+    settings = HubSettingsStore(paths.hub_settings_file)
+    previous_settings = settings.set_enabled_features(settings.load(), ("alerts",))
+    seasons = SeasonStore(paths.seasons_file)
+    previous_seasons, season = seasons.create(seasons.load(), "Before restore", ("competition",))
+
+    restore_backup(source, paths)
+
+    with pytest.raises(ValueError, match="ændret"):
+        settings.set_enabled_features(previous_settings, ("scouting",))
+    with pytest.raises(ValueError, match="ændret"):
+        seasons.archive(previous_seasons, season.season_id)
+    assert not settings.path.exists()
+    assert not seasons.path.exists()
+    assert settings.set_enabled_features(settings.load(), ("scouting",)).enabled_features == ("scouting",)
+    created, _ = seasons.create(seasons.load(), "After restore", ("competition",))
+    assert seasons.load() == created
 
 
 def test_group_update_rejects_stale_baseline(tmp_path):

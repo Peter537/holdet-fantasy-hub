@@ -80,6 +80,8 @@ Managerens bedste hold pr. spil/runde tæller, og selvopgør fjernes. Komplette 
 
 Kalenderen samler kommende gruppe- og turneringskampe fra lokal schedulemetadata og publicerede fixtures. Mangler tidspunktet, vises eventet separat med link til den eksisterende spilinfohandling. Navigationen henter eller skriver aldrig.
 
+Publicerede knockoutkampe viser de gemte deltagere og alle kampens runder. Foreløbige kampe viser deres plads i kampplanen, og managerfilteret matcher kun kendte deltagere. En mulig omkamp i en double-elimination-finale vises som betinget, indtil cachede resultater afgør behovet.
+
 Grupper kan gemme en manuel `official_url` med typen `group` eller `minileague`. URL'en valideres som HTTPS på `www.holdet.dk` med korrekt locale-prefix, uden credentials. Hubben gætter ikke den konkrete grupperute.
 
 ## Opdatering

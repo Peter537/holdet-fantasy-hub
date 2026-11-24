@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import errno
+from http.client import IncompleteRead
 from urllib.error import HTTPError, URLError
 import unittest
 from unittest.mock import patch
@@ -17,20 +18,100 @@ class _Headers(dict):
 class _Response:
     headers = _Headers()
 
-    def __init__(self, body: bytes = b"ok") -> None:
+    def __init__(self, body: bytes = b"ok", *, length: int | None = None) -> None:
         self.body = body
+        self.length = length
+        self.read_sizes: list[int] = []
+        self.closed = False
 
     def __enter__(self):
         return self
 
     def __exit__(self, *_args):
+        self.closed = True
         return False
 
-    def read(self) -> bytes:
-        return self.body
+    def read1(self, size: int) -> bytes:
+        self.read_sizes.append(size)
+        result, self.body = self.body[:size], self.body[size:]
+        return result
 
 
 class HttpRetryTests(unittest.TestCase):
+    def test_retries_short_body_when_read1_reaches_eof(self) -> None:
+        short = _Response(b"hi", length=3)
+        complete = _Response(b"yes", length=3)
+        sleeps = []
+        with patch("holdet_lib.http.urlopen", side_effect=[short, complete]) as opener:
+            result = holdet.HttpClient(sleep=sleeps.append).fetch_text("https://example.test")
+        self.assertEqual(result, "yes")
+        self.assertEqual(opener.call_count, 2)
+        self.assertEqual(sleeps, [0.5])
+        self.assertTrue(short.closed and complete.closed)
+
+    def test_incomplete_read_is_normalized_when_retry_budget_is_exhausted(self) -> None:
+        response = _Response()
+        with (
+            patch.object(response, "read1", side_effect=IncompleteRead(b"x", 1)),
+            patch("holdet_lib.http.urlopen", return_value=response) as opener,
+        ):
+            with self.assertRaises(holdet.FetchError) as raised:
+                holdet.HttpClient(retries=0).fetch_text("https://example.test")
+        self.assertIsInstance(raised.exception.__cause__, IncompleteRead)
+        self.assertEqual(opener.call_count, 1)
+        self.assertTrue(response.closed)
+
+    def test_oversized_body_is_never_retried(self) -> None:
+        for declared, read_sizes in ((None, [5]), (5, [])):
+            with self.subTest(declared=declared):
+                response = _Response(b"extra", length=declared)
+                with patch("holdet_lib.http.urlopen", return_value=response) as opener:
+                    with self.assertRaisesRegex(holdet.FetchError, "størrelsesgrænsen"):
+                        holdet.HttpClient(max_response_bytes=4).fetch_text("https://example.test")
+                self.assertEqual(opener.call_count, 1)
+                self.assertEqual(response.read_sizes, read_sizes)
+                self.assertTrue(response.closed)
+
+    def test_deadline_covers_progressing_reads_and_limits_socket_timeout(self) -> None:
+        now = 0.0
+
+        class SlowResponse(_Response):
+            def read1(self, size):
+                nonlocal now
+                now += 0.6
+                return super().read1(min(size, 1))
+
+        response = SlowResponse(b"123")
+        with patch("holdet_lib.http.urlopen", return_value=response) as opener:
+            with self.assertRaisesRegex(holdet.FetchError, "Tidsgrænsen"):
+                holdet.HttpClient(clock=lambda: now, total_timeout=1).fetch_text("https://example.test")
+        self.assertEqual(opener.call_count, 1)
+        self.assertEqual(opener.call_args.kwargs["timeout"], 1)
+        self.assertEqual(len(response.read_sizes), 2)
+        self.assertTrue(response.closed)
+
+    def test_retry_uses_remaining_deadline_after_wait(self) -> None:
+        now = 0.0
+
+        def sleep(delay):
+            nonlocal now
+            now += delay
+
+        with patch("holdet_lib.http.urlopen", side_effect=[TimeoutError(), _Response()]) as opener:
+            client = holdet.HttpClient(clock=lambda: now, sleep=sleep, timeout=1, total_timeout=1.25)
+            self.assertEqual(client.fetch_text("https://example.test"), "ok")
+        self.assertEqual([call.kwargs["timeout"] for call in opener.call_args_list], [1, 0.75])
+
+    def test_backoff_is_skipped_when_no_retry_fits(self) -> None:
+        sleeps = []
+        with patch("holdet_lib.http.urlopen", side_effect=TimeoutError()) as opener:
+            with self.assertRaisesRegex(holdet.FetchError, "Tidsgrænsen"):
+                holdet.HttpClient(clock=lambda: 0, total_timeout=0.25, sleep=sleeps.append).fetch_text(
+                    "https://example.test"
+                )
+        self.assertEqual(opener.call_count, 1)
+        self.assertEqual(sleeps, [])
+
     def test_html_response_instead_of_json_has_actionable_error(self) -> None:
         with patch("holdet_lib.http.urlopen", return_value=_Response(b"<!DOCTYPE html><html><title>Holdet.dk</title></html>")):
             with self.assertRaisesRegex(holdet.PayloadError, "HTML-side i stedet for JSON"):

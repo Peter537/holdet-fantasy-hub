@@ -9,8 +9,8 @@ from pathlib import Path
 from typing import Literal
 
 from .errors import PayloadError
+from .filenames import game_cache_stem
 from .models import GameUrl
-from .output import sanitize_path_component
 from .persistence import aware_local, replace_text_atomically
 
 
@@ -147,6 +147,66 @@ def parse_fixture_records(
     )
 
 
+def _fixture_from_dict(payload: object, *, game: GameUrl | None = None) -> FixtureSnapshot:
+    if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+        raise PayloadError("Ukendt fixtureschema")
+    raw_game = payload.get("game")
+    raw_source = payload.get("source")
+    raw_records = payload.get("fixtures")
+    if not isinstance(raw_game, dict) or not isinstance(raw_source, dict):
+        raise PayloadError("Fixturecachen mangler spil eller kilde")
+    cached_game = GameUrl(
+        str(raw_game.get("url", "")),
+        str(raw_game.get("locale", "")),
+        str(raw_game.get("slug", "")),
+    )
+    if game is not None and (cached_game.locale.casefold(), cached_game.slug) != (
+        game.locale.casefold(), game.slug
+    ):
+        raise PayloadError("Fixturecachen tilhører et andet spil")
+    try:
+        source = FixtureSourceProfile(
+            str(raw_source.get("url", "")),
+            date.fromisoformat(str(raw_source.get("accessed_on", ""))),
+            bool(raw_source.get("public_access_verified", False)),
+            bool(raw_source.get("parser_fixture_verified", False)),
+            raw_source.get("official_difficulty_field")
+            if isinstance(raw_source.get("official_difficulty_field"), str)
+            else None,
+            raw_source.get("difficulty_documentation_url")
+            if isinstance(raw_source.get("difficulty_documentation_url"), str)
+            else None,
+        )
+    except ValueError as exc:
+        raise PayloadError("Fixturecachen har ugyldig kildeprovenance") from exc
+    if not isinstance(raw_records, list):
+        raise PayloadError("Fixturecachen mangler fixturelisten")
+    parser_payload = [
+        {
+            "round": item.get("round"),
+            "team": item.get("team"),
+            "opponent": item.get("opponent"),
+            "home_away": item.get("home_away"),
+            "start_at": item.get("start_at"),
+            **(
+                {source.official_difficulty_field: item.get("official_difficulty")}
+                if source.official_difficulty_field
+                else {}
+            ),
+        }
+        for item in raw_records
+        if isinstance(item, dict)
+    ]
+    if len(parser_payload) != len(raw_records):
+        raise PayloadError("Fixturecachen har en ugyldig fixturepost")
+    return FixtureSnapshot(
+        cached_game,
+        parse_fixture_records(parser_payload, source),
+        source,
+        aware_local(_timestamp(payload.get("fetched_at"))),
+    )
+
+
 class FixtureStore:
     """Atomically cache fixtures written only by an explicit caller action."""
 
@@ -154,9 +214,7 @@ class FixtureStore:
         self.directory = Path(directory)
 
     def _path(self, game: GameUrl) -> Path:
-        locale = sanitize_path_component(game.locale.casefold(), fallback="da")
-        slug = sanitize_path_component(game.slug, fallback="game")
-        return self.directory / f"{locale}--{slug}.json"
+        return self.directory / f"{game_cache_stem(game)}.json"
 
     def save(self, snapshot: FixtureSnapshot) -> Path:
         payload = {
@@ -204,60 +262,4 @@ class FixtureStore:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise PayloadError(f"Fixturecachen kunne ikke læses: {exc}") from exc
-        if not isinstance(payload, dict) or payload.get("schema_version") != 1:
-            raise PayloadError("Ukendt fixtureschema")
-        raw_game = payload.get("game")
-        raw_source = payload.get("source")
-        raw_records = payload.get("fixtures")
-        if not isinstance(raw_game, dict) or not isinstance(raw_source, dict):
-            raise PayloadError("Fixturecachen mangler spil eller kilde")
-        cached_game = GameUrl(
-            str(raw_game.get("url", "")),
-            str(raw_game.get("locale", "")),
-            str(raw_game.get("slug", "")),
-        )
-        if (cached_game.locale.casefold(), cached_game.slug) != (
-            game.locale.casefold(), game.slug
-        ):
-            raise PayloadError("Fixturecachen tilhører et andet spil")
-        try:
-            source = FixtureSourceProfile(
-                str(raw_source.get("url", "")),
-                date.fromisoformat(str(raw_source.get("accessed_on", ""))),
-                bool(raw_source.get("public_access_verified", False)),
-                bool(raw_source.get("parser_fixture_verified", False)),
-                raw_source.get("official_difficulty_field")
-                if isinstance(raw_source.get("official_difficulty_field"), str)
-                else None,
-                raw_source.get("difficulty_documentation_url")
-                if isinstance(raw_source.get("difficulty_documentation_url"), str)
-                else None,
-            )
-        except ValueError as exc:
-            raise PayloadError("Fixturecachen har ugyldig kildeprovenance") from exc
-        if not isinstance(raw_records, list):
-            raise PayloadError("Fixturecachen mangler fixturelisten")
-        parser_payload = [
-            {
-                "round": item.get("round"),
-                "team": item.get("team"),
-                "opponent": item.get("opponent"),
-                "home_away": item.get("home_away"),
-                "start_at": item.get("start_at"),
-                **(
-                    {source.official_difficulty_field: item.get("official_difficulty")}
-                    if source.official_difficulty_field
-                    else {}
-                ),
-            }
-            for item in raw_records
-            if isinstance(item, dict)
-        ]
-        if len(parser_payload) != len(raw_records):
-            raise PayloadError("Fixturecachen har en ugyldig fixturepost")
-        return FixtureSnapshot(
-            cached_game,
-            parse_fixture_records(parser_payload, source),
-            source,
-            aware_local(_timestamp(payload.get("fetched_at"))),
-        )
+        return _fixture_from_dict(payload, game=game)

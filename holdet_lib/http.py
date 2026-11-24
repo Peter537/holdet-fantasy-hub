@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import errno
+from http.client import HTTPException, HTTPResponse, IncompleteRead
 import json
+from math import isfinite
 import time
 from typing import Callable
-from urllib.error import HTTPError, URLError
+from urllib.error import HTTPError
 from urllib.parse import urlsplit
 from urllib.request import Request, getproxies, proxy_bypass, urlopen
 
@@ -17,8 +19,11 @@ from .version import VERSION
 TRANSIENT_HTTP_STATUSES = frozenset({408, 425, 429, 500, 502, 503, 504})
 USER_AGENT = f"holdet-lib/{VERSION} (Python standard library; public Holdet.dk data)"
 DEFAULT_TIMEOUT_SECONDS = 30.0
+DEFAULT_TOTAL_TIMEOUT_SECONDS = 90.0
+DEFAULT_MAX_RESPONSE_BYTES = 64 * 1024 * 1024
 DEFAULT_RETRIES = 2
 DEFAULT_CONNECTION_REFUSED_RETRIES = 4
+_READ_CHUNK_BYTES = 64 * 1024
 
 
 def _retry_delay(error: HTTPError | None, attempt: int) -> float:
@@ -80,18 +85,58 @@ class HttpClient:
         self,
         *,
         timeout: float = DEFAULT_TIMEOUT_SECONDS,
+        total_timeout: float = DEFAULT_TOTAL_TIMEOUT_SECONDS,
+        max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
         retries: int = DEFAULT_RETRIES,
         connection_refused_retries: int = DEFAULT_CONNECTION_REFUSED_RETRIES,
         sleep: Callable[[float], None] = time.sleep,
+        clock: Callable[[], float] = time.monotonic,
         proxy_resolver: Callable[[str], str | None] = _configured_proxy_for_url,
     ) -> None:
         if retries < 0 or connection_refused_retries < 0:
             raise ValueError("Antallet af genforsøg må ikke være negativt")
+        if not all(value > 0 and isfinite(value) for value in (timeout, total_timeout)):
+            raise ValueError("Timeout skal være et positivt, endeligt tal")
+        if type(max_response_bytes) is not int or max_response_bytes <= 0:
+            raise ValueError("Svaret skal have en positiv størrelsesgrænse i bytes")
         self.timeout = timeout
+        self.total_timeout = total_timeout
+        self.max_response_bytes = max_response_bytes
         self.retries = retries
         self.connection_refused_retries = connection_refused_retries
         self.sleep = sleep
+        self.clock = clock
         self.proxy_resolver = proxy_resolver
+
+    def _remaining(self, url: str, deadline: float) -> float:
+        remaining = deadline - self.clock()
+        if remaining <= 0:
+            raise FetchError(f"Tidsgrænsen for hentning af {url} er overskredet")
+        return remaining
+
+    def _read_body(self, response: HTTPResponse, url: str, deadline: float) -> bytearray:
+        expected_length = getattr(response, "length", None)
+        size_error = f"Svaret fra {url} overskrider størrelsesgrænsen på {self.max_response_bytes} bytes"
+        if expected_length is not None and expected_length > self.max_response_bytes:
+            raise FetchError(size_error)
+
+        # read1 returns available data without waiting to fill an entire buffer.
+        # An ordinary read(size) can hide steady progress until socket timeout.
+        read = getattr(response, "read1", None) or response.read
+        body = bytearray()
+        while True:
+            self._remaining(url, deadline)
+            capacity = self.max_response_bytes - len(body)
+            chunk = read(min(_READ_CHUNK_BYTES, capacity + 1))
+            self._remaining(url, deadline)
+            if not chunk:
+                break
+            if len(chunk) > capacity:
+                raise FetchError(size_error)
+            body.extend(chunk)
+        if expected_length is not None and len(body) < expected_length:
+            raise IncompleteRead(bytes(body), expected_length - len(body))
+        return body
 
     def fetch_text(self, url: str, *, accept: str = "text/html") -> str:
         request = Request(
@@ -102,12 +147,13 @@ class HttpClient:
                 "Accept-Encoding": "identity",
             },
         )
-        last_error: Exception | None = None
+        deadline = self.clock() + self.total_timeout
         attempt = 0
         while True:
+            timeout = min(self.timeout, self._remaining(url, deadline))
             try:
-                with urlopen(request, timeout=self.timeout) as response:
-                    body = response.read()
+                with urlopen(request, timeout=timeout) as response:
+                    body = self._read_body(response, url, deadline)
                     charset = response.headers.get_content_charset() or "utf-8"
                     try:
                         return body.decode(charset)
@@ -116,17 +162,13 @@ class HttpClient:
                             f"URL'en {url} kunne ikke afkodes med {charset!r}"
                         ) from exc
             except HTTPError as exc:
-                last_error = exc
-                if (
-                    exc.code not in TRANSIENT_HTTP_STATUSES
-                    or attempt >= self.retries
-                ):
-                    raise FetchError(
-                        f"HTTP {exc.code} under hentning af {url}"
-                    ) from exc
-                self.sleep(_retry_delay(exc, attempt))
-            except (TimeoutError, URLError, OSError) as exc:
-                last_error = exc
+                try:
+                    if exc.code not in TRANSIENT_HTTP_STATUSES or attempt >= self.retries:
+                        raise FetchError(f"HTTP {exc.code} under hentning af {url}") from exc
+                    delay = _retry_delay(exc, attempt)
+                finally:
+                    exc.close()
+            except (OSError, HTTPException) as exc:
                 retry_limit = (
                     max(self.retries, self.connection_refused_retries)
                     if _is_connection_refused(exc)
@@ -136,19 +178,17 @@ class HttpClient:
                     reason = getattr(exc, "reason", exc)
                     try:
                         proxy = self.proxy_resolver(url)
+                        route = f" via configured proxy {_redact_proxy_url(proxy)}" if proxy else ""
                     except Exception:
-                        proxy = None
-                    route = (
-                        f" via configured proxy {_redact_proxy_url(proxy)}"
-                        if proxy
-                        else ""
-                    )
+                        route = ""
                     raise FetchError(
                         f"Kunne ikke hente {url}{route}: {reason}"
                     ) from exc
-                self.sleep(_retry_delay(None, attempt))
+                delay = _retry_delay(None, attempt)
+            if delay >= self._remaining(url, deadline):
+                raise FetchError(f"Tidsgrænsen for hentning af {url} tillader ikke et nyt forsøg")
+            self.sleep(delay)
             attempt += 1
-        raise FetchError(f"Kunne ikke hente {url}: {last_error}")
 
     def fetch_json(self, url: str) -> object:
         text = self.fetch_text(url, accept="application/json")
@@ -166,6 +206,8 @@ def fetch_html(
     url: str,
     *,
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
+    total_timeout: float = DEFAULT_TOTAL_TIMEOUT_SECONDS,
+    max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
     retries: int = DEFAULT_RETRIES,
     connection_refused_retries: int = DEFAULT_CONNECTION_REFUSED_RETRIES,
     sleep: Callable[[float], None] = time.sleep,
@@ -174,6 +216,8 @@ def fetch_html(
 
     return HttpClient(
         timeout=timeout,
+        total_timeout=total_timeout,
+        max_response_bytes=max_response_bytes,
         retries=retries,
         connection_refused_retries=connection_refused_retries,
         sleep=sleep,

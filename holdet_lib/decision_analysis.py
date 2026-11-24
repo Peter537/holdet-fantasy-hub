@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
+from functools import cache
 import hashlib
 from itertools import combinations
 import json
@@ -14,12 +15,21 @@ from statistics import mean, median, stdev
 from time import perf_counter
 from typing import Iterable, Literal, Mapping
 
+from .errors import UnsupportedGameError
 from .groups import GroupDefinition
 from .hub_settings import player_identity
 from .models import GameUrl, PlayerEntry, RoundStatus, RoundSummary
 from .rules import AnalysisProvenance, GameRuleProfile
+from .sport_adapters import get_sport_adapter, normalize_position_limits
 from .standings import build_standings
-from .storage import PlayerStatisticsIndex, SnapshotIndex, TeamSnapshot
+from .storage import PlayerStatisticsIndex, PlayerStatisticsSnapshot, SnapshotIndex, TeamSnapshot
+from .transfers import (
+    TransferScenario,
+    captain_position_allowed,
+    normalize_roster_position,
+    roster_prices_match,
+    simulate_transfers,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -195,6 +205,13 @@ class SimulationResult:
     backtest_latest_mae: float | None
     backtest_form_3_mae: float | None
     provenance: AnalysisProvenance
+
+
+@dataclass(frozen=True, slots=True)
+class ModelTransferFeasibility:
+    status: Literal["valid", "invalid", "unverified"]
+    round_number: int
+    reasons: tuple[str, ...] = ()
 
 
 def _entries(snapshot) -> dict[str, PlayerEntry]:
@@ -373,6 +390,11 @@ def build_captain_analysis(
     reasons: list[str] = []
     if not rules.verified:
         reasons.append("Sæsonens kaptajnregler er ikke verificeret")
+    if rules.sport is not None:
+        try:
+            get_sport_adapter(rules.sport)
+        except UnsupportedGameError:
+            reasons.append("Spillets sport understøttes ikke")
     if (
         rules.captain_count is None
         or rules.captain_count < 1
@@ -381,8 +403,20 @@ def build_captain_analysis(
         reasons.append("Antal kaptajner eller multiplikator mangler")
     actual = tuple(
         entry for entry in snapshot.team.roster
-        if "captain" in entry.role.casefold() or "kaptajn" in entry.role.casefold()
+        if entry.role.strip().casefold() in {"captain", "kaptajn"}
     )
+    profile = rules.to_transfer_profile()
+    eligible = snapshot.team.roster
+    if not reasons:
+        if rules.requires_captain_positions and not profile.captain_positions:
+            reasons.append("Kaptajnens tilladte positioner mangler")
+        elif profile.captain_positions:
+            eligible = tuple(
+                entry for entry in snapshot.team.roster
+                if captain_position_allowed(profile, entry.position)
+            )
+            if any(entry not in eligible for entry in actual):
+                reasons.append("En kaptajn mangler en tilladt position i rundetruppen")
     computed = None
     mismatch = False
     alternatives: tuple[CaptainAlternative, ...] = ()
@@ -407,7 +441,7 @@ def build_captain_analysis(
                     tuple(sorted(entry.player_id for entry in group)),
                 )
                 for group in sorted(
-                    combinations(snapshot.team.roster, rules.captain_count),
+                    combinations(eligible, rules.captain_count),
                     key=lambda values: (
                         -sum(item.round_change for item in values),
                         tuple(item.name.casefold() for item in values),
@@ -440,12 +474,13 @@ def build_bank_analysis(
     *,
     actual_interest: int | None = None,
     round_number: int | None = None,
+    round_status: RoundStatus | None = None,
     historical_windows: Iterable[tuple[float | None, float | None]] = (),
 ) -> BankAnalysis:
     reasons: list[str] = []
     if investment <= 0:
         reasons.append("Investeringen skal være positiv")
-    fee = rules.transfer_fee(investment)
+    fee = rules.transfer_fee(investment, round_number=round_number)
     full_interest = rules.interest(available_bank)
     if fee is None:
         reasons.append("Sæsonens transfergebyr er ikke verificeret")
@@ -481,6 +516,14 @@ def build_bank_analysis(
         if break_even is not None and form_5
         else None
     )
+    if reasons or round_status == "unknown":
+        certainty: Literal["final", "preliminary", "unverified"] = "unverified"
+    elif round_status not in {None, "complete"}:
+        certainty = "preliminary"
+    else:
+        certainty = "final"
+    if round_status not in {None, "complete"}:
+        reasons.append("Bankens rundedata er ikke afsluttet")
     return BankAnalysis(
         available_bank,
         investment,
@@ -497,7 +540,7 @@ def build_bank_analysis(
         len(form_3),
         len(form_5),
         AnalysisProvenance(
-            "final" if not reasons else "unverified",
+            certainty,
             () if round_number is None else (round_number,),
             1 if round_number is not None else 0,
             tuple(dict.fromkeys(reasons)),
@@ -505,8 +548,10 @@ def build_bank_analysis(
     )
 
 
-def _player_id(entry: PlayerEntry) -> int:
-    return entry.entry_id if entry.entry_id is not None else entry.source_index
+def _player_sort_key(entry: PlayerEntry) -> tuple[bool, int]:
+    if entry.entry_id is not None:
+        return False, entry.entry_id
+    return True, entry.source_index
 
 
 def build_team_decision_ledger(
@@ -536,7 +581,7 @@ def build_team_decision_ledger(
         player_snapshot = players.newest(game, current_round)
         player_map = (
             {} if player_snapshot is None else
-            {_player_id(entry): entry for entry in player_snapshot.statistics.entries}
+            {entry.entry_id: entry for entry in player_snapshot.statistics.entries if entry.entry_id is not None}
         )
         bought_values = [player_map.get(player_id) for player_id in bought_ids]
         sold_values = [player_map.get(player_id) for player_id in sold_ids]
@@ -554,7 +599,7 @@ def build_team_decision_ledger(
         fee = (
             abs(summary.transfer)
             if rules.verified and rules.transfer_summary_is_fee and summary.transfer is not None
-            else rules.transfer_fee(purchase_total)
+            else rules.transfer_fee(purchase_total, round_number=current_round)
         )
         if fee is None:
             reasons.append("Transfergebyret er ikke verificeret")
@@ -642,21 +687,25 @@ def build_group_exposure(
     )
 
 
-def _form_for_player(
-    players: PlayerStatisticsIndex, game: GameUrl, player_id: int
-) -> float | None:
-    values: dict[int, int] = {}
-    for snapshot in players.for_game(game):
-        if snapshot.statistics.round_status != "complete":
-            continue
-        entry = next(
-            (item for item in snapshot.statistics.entries if _player_id(item) == player_id),
-            None,
+def historical_growth_windows(
+    players: PlayerStatisticsIndex, game: GameUrl, round_number: int
+) -> dict[int, tuple[float | None, float | None]]:
+    """Build stable-player form windows through an inclusive historical round."""
+    values: dict[int, list[int]] = {}
+    for snapshot in players.per_round(game, round_number=round_number, completed_only=True):
+        for player_id, growth in {
+            entry.entry_id: entry.round_growth
+            for entry in snapshot.statistics.entries
+            if entry.entry_id is not None and entry.round_growth is not None
+        }.items():
+            values.setdefault(player_id, []).append(growth)
+    return {
+        player_id: (
+            mean(series[-3:]) if len(series) >= 3 else None,
+            mean(series[-5:]) if len(series) >= 5 else None,
         )
-        if entry is not None and entry.round_growth is not None:
-            values[snapshot.statistics.round_number] = entry.round_growth
-    ordered = [value for _, value in sorted(values.items())]
-    return mean(ordered[-3:]) if len(ordered) >= 3 else None
+        for player_id, series in values.items()
+    }
 
 
 def build_group_comparison(
@@ -682,7 +731,7 @@ def build_group_comparison(
     player_snapshot = players.newest(group.game, round_number)
     growth = (
         {} if player_snapshot is None else
-        {_player_id(entry): entry.round_growth for entry in player_snapshot.statistics.entries}
+        {entry.entry_id: entry.round_growth for entry in player_snapshot.statistics.entries if entry.entry_id is not None}
     )
     differential = (*own_only_ids, *leader_only_ids)
     actual = 0 if not differential else None
@@ -690,8 +739,9 @@ def build_group_comparison(
         actual = sum(growth[player_id] for player_id in own_only_ids) - sum(
             growth[player_id] for player_id in leader_only_ids
         )
-    own_forms = [_form_for_player(players, group.game, player_id) for player_id in own_only_ids]
-    leader_forms = [_form_for_player(players, group.game, player_id) for player_id in leader_only_ids]
+    windows = historical_growth_windows(players, group.game, round_number) if differential else {}
+    own_forms = [windows.get(player_id, (None, None))[0] for player_id in own_only_ids]
+    leader_forms = [windows.get(player_id, (None, None))[0] for player_id in leader_only_ids]
     form_proxy = 0.0 if not differential else None
     if differential and all(value is not None for value in (*own_forms, *leader_forms)):
         form_proxy = sum(value for value in own_forms if value is not None) - sum(
@@ -703,7 +753,24 @@ def build_group_comparison(
     if form_proxy is None:
         reasons.append("Tre afsluttede formrunder mangler for en eller flere differentspillere")
     summary = snapshots.summary_for(group.game, own_team_id, round_number)
-    certainty = "final" if actual is not None and summary and summary[1].round_status == "complete" else "preliminary"
+    own_complete = summary is not None and summary[1].round_status == "complete"
+    leader_complete = leader.summary is not None and leader.summary.round_status == "complete"
+    players_complete = not differential or (
+        player_snapshot is not None and player_snapshot.statistics.round_status == "complete"
+    )
+    if not own_complete:
+        reasons.append("Eget holds rundedata er ikke afsluttet")
+    if not leader_complete:
+        reasons.append("Gruppeførerens rundedata er ikke afsluttet")
+    if not players_complete:
+        reasons.append("Spillernes rundedata er ikke afsluttet")
+    certainty: Literal["final", "preliminary", "unverified"]
+    if actual is not None and own_complete and leader_complete and players_complete:
+        certainty = "final"
+    elif actual is not None or form_proxy is not None:
+        certainty = "preliminary"
+    else:
+        certainty = "unverified"
     return GroupComparison(
         own_team_id,
         leader.team_id,
@@ -718,19 +785,6 @@ def build_group_comparison(
     )
 
 
-def _position(value: str) -> str:
-    aliases = {
-        "målmand": "goalkeeper", "keeper": "goalkeeper",
-        "forsvar": "defender", "forsvarer": "defender",
-        "midt": "midfielder", "midtbane": "midfielder",
-        "angreb": "forward", "angriber": "forward", "attacker": "forward",
-        "kører": "driver", "konstruktør": "constructor",
-        "konstruktoer": "constructor", "pit crew": "pitcrew", "pit-crew": "pitcrew",
-    }
-    normalized = " ".join(value.strip().casefold().split())
-    return aliases.get(normalized, normalized)
-
-
 def optimize_ideal_team(
     entries: Iterable[PlayerEntry],
     rules: GameRuleProfile,
@@ -740,34 +794,46 @@ def optimize_ideal_team(
     timeout_seconds: float = 5.0,
 ) -> IdealTeamResult:
     reasons: list[str] = []
-    if not rules.verified or rules.roster_size is None:
+    if not rules.verified:
         reasons.append("Spillets sæsonregler er ikke verificeret")
-    if rules.budget_enabled is None:
-        reasons.append("Budgetreglen er ikke verificeret")
-    if not rules.position_limits and (
-        rules.category_count is None or rules.category_size is None
-    ):
-        reasons.append("Formation eller kategoriregler mangler")
+    messages = {
+        "roster_size": "Trupstørrelsen mangler",
+        "budget_enabled": "Budgetreglen er ikke verificeret",
+        "salary_cap": "Budgetgrænsen mangler",
+        "formation": "Formation eller kategoriregler mangler",
+        "position_limits": "Positionsgrænserne mangler",
+        "max_from_team": "Grænsen for spillere pr. hold mangler",
+        "categories": "Kategorireglerne mangler",
+        "sport": "Spillets sport understøttes ikke",
+    }
+    reasons.extend(messages[field] for field in rules.missing_roster_rules())
     if not round_complete:
         reasons.append("Runden er ikke afsluttet")
-    if rules.budget_enabled and rules.salary_cap is None:
-        reasons.append("Budgetgrænsen mangler")
     source = tuple(entries)
     missing_growth = sum(entry.round_growth is None for entry in source)
+    stable_ids = [entry.entry_id for entry in source if entry.entry_id is not None]
+    if len(stable_ids) != len(set(stable_ids)):
+        reasons.append("Spillersnapshotet indeholder gentagne spiller-ID'er")
     if reasons:
         return IdealTeamResult(
             "unverified", (), None, None, None, missing_growth, 0,
             AnalysisProvenance("unverified", () if round_number is None else (round_number,), 0, tuple(reasons)),
         )
     assert rules.roster_size is not None
-    limits = {position: (minimum, maximum) for position, minimum, maximum in rules.position_limits}
+    profile = rules.to_transfer_profile()
+
+    @cache
+    def position_of(value: str) -> str:
+        return normalize_roster_position(profile, value)
+
+    limits = normalize_position_limits(rules.position_limits, position_of)
     candidates = [entry for entry in source if entry.round_growth is not None]
     if limits:
-        candidates = [entry for entry in candidates if _position(entry.position) in limits]
+        candidates = [entry for entry in candidates if position_of(entry.position) in limits]
     candidates.sort(
         key=lambda entry: (
             -int(entry.round_growth or 0), entry.value,
-            _player_id(entry), entry.name.casefold(),
+            _player_sort_key(entry), entry.name.casefold(),
         )
     )
     root_upper_bound = (
@@ -779,22 +845,22 @@ def optimize_ideal_team(
     best: tuple[PlayerEntry, ...] | None = None
     best_objective: int | None = None
     best_cost: int | None = None
-    best_keys: tuple[int, ...] | None = None
+    best_keys: tuple[tuple[bool, int], ...] | None = None
     explored = 0
     timed_out = timeout_seconds <= 0
 
-    def valid_final(selected: list[PlayerEntry], counts: Counter[str]) -> bool:
+    def valid_final(selected: tuple[PlayerEntry, ...], counts: Counter[str]) -> bool:
         if len(selected) != rules.roster_size:
             return False
         if any(not (minimum <= counts[position] <= maximum) for position, (minimum, maximum) in limits.items()):
             return False
         if rules.category_count is not None and rules.category_size is not None:
-            categories = Counter(_position(entry.position) for entry in selected)
+            categories = Counter(position_of(entry.position) for entry in selected)
             if len(categories) != rules.category_count or any(value != rules.category_size for value in categories.values()):
                 return False
         return True
 
-    def better(objective: int, cost: int, keys: tuple[int, ...]) -> bool:
+    def better(objective: int, cost: int, keys: tuple[tuple[bool, int], ...]) -> bool:
         return best_objective is None or (
             objective > best_objective
             or objective == best_objective and (
@@ -803,76 +869,61 @@ def optimize_ideal_team(
             )
         )
 
-    def search(
-        index: int,
-        selected: list[PlayerEntry],
-        objective: int,
-        cost: int,
-        positions: Counter[str],
-        teams: Counter[str],
-    ) -> None:
-        nonlocal best, best_objective, best_cost, best_keys, explored, timed_out
+    frontier: list[tuple[int, tuple[PlayerEntry, ...], int, int]] = [(0, (), 0, 0)]
+    while frontier and not timed_out:
+        index, selected, objective, cost = frontier.pop()
         explored += 1
         if explored % 1024 == 0 and perf_counter() >= deadline:
             timed_out = True
-            return
+            break
         need = rules.roster_size - len(selected)
-        remaining = len(candidates) - index
-        if need < 0 or remaining < need or timed_out:
-            return
+        if len(candidates) - index < need:
+            continue
         if rules.budget_enabled and rules.salary_cap is not None and cost > rules.salary_cap:
-            return
+            continue
         if need:
             top_bound = objective + sum(int(item.round_growth or 0) for item in candidates[index:index + need])
             if best_objective is not None and top_bound < best_objective:
-                return
+                continue
             if rules.budget_enabled and rules.salary_cap is not None:
                 cheapest = sorted(item.value for item in candidates[index:])[:need]
                 if len(cheapest) < need or cost + sum(cheapest) > rules.salary_cap:
-                    return
+                    continue
+        positions = Counter(position_of(item.position) for item in selected)
         if limits:
-            remaining_positions = Counter(_position(item.position) for item in candidates[index:])
-            for position, (minimum, maximum) in limits.items():
-                if positions[position] > maximum or positions[position] + remaining_positions[position] < minimum:
-                    return
+            remaining_positions = Counter(position_of(item.position) for item in candidates[index:])
+            if any(
+                positions[position] > maximum or positions[position] + remaining_positions[position] < minimum
+                for position, (minimum, maximum) in limits.items()
+            ):
+                continue
         if need == 0:
             if valid_final(selected, positions):
-                keys = tuple(sorted(_player_id(item) for item in selected))
+                keys = tuple(sorted(_player_sort_key(item) for item in selected))
                 if better(objective, cost, keys):
-                    best = tuple(selected)
+                    best = selected
                     best_objective = objective
                     best_cost = cost
                     best_keys = keys
-            return
-        if index >= len(candidates):
-            return
+            continue
         entry = candidates[index]
-        position = _position(entry.position)
+        position = position_of(entry.position)
         team = entry.team.strip().casefold()
         can_include = not limits or positions[position] < limits[position][1]
         if rules.category_size is not None and positions[position] >= rules.category_size:
             can_include = False
-        if rules.max_from_team is not None and team and teams[team] >= rules.max_from_team:
+        if rules.max_from_team is not None and team and sum(
+            item.team.strip().casefold() == team for item in selected
+        ) >= rules.max_from_team:
             can_include = False
+        frontier.append((index + 1, selected, objective, cost))
         if can_include:
-            selected.append(entry)
-            positions[position] += 1
-            teams[team] += 1
-            search(
+            frontier.append((
                 index + 1,
-                selected,
+                (*selected, entry),
                 objective + int(entry.round_growth or 0),
                 cost + entry.value,
-                positions,
-                teams,
-            )
-            teams[team] -= 1
-            positions[position] -= 1
-            selected.pop()
-        search(index + 1, selected, objective, cost, positions, teams)
-
-    if not timed_out:
-        search(0, [], 0, 0, Counter(), Counter())
+            ))
     status: Literal["optimal", "timeout", "infeasible", "unverified"] = (
         "timeout" if timed_out else "optimal" if best is not None else "infeasible"
     )
@@ -909,6 +960,101 @@ def _percentile(values: list[int], percentile: float) -> float:
     return ordered[lower] * (1 - fraction) + ordered[upper] * fraction
 
 
+def completed_model_vectors(
+    players: PlayerStatisticsIndex, game: GameUrl, through_round: int
+) -> tuple[tuple[tuple[int, dict[str, int | None]], ...], dict[str, str]]:
+    """Use one completed correction per round and stable catalogue identities."""
+    vectors = []
+    positions: dict[str, str] = {}
+    for snapshot in players.per_round(game, round_number=through_round, completed_only=True):
+        vector = {}
+        for entry in snapshot.statistics.entries:
+            if entry.entry_id is not None:
+                key = str(entry.entry_id)
+                vector[key] = entry.round_growth
+                positions[key] = entry.position
+        vectors.append((snapshot.statistics.round_number, vector))
+    return tuple(vectors), positions
+
+
+def assess_model_transfer(
+    team_snapshot: TeamSnapshot,
+    player_snapshot: PlayerStatisticsSnapshot,
+    rules: GameRuleProfile,
+    *,
+    sold_id: int,
+    bought_id: int,
+    final_round: int | None = None,
+) -> ModelTransferFeasibility:
+    """Check a next-round swap using current local evidence and the same captain."""
+    team = team_snapshot.team
+    players = player_snapshot.statistics
+    current_round = team.overview.current_round
+    target_round = current_round + 1
+    if final_round is not None and target_round > final_round:
+        return ModelTransferFeasibility("invalid", target_round, ("Spillet har ingen efterfølgende runde",))
+
+    profile = rules.to_transfer_profile()
+    if not profile.known or rules.captain_count is None or rules.free_through_round is None:
+        return ModelTransferFeasibility("unverified", target_round, ("Verificerede transferregler mangler",))
+
+    if (
+        team_snapshot.identity[:2] != player_snapshot.identity[:2]
+        or team_snapshot.identity[:2] != rules.identity
+        or rules.game_id is not None and team.game_id != rules.game_id
+        or current_round < 1
+        or players.round_number != current_round
+        or players.unit != team.overview.unit
+        or rules.budget_enabled != (players.unit == "money")
+    ):
+        return ModelTransferFeasibility("unverified", target_round, ("Spil, rundedata og regler stemmer ikke overens",))
+
+    team_round = next((summary for summary in team.history if summary.round_number == current_round), None)
+    if team_round is None or team_round.round_status != "complete" or players.round_status != "complete":
+        return ModelTransferFeasibility("unverified", target_round, ("Byttet kræver afsluttede hold- og spillersnapshots",))
+
+    roster = {entry.player_id: entry for entry in team.roster}
+    catalogue = {entry.entry_id: entry for entry in players.entries if entry.entry_id is not None}
+    if len(roster) != len(team.roster) or len(catalogue) != sum(entry.entry_id is not None for entry in players.entries):
+        return ModelTransferFeasibility("unverified", target_round, ("Kilderne har gentagne spiller-ID'er",))
+    if sold_id not in roster or bought_id not in catalogue or bought_id in roster:
+        return ModelTransferFeasibility("invalid", target_round, ("Byttet kræver en spiller på holdet og et nyt køb fra kataloget",))
+
+    if rules.budget_enabled and (
+        team.overview.bank is None
+        or rules.transfer_fee_basis_points is None
+        or rules.transfer_fee_basis_points > 0 and rules.fee_free_through_round is None
+        or not roster_prices_match(team.roster, catalogue)
+    ):
+        return ModelTransferFeasibility("unverified", target_round, ("Banksaldo, priser eller gebyrregler mangler eller er uforenelige",))
+    if target_round > rules.free_through_round and team.overview.substitutions_remaining is None:
+        return ModelTransferFeasibility("unverified", target_round, ("Den resterende kontraktsaldo mangler",))
+
+    captain_ids = tuple(
+        entry.player_id for entry in team.roster
+        if entry.role.strip().casefold() in {"captain", "kaptajn"}
+    )
+    if len(captain_ids) != rules.captain_count:
+        return ModelTransferFeasibility("unverified", target_round, ("De registrerede kaptajnroller mangler eller er uforenelige",))
+    validation = simulate_transfers(profile, TransferScenario(
+        initial_roster=team.roster,
+        available_players=tuple(catalogue.values()),
+        sold_player_ids=(sold_id,),
+        bought_player_ids=(bought_id,),
+        starting_bank=team.overview.bank,
+        contracts_remaining=team.overview.substitutions_remaining,
+        target_round=target_round,
+        team_round=current_round,
+        player_round=players.round_number,
+        captain_player_ids=captain_ids,
+        team_round_status=team_round.round_status,
+        player_round_status=players.round_status,
+    ))
+    if validation.status == "valid":
+        return ModelTransferFeasibility("valid", target_round)
+    return ModelTransferFeasibility(validation.status, target_round, validation.errors or validation.warnings)
+
+
 def simulate_transfer_scenario(
     round_vectors: Iterable[tuple[int, Mapping[str, int | None]]],
     baseline_player_keys: Iterable[str],
@@ -918,8 +1064,11 @@ def simulate_transfer_scenario(
     simulations: int = 10_000,
     horizon: int = 3,
     seed: int | None = None,
+    descriptive_only: bool = False,
 ) -> SimulationResult:
     vectors = tuple(sorted(round_vectors, key=lambda item: item[0]))
+    if len({round_number for round_number, _ in vectors}) != len(vectors):
+        raise ValueError("Modellen kræver én observation pr. runde")
     baseline = tuple(sorted(set(baseline_player_keys)))
     scenario = tuple(sorted(set(scenario_player_keys)))
     differential = tuple(sorted(set(baseline) ^ set(scenario)))
@@ -933,6 +1082,8 @@ def simulate_transfer_scenario(
     reasons: list[str] = []
     if not differential:
         reasons.append("Scenariet er identisk med baseline")
+    if descriptive_only:
+        reasons.append("Hypotetisk sammenligning uden verificeret bytte")
     prepared: list[tuple[int, int]] = []
     position_map = positions or {}
     for round_number, vector in vectors:
@@ -968,7 +1119,7 @@ def simulate_transfer_scenario(
     model_errors: list[float] = []
     latest_errors: list[float] = []
     form_errors: list[float] = []
-    if len(observed) >= 8:
+    if len(observed) >= 8 and not descriptive_only:
         for position in range(5, len(observed)):
             history = observed[:position]
             actual = observed[position]
@@ -980,7 +1131,8 @@ def simulate_transfer_scenario(
     backtest_latest = mean(latest_errors) if latest_errors else None
     backtest_form = mean(form_errors) if form_errors else None
     provenance = AnalysisProvenance(
-        "final" if len(prepared) >= 5 else "preliminary" if len(prepared) >= 3 else "unverified",
+        "final" if len(prepared) >= 5 and not descriptive_only
+        else "preliminary" if len(prepared) >= 3 else "unverified",
         tuple(round_number for round_number, _ in prepared),
         len(prepared),
         tuple(dict.fromkeys(reasons)),
@@ -1004,7 +1156,7 @@ def simulate_transfer_scenario(
             backtest_form_3_mae=backtest_form,
             provenance=provenance,
         )
-    if len(prepared) < 5:
+    if len(prepared) < 5 or descriptive_only:
         return SimulationResult(
             status="descriptive",
             simulations=0,

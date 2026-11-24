@@ -22,7 +22,7 @@ from holdet_lib.data_packages import DataPackage, package_to_dict
 from holdet_lib.errors import PayloadError
 from holdet_lib.groups import GroupStore, HubConfiguration
 from holdet_lib.hall_of_fame import HallOfFameStore
-from holdet_lib.hub_settings import HubSettingsStore
+from holdet_lib.hub_settings import HubSettingsStore, build_effective_manager_settings
 from holdet_lib.imports import ImportPreview, apply_import, preview_import
 from holdet_lib.integrity import (
     IntegrityRepairPreview,
@@ -42,7 +42,7 @@ from holdet_lib.maintenance import (
     plan_snapshot_retention,
 )
 from holdet_lib.paths import AppPaths
-from holdet_lib.privacy import build_support_bundle
+from holdet_lib.privacy import SUPPORT_BUNDLE_FILENAME, build_support_bundle
 from holdet_lib.reports import (
     ReportStore,
     build_manager_game_report_package,
@@ -258,17 +258,19 @@ def _report_actions(package: DataPackage, *, title: str, stem: str, paths: AppPa
             icon=":material/download:",
         )
 
-    st.markdown("#### Anonymiseret supportpakke")
+    st.markdown("#### Pseudonymiseret supportpakke")
     profile = st.segmented_control(
-        "Anonymiseringsprofil",
+        "Privatlivsprofil",
         ("share", "debug"),
         format_func=lambda value: "Deling" if value == "share" else "Fejlsøgning",
         default="share",
+        required=True,
         key=f"{key}-privacy",
     )
     st.caption(
-        "Pakken er ikke-gendannelig og har ingen reversibel pseudonymnøgle. "
-        "Fejlsøgning fjerner desuden stier, URL'er, noter, tags og genkendelige labels."
+        "Supportpakken kan arkiveres. Navne og id'er får nye pseudonymer i hver pakke. "
+        "Fejlsøgning udelader også navnefelter og kildetidspunkter. "
+        "Bevarede sportsmålinger kan stadig genkendes."
     )
     privacy_profile = str(profile or "share")
     support_key = f"{key}-support"
@@ -279,7 +281,7 @@ def _report_actions(package: DataPackage, *, title: str, stem: str, paths: AppPa
         or support.privacy_profile != privacy_profile
     ):
         st.session_state.pop(support_key, None)
-    if st.button("Forbered anonymiseret ZIP", icon=":material/privacy_tip:", key=f"{key}-prepare-support"):
+    if st.button("Forbered supportpakke", icon=":material/privacy_tip:", key=f"{key}-prepare-support"):
         st.session_state[support_key] = _PreparedSupport(
             signature, privacy_profile, build_support_bundle(package, privacy_profile),
             datetime.now().astimezone(),
@@ -293,7 +295,7 @@ def _report_actions(package: DataPackage, *, title: str, stem: str, paths: AppPa
         st.download_button(
             "Download supportpakke",
             support.content,
-            file_name=f"{stem}-support.zip",
+            file_name=SUPPORT_BUNDLE_FILENAME,
             mime="application/zip",
             icon=":material/download:",
             key=f"{key}-download-support",
@@ -316,9 +318,10 @@ def render_exports(
         ("game", "season"),
         format_func=lambda value: "Managerspil" if value == "game" else "Sæson",
         default="game",
+        required=True,
         key="data-report-scope",
     )
-    if scope == "game":
+    if scope != "season":
         games = tuple(item for item in configuration.games if not item.is_archived)
         if not games:
             st.info("Tilføj et managerspil, før en managerspilrapport kan bygges.")
@@ -359,9 +362,12 @@ def render_exports(
     title = f"Sæson – {season.name}"
     stem = f"season-{season.season_id}"
     if st.button("Forbered sæsonrapport", icon=":material/description:", key="prepare-season-report"):
+        effective = build_effective_manager_settings(settings, configuration.groups, index)
         st.session_state["prepared-season-report"] = _prepare_report(
             season.season_id,
-            build_season_report_package(season, events, settings.hall_of_fame_score),
+            build_season_report_package(
+                season, events, effective.hall_of_fame_score, settings=effective,
+            ),
             title, stem,
         )
     prepared = _prepared_report("prepared-season-report", season.season_id, title, stem)

@@ -1001,7 +1001,7 @@ class HubSettingsStore:
     @configuration_transaction
     def save_if_current(self, expected: HubSettings, candidate: HubSettings) -> None:
         """Reject an edit based on settings superseded by another writer."""
-        if self.path.exists() and _settings_to_dict(self.load()) != _settings_to_dict(expected):
+        if _settings_to_dict(self.load()) != _settings_to_dict(expected):
             raise ValueError("Indstillingerne er ændret; genindlæs og prøv igen")
         self.save(candidate)
 

@@ -10,7 +10,12 @@ from typing import Literal
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from .errors import PayloadError
-from .filenames import collision_suffix, round_output_stem
+from .filenames import (
+    PLAYER_SNAPSHOT_GLOB,
+    TEAM_SNAPSHOT_GLOB,
+    collision_suffix,
+    round_output_stem,
+)
 from .models import GameUrl, RoundSummary, ScrapedGame, ScrapedTeam
 from .output import sanitize_path_component
 from .persistence import aware_local, publish_immutable_text
@@ -42,6 +47,18 @@ def _game_key(game: GameSelector) -> tuple[str | None, str]:
     if isinstance(game, tuple):
         return game[0].casefold(), game[1]
     return None, game
+
+
+def _snapshot_generated_at(payload: object) -> datetime:
+    if not isinstance(payload, dict):
+        raise PayloadError("Snapshottets rod skal være et objekt")
+    value = payload.get("generated_at")
+    if not isinstance(value, str):
+        raise PayloadError("Snapshottets generated_at skal være tekst")
+    generated_at = datetime.fromisoformat(value)
+    if generated_at.tzinfo is not None:
+        return generated_at
+    return generated_at.astimezone()
 
 
 @dataclass(frozen=True, slots=True)
@@ -248,17 +265,21 @@ class PlayerStatisticsIndex:
         *,
         round_number: int | None = None,
         generated_at: datetime | None = None,
+        completed_only: bool = False,
     ) -> tuple[PlayerStatisticsSnapshot, ...]:
         """Return each round's newest eligible fetch, ordered by round.
 
         Keep the whole snapshot so values, completion status and timestamps
-        always refer to the same observation.
+        always refer to the same observation. For completed history, select
+        the newest completed fetch for each round.
         """
 
         selected: dict[int, PlayerStatisticsSnapshot] = {}
         for snapshot in self.through(
             game, round_number=round_number, generated_at=generated_at
         ).for_game(game):
+            if completed_only and snapshot.statistics.round_status != "complete":
+                continue
             selected.setdefault(snapshot.statistics.round_number, snapshot)
         return tuple(selected[number] for number in sorted(selected))
 
@@ -305,17 +326,10 @@ class SnapshotStore:
         warnings: list[str] = []
         if not self.output_dir.exists():
             return SnapshotIndex((), ())
-        for path in self.output_dir.rglob("team-round*.json"):
+        for path in self.output_dir.rglob(TEAM_SNAPSHOT_GLOB, case_sensitive=False):
             try:
-                payload = json.loads(path.read_text(encoding="utf-8"))
-                if not isinstance(payload, dict):
-                    raise PayloadError("Snapshottets rod skal være et objekt")
-                generated_raw = payload.get("generated_at")
-                if not isinstance(generated_raw, str):
-                    raise PayloadError("Snapshottets generated_at skal være tekst")
-                generated_at = datetime.fromisoformat(generated_raw)
-                if generated_at.tzinfo is None:
-                    generated_at = generated_at.astimezone()
+                payload = json.loads(path.read_text(encoding="utf-8-sig"))
+                generated_at = _snapshot_generated_at(payload)
                 snapshots.append(
                     TeamSnapshot(path.resolve(), generated_at, team_from_dict(payload))
                 )
@@ -354,36 +368,39 @@ class PlayerStatisticsStore:
     def __init__(self, snapshot_dir: Path | str) -> None:
         self.snapshot_dir = Path(snapshot_dir)
 
-    def _game_directory(self, game: GameUrl) -> Path:
+    def _game_directory(self, game: GameUrl | str) -> Path:
         return (
             self.snapshot_dir
-            / sanitize_path_component(game.slug, fallback="game")
+            / sanitize_path_component(_game_key(game)[1], fallback="game")
             / "players"
         )
 
-    def scan(self, game: GameUrl | None = None) -> PlayerStatisticsIndex:
+    def scan(self, game: GameUrl | str | None = None) -> PlayerStatisticsIndex:
+        """Scan all snapshots, an exact game, or a case-insensitive slug across locales."""
         snapshots: list[PlayerStatisticsSnapshot] = []
         warnings: list[str] = []
-        root = self._game_directory(game) if game is not None else self.snapshot_dir
+        selection = _game_key(game) if game is not None else None
+        root = self._game_directory(selection[1]) if selection is not None else self.snapshot_dir
         if not root.exists():
             return PlayerStatisticsIndex((), ())
-        paths = root.glob("player-round*.json") if game is not None else root.rglob("player-round*.json")
+        if isinstance(game, str) and not root.resolve().is_relative_to(self.snapshot_dir.resolve()):
+            return PlayerStatisticsIndex((), ("Spillersnapshotmappen ligger uden for lageret",))
+        glob = root.glob if game is not None else root.rglob
+        paths = glob(PLAYER_SNAPSHOT_GLOB, case_sensitive=False)
         for path in paths:
             try:
-                payload = json.loads(path.read_text(encoding="utf-8"))
-                if not isinstance(payload, dict):
-                    raise PayloadError("Spillersnapshottets rod skal være et objekt")
-                generated_raw = payload.get("generated_at")
-                if not isinstance(generated_raw, str):
-                    raise PayloadError("Spillersnapshottets generated_at skal være tekst")
-                generated_at = datetime.fromisoformat(generated_raw)
-                if generated_at.tzinfo is None:
-                    generated_at = generated_at.astimezone()
+                payload = json.loads(path.read_text(encoding="utf-8-sig"))
+                generated_at = _snapshot_generated_at(payload)
                 statistics = player_statistics_from_dict(payload)
-                if game is not None and (
-                    statistics.game.locale.casefold(), statistics.game.slug
-                ) != (game.locale.casefold(), game.slug):
-                    raise PayloadError("Spillersnapshottet tilhører et andet spil")
+                if selection is not None:
+                    locale, slug = selection
+                    identity = statistics.game
+                    matches = (
+                        identity.slug.casefold() == slug.casefold() if locale is None
+                        else (identity.locale.casefold(), identity.slug) == selection
+                    )
+                    if not matches:
+                        raise PayloadError("Spillersnapshottet tilhører et andet spil")
                 snapshots.append(
                     PlayerStatisticsSnapshot(
                         path.resolve(), generated_at, statistics

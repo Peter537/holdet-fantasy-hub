@@ -260,6 +260,10 @@ def test_refresh_progress_and_manifest_distinguish_cache_and_failure() -> None:
         assert [item.completed_steps for item in events] == [0, 1, 1, 2, 2, 3]
         raw = json.loads(result.manifest_path.read_text(encoding="utf-8"))
         assert raw["schema_version"] == 3
+        assert known_schema_error(
+            "data/manifests/da--demo/game/refresh-round3.json",
+            result.manifest_path.read_bytes(),
+        ) is None
         assert next(step for step in raw["steps"] if step["step_id"] == "players")["requested_round"] == 3
         assert all(
             not Path(reference).is_absolute()
@@ -275,6 +279,9 @@ def test_manifest_store_dual_reads_and_rejects_unsafe_schema_two() -> None:
         store = holdet.ManifestStore(root / "manifests")
         path = store.write(_manifest(current))
         loaded = store.load(path)
+        assert known_schema_error(
+            "data/manifests/da--demo/game/refresh-round3.json", path.read_bytes()
+        ) is None
         assert loaded.schema_version == 2
         assert loaded.steps[0].status == "fetched"
         assert loaded.origin_run_id == loaded.run_id
@@ -309,6 +316,9 @@ def test_manifest_store_dual_reads_and_rejects_unsafe_schema_two() -> None:
             now=current - timedelta(days=1),
         )
         legacy = store.load(legacy_path)
+        assert known_schema_error(
+            "data/manifests/da--demo/game/refresh-round2.json", legacy_path.read_bytes()
+        ) is None
         assert [item.status for item in legacy.steps[:2]] == [
             "not_recorded",
             "not_recorded",
@@ -334,25 +344,12 @@ def test_manifest_store_dual_reads_and_rejects_unsafe_schema_two() -> None:
             store.write(unsafe)
 
 
-def test_backup_validation_accepts_supported_manifest_schemas() -> None:
+@pytest.mark.parametrize("version", [1, 2, 3, 4])
+def test_backup_validation_rejects_version_only_manifests(version: int) -> None:
     assert known_schema_error(
         "data/manifests/da--demo/game/refresh-round3.json",
-        b'{"schema_version": 1}',
-    ) is None
-    assert known_schema_error(
-        "data/manifests/da--demo/game/refresh-round3.json",
-        b'{"schema_version": 2}',
-    ) is None
-    assert known_schema_error(
-        "data/manifests/da--demo/game/refresh-round3.json",
-        b'{"schema_version": 3}',
-    ) is None
-    assert "ukendt manifestschema" in str(
-        known_schema_error(
-            "data/manifests/da--demo/game/refresh-round3.json",
-            b'{"schema_version": 4}',
-        )
-    )
+        json.dumps({"schema_version": version}).encode("utf-8"),
+    ) is not None
 
 
 def test_daily_age_boundary_and_newer_manifest_failure_drive_stale_plan() -> None:
@@ -748,7 +745,8 @@ def test_postprocess_failure_isolated_and_retryable() -> None:
         assert [item.step_id for item in stale.selected_steps] == ["postprocess"]
 
 
-def test_alert_persistence_failure_does_not_reclassify_fetched_players() -> None:
+@pytest.mark.parametrize("advance_round", (False, True))
+def test_alert_persistence_failure_does_not_reclassify_fetched_players(advance_round) -> None:
     current = datetime(2026, 8, 9, 12, tzinfo=timezone.utc)
     manager_game, group = _manager_game_and_group(1)
     adverse = replace(sample_statistics(3), round_status="complete")
@@ -816,6 +814,40 @@ def test_alert_persistence_failure_does_not_reclassify_fetched_players() -> None
         assert original_players.data_reference is not None
         assert players.scan(manager_game.game).newest(manager_game.game) is not None
 
+        class NoNetworkClient:
+            def __getattr__(self, name):
+                raise AssertionError(f"Netværk måtte ikke bruges: {name}")
+
+        metadata = _metadata(manager_game.game, current)
+        if advance_round:
+            upcoming = holdet.ScheduleRound(
+                4, current, current + timedelta(hours=1), current + timedelta(hours=2)
+            )
+            metadata = replace(metadata, final_round=4, rounds=(*metadata.rounds, upcoming))
+            snapshots.save_team_json(sample_team(1, current_round=4), now=current)
+            players.save(replace(adverse, round_number=4), now=current)
+        pending = result.manifest
+        for mode in (holdet.RefreshMode.STALE_ONLY, holdet.RefreshMode.RETRY_FAILED):
+            routine_plan = holdet.build_refresh_plan(
+                manager_game, (group,), snapshots.scan(), players.scan(manager_game.game),
+                metadata=metadata,
+                mode=mode, previous_manifest=pending, include_metadata=False,
+                include_postprocess=True, now=current + timedelta(seconds=10),
+            )
+            assert routine_plan.target_round == (4 if advance_round else 3)
+            assert [item.step_id for item in routine_plan.selected_steps] == ["postprocess"]
+            routine = holdet.refresh_manager_game(
+                manager_game, (group,), NoNetworkClient(), snapshots, players, manifests,
+                settings=settings, inbox_store=inbox, plan=routine_plan,
+                postprocess=lambda: None, now=current + timedelta(seconds=10),
+            )
+            pending = routine.manifest
+            assert pending is not None
+            step = next(item for item in pending.steps if item.step_id == "postprocess")
+            assert step.status == "failed_no_cache"
+            assert "oprindelige kørsel" in step.error
+            assert inbox.calls == 1
+
         retry = holdet.build_refresh_plan(
             manager_game,
             (group,),
@@ -830,10 +862,6 @@ def test_alert_persistence_failure_does_not_reclassify_fetched_players() -> None
         assert [item.step_id for item in retry.selected_steps] == ["postprocess"]
         newer_path = players.save(adverse, now=current + timedelta(seconds=30))
         inbox.fail = False
-
-        class NoNetworkClient:
-            def __getattr__(self, name):
-                raise AssertionError(f"Netværk måtte ikke bruges: {name}")
 
         retried = holdet.refresh_manager_game(
             manager_game,

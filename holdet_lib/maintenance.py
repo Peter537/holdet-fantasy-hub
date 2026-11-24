@@ -12,7 +12,9 @@ import shutil
 from uuid import uuid4
 import zipfile
 
+from .canonical_validation import is_refresh_run_file
 from .errors import PayloadError
+from .integrity import canonical_local_files
 from .paths import AppPaths
 from .persistence import aware_local
 from .storage import ManifestStore, PlayerStatisticsStore, SnapshotStore
@@ -96,32 +98,92 @@ def _game_from(root: Path, path: Path) -> str:
     return relative.parts[0] if len(relative.parts) > 1 else "Fælles"
 
 
+_CANONICAL_CATEGORIES = {
+    "snapshots": "Aktive snapshots",
+    "manifests": "Manifester/revisioner",
+    "group-revisions": "Manifester/revisioner",
+    "tournament-pairings": "Manifester/revisioner",
+    "refresh-runs": "Opdateringsjournaler",
+    "game-metadata": "Spilmetadata",
+    "fixtures": "Fixturecache",
+    "hall-of-fame": "Managerhistorik",
+    "rules": "Regelkilder",
+    "imports": "Importerede data",
+}
+
+
+def _canonical_inventory_location(relative: str) -> tuple[str, str]:
+    parts = relative.split("/")
+    if parts[0] == "config":
+        return "Fælles", "Konfiguration"
+    _, area, *local_path = parts
+    game = "Fælles"
+    if area in {"snapshots", "manifests"} and len(local_path) > 1:
+        game = local_path[0]
+    elif area == "rules" and len(local_path) > 2:
+        game = local_path[1]
+    elif area in {"game-metadata", "fixtures"}:
+        if local_path[0] == "revisions" and len(local_path) > 1:
+            identity = local_path[1]
+        else:
+            identity = local_path[0].removesuffix(".json")
+        game = identity.partition("--")[2] or "Fælles"
+    return game, _CANONICAL_CATEGORIES[area]
+
+
 def build_storage_inventory(paths: AppPaths) -> StorageInventory:
-    """Calculate exact bytes and file counts without creating directories."""
+    """Count durable owned files once, including the derived index and registry."""
 
     totals: dict[tuple[str, str], list[int]] = {}
+    seen: set[Path] = set()
+    scratch_directories = (
+        ".holdet-restore-", f".{paths.config_dir.name}.old-", f".{paths.data_dir.name}.old-",
+    )
+    journal_root = paths.refresh_run_dir.resolve()
 
-    def collect(root: Path, category: str, *, scoped: bool) -> None:
+    def record(path: Path, game: str, category: str) -> None:
+        if (
+            path in seen
+            or (path.name.startswith(".") and path.suffix.casefold() in {".tmp", ".partial", ".lock"})
+            or any(part.startswith(scratch_directories) for part in path.parts[:-1])
+        ):
+            return
+        if path.is_relative_to(journal_root) and not is_refresh_run_file(
+            path.relative_to(journal_root).as_posix()
+        ):
+            return
+        try:
+            size = path.stat().st_size
+        except FileNotFoundError:
+            return
+        seen.add(path)
+        values = totals.setdefault((game, category), [0, 0])
+        values[0] += 1
+        values[1] += size
+
+    for path, category in (
+        (paths.integrity_index_file, "Afledt integritetsindeks"),
+        (paths.artifact_registry_file, "Afledt eksportregister"),
+    ):
+        if path.is_file() and not path.is_symlink():
+            record(path.resolve(), "Fælles", category)
+    if paths.accounts_file.is_file() and not paths.accounts_file.is_symlink():
+        record(paths.accounts_file.resolve(), "Fælles", "Konfiguration")
+    for relative, path in canonical_local_files(paths):
+        record(path, *_canonical_inventory_location(relative))
+
+    for root, category, scoped in (
+        (paths.player_export_dir, "Afledte eksporter", True),
+        (paths.team_export_dir, "Afledte eksporter", True),
+        (paths.report_dir, "Afledte eksporter", True),
+        (paths.backup_dir, "Backups", False),
+        (paths.archive_dir, "Arkiver", False),
+    ):
+        resolved_root = root.resolve()
         for path in _files(root):
-            game = _game_from(root, path) if scoped else "Fælles"
-            values = totals.setdefault((game, category), [0, 0])
-            values[0] += 1
-            values[1] += path.stat().st_size
-
-    collect(paths.snapshot_dir, "Aktive snapshots", scoped=True)
-    collect(paths.manifest_dir, "Manifester/revisioner", scoped=True)
-    collect(paths.group_revision_dir, "Manifester/revisioner", scoped=False)
-    collect(paths.tournament_pairing_dir, "Manifester/revisioner", scoped=False)
-    if paths.rules_dir.exists():
-        for locale in paths.rules_dir.iterdir():
-            if locale.is_dir() and not locale.is_symlink():
-                collect(locale, "Regelkilder", scoped=True)
-    collect(paths.import_dir, "Importerede data", scoped=False)
-    collect(paths.player_export_dir, "Afledte eksporter", scoped=True)
-    collect(paths.team_export_dir, "Afledte eksporter", scoped=True)
-    collect(paths.report_dir, "Afledte eksporter", scoped=True)
-    collect(paths.backup_dir, "Backups", scoped=False)
-    collect(paths.archive_dir, "Arkiver", scoped=False)
+            if path.is_relative_to(resolved_root):
+                game = _game_from(resolved_root, path) if scoped else "Fælles"
+                record(path, game, category)
     rows = tuple(
         StorageUsage(game, category, values[0], values[1])
         for (game, category), values in sorted(
@@ -423,6 +485,47 @@ def _archive_retention_candidates_locked(
     return ArchiveResult(target.resolve(), len(candidates), required, removed, tuple(errors))
 
 
+def _old_usable_backups(
+    paths: AppPaths, canonical_roots: tuple[Path, ...],
+) -> tuple[CleanupCandidate, ...]:
+    from .backup import validate_backup
+
+    root = paths.backup_dir.resolve()
+    accounts_file = paths.accounts_file.resolve()
+    usable: list[tuple[datetime, int, CleanupCandidate]] = []
+    for path in _files(paths.backup_dir):
+        if (
+            path.suffix.casefold() != ".zip"
+            or path == accounts_file
+            or not path.is_relative_to(root)
+            or any(path.is_relative_to(canonical) for canonical in canonical_roots)
+        ):
+            continue
+        try:
+            before = path.stat()
+            validation = validate_backup(path)
+            after = path.stat()
+        except (OSError, RecursionError, OverflowError):
+            continue
+        if (
+            not validation.is_valid
+            or validation.manifest is None
+            or (before.st_ino, before.st_size, before.st_mtime_ns)
+            != (after.st_ino, after.st_size, after.st_mtime_ns)
+        ):
+            continue
+        usable.append((
+            validation.manifest.created_at,
+            after.st_mtime_ns,
+            CleanupCandidate(
+                path, "Gammel backup", after.st_size,
+                datetime.fromtimestamp(after.st_mtime).astimezone(),
+            ),
+        ))
+    usable.sort(key=lambda item: (item[0], item[1], str(item[2].path)))
+    return tuple(candidate for _, _, candidate in usable[:-1])
+
+
 def list_cleanup_candidates(paths: AppPaths) -> tuple[CleanupCandidate, ...]:
     # Old retention archives can contain a manifest's only remaining copy.
     # Do not offer such archives for deletion, including when provenance cannot
@@ -471,12 +574,26 @@ def list_cleanup_candidates(paths: AppPaths) -> tuple[CleanupCandidate, ...]:
         (paths.report_dir, "Afledt rapport"),
         (paths.archive_dir, "Mellemversionsarkiv"),
     )
+    canonical_roots = (paths.config_dir.resolve(), paths.data_dir.resolve())
+    backup_root = paths.backup_dir.resolve()
+    accounts_file = paths.accounts_file.resolve()
     result: list[CleanupCandidate] = []
+    seen: set[Path] = set()
     for root, category in roots:
+        resolved_root = root.resolve()
         for path in _files(root):
+            if (
+                path in seen
+                or path == accounts_file
+                or not path.is_relative_to(resolved_root)
+                or path.is_relative_to(backup_root)
+                or any(path.is_relative_to(canonical) for canonical in canonical_roots)
+            ):
+                continue
             if root == paths.archive_dir and not archive_deletable(path):
                 continue
             stat = path.stat()
+            seen.add(path)
             result.append(
                 CleanupCandidate(
                     path,
@@ -485,20 +602,7 @@ def list_cleanup_candidates(paths: AppPaths) -> tuple[CleanupCandidate, ...]:
                     datetime.fromtimestamp(stat.st_mtime).astimezone(),
                 )
             )
-    backups = sorted(
-        _files(paths.backup_dir),
-        key=lambda path: (path.stat().st_mtime_ns, str(path)),
-    )
-    for path in backups[:-1]:
-        file_stat = path.stat()
-        result.append(
-            CleanupCandidate(
-                path,
-                "Gammel backup",
-                file_stat.st_size,
-                datetime.fromtimestamp(file_stat.st_mtime).astimezone(),
-            )
-        )
+    result.extend(_old_usable_backups(paths, canonical_roots))
     return tuple(sorted(result, key=lambda item: (item.modified_at, str(item.path))))
 
 

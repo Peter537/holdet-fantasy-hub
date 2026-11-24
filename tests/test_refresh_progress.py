@@ -55,3 +55,47 @@ def test_running_update_keeps_waiting_games_queued(tmp_path):
     assert app.get("progress")[0].proto.value == 33
     assert any("I kø" in item.value for item in app.markdown)
     assert not any("afventer genoptagelse" in caption.value for caption in app.caption)
+
+
+def test_sessions_follow_active_runs_and_observe_fast_terminal_results(tmp_path):
+    def run(run_id, status, updated, title):
+        return {
+            "run_id": run_id, "updated_at": updated, "status": status,
+            "games": [{"game": {"name": title, "game": "example"}, "status": status}],
+        }
+
+    old = run("old", "partial", "2026-10-31T19:00:00+00:00", "Tidligere kørsel")
+    newer = run("newer", "success", "2026-11-01T18:00:00+00:00", "Seneste tidligere kørsel")
+    external = run("current", "running", "2026-11-01T19:00:00+00:00", "Aktuel kørsel")
+    fast = run("fast", "success", "2026-11-01T20:00:00+00:00", "Hurtig kørsel")
+    runs = [newer, old]
+    coordinator = SimpleNamespace(scan_runs=lambda: (runs, []), resume=Mock(), cancel=Mock())
+    with (
+        patch.object(workflows, "_coordinator", return_value=coordinator),
+        patch.object(workflows.st.cache_data, "clear") as clear,
+    ):
+        first = AppTest.from_function(progress_app, args=(tmp_path,))
+        second = AppTest.from_function(progress_app, args=(tmp_path,))
+        first.run(timeout=15)
+        first.selectbox(key="refresh-history:newer").set_value("old").run(timeout=15)
+        assert first.button(key="resume-refresh:old")
+
+        runs[:] = [external, newer, old]
+        for app in (first, second):
+            app.run(timeout=15)
+            assert not app.exception
+            assert any("Aktuel kørsel" in item.value for item in app.markdown)
+            assert app.button(key="cancel-refresh:current")
+
+        runs[:] = [fast, newer, old]
+        before = clear.call_count
+        for app in (first, second):
+            app.run(timeout=15)
+            assert not app.exception
+            assert any("Hurtig kørsel" in item.value for item in app.markdown)
+            assert not any(button.key == "cancel-refresh:current" for button in app.button)
+        assert clear.call_count == before + 2
+
+        first.selectbox(key="refresh-history:fast").set_value("old").run(timeout=15)
+        assert first.button(key="resume-refresh:old")
+        assert clear.call_count == before + 2

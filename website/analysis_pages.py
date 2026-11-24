@@ -17,7 +17,8 @@ from website.scouting_page import (
 
 from website.presentation import data_status_label, dataframe, format_relative_precise
 
-from website.navigation import PageId, page_link, relative_url
+from website.navigation import PageId, page_link, query_segmented_control, relative_url
+from website.game_access import editable_game
 
 from holdet_lib import (
     AnalysisInboxStore,
@@ -25,6 +26,7 @@ from holdet_lib import (
     DEFAULT_PLAYER_TAGS,
     FixtureStore,
     GameUrl,
+    GameMetadata,
     GameMetadataStore,
     GroupDefinition,
     HubSettingsStore,
@@ -43,11 +45,16 @@ from holdet_lib import (
     build_team_decision_ledger,
     optimize_ideal_team,
     player_identity,
-    rule_profile_for_game,
     simulate_transfer_scenario,
 )
-from holdet_lib.decision_analysis import IdealTeamResult
+from holdet_lib.decision_analysis import (
+    IdealTeamResult,
+    assess_model_transfer,
+    completed_model_vectors,
+    historical_growth_windows,
+)
 from holdet_lib.models import ScrapedGame
+from holdet_lib.rule_pages import RulePageStore
 from holdet_lib.rules import GameRuleProfile
 
 
@@ -138,19 +145,21 @@ def _curve_svg(points: tuple[tuple[int, int], ...], value_label: str) -> str:
     )
 
 
-def _rule_profile(manager_game: ManagerGame, paths: AppPaths):
+def _rules_and_metadata(
+    manager_game: ManagerGame, paths: AppPaths
+) -> tuple[GameRuleProfile, GameMetadata | None]:
     try:
         metadata = GameMetadataStore(paths.game_metadata_dir).load(manager_game.game)
     except (OSError, PayloadError, ValueError):
         metadata = None
-    if metadata is not None and metadata.rule_profile is not None:
-        return metadata.rule_profile
-    return rule_profile_for_game(
-        manager_game.game,
-        game_id=None if metadata is None else metadata.game_id,
-        salary_cap=None if metadata is None else metadata.salary_cap,
-        label=manager_game.name,
+    rules = RulePageStore(paths.rules_dir).effective_profile(
+        manager_game.game, metadata, label=manager_game.name,
     )
+    return rules, metadata
+
+
+def _rule_profile(manager_game: ManagerGame, paths: AppPaths) -> GameRuleProfile:
+    return _rules_and_metadata(manager_game, paths)[0]
 
 
 def _game_groups(
@@ -185,22 +194,18 @@ def _certainty(provenance) -> None:
 
 
 def _selected_analysis_panel(manager_game: ManagerGame) -> str:
-    labels = ("Beslutninger", "Gruppe", "Idealhold", "Eksperimentel")
-    slugs = ("decisions", "group", "ideal", "experimental")
-    requested = str(st.query_params.get("analysis", ""))
-    default = slugs.index(requested) if requested in slugs else 0
-    key = f"analysis-panel-{manager_game.game.locale}-{manager_game.game.slug}"
-    selected = st.segmented_control(
-        "Analyseområde",
-        labels,
-        default=labels[default],
-        key=key,
+    labels = {
+        "decisions": "Beslutninger",
+        "group": "Gruppe",
+        "ideal": "Idealhold",
+        "experimental": "Eksperimentel",
+    }
+    return query_segmented_control(
+        "Analyseområde", labels,
+        parameter="analysis",
+        default="decisions",
+        key=f"analysis-panel-{manager_game.game.locale}-{manager_game.game.slug}",
     )
-    selected = selected or labels[default]
-    slug = slugs[labels.index(selected)]
-    if requested != slug:
-        st.query_params["analysis"] = slug
-    return slug
 
 
 @st.fragment
@@ -417,36 +422,15 @@ def _decision_panel(
             )
         )
         if investment > 0:
-            growth_by_player: dict[str, dict[int, int]] = {}
-            for player_snapshot in player_index.for_game(manager_game.game):
-                if (
-                    player_snapshot.statistics.round_status != "complete"
-                    or player_snapshot.statistics.round_number > int(selected_round)
-                ):
-                    continue
-                for entry in player_snapshot.statistics.entries:
-                    if entry.round_growth is None:
-                        continue
-                    key = player_identity(manager_game.game, entry)
-                    growth_by_player.setdefault(key, {})[
-                        player_snapshot.statistics.round_number
-                    ] = entry.round_growth
-            windows = []
-            for values_by_round in growth_by_player.values():
-                values = [value for _, value in sorted(values_by_round.items())]
-                windows.append(
-                    (
-                        sum(values[-3:]) / 3 if len(values) >= 3 else None,
-                        sum(values[-5:]) / 5 if len(values) >= 5 else None,
-                    )
-                )
+            windows = historical_growth_windows(player_index, manager_game.game, int(selected_round))
             bank = build_bank_analysis(
                 int(located[1].bank),
                 investment,
                 rules,
                 actual_interest=located[1].interest,
                 round_number=int(selected_round),
-                historical_windows=windows,
+                round_status=located[1].round_status,
+                historical_windows=windows.values(),
             )
             columns = st.columns(3)
             columns[0].metric("Faktisk rente", _format(bank.actual_interest))
@@ -777,15 +761,19 @@ def _experimental_panel(
         format_func=options.__getitem__,
         key=f"model-team-{manager_game.game.slug}",
     )
-    latest_team = snapshots.newest(manager_game.game, int(team_id))
-    latest_players = player_index.newest(manager_game.game)
-    if latest_team is None or latest_players is None:
+    latest_team = max(
+        snapshots.for_team(manager_game.game, int(team_id)),
+        key=lambda item: (item.team.overview.current_round, item.generated_at),
+        default=None,
+    )
+    latest_players = player_index.latest_round(manager_game.game)
+    if latest_team is None or not latest_team.team.roster or latest_players is None:
         st.info("Modellen kræver både et hold- og spillersnapshot.")
         return
     roster_ids = {item.player_id for item in latest_team.team.roster}
     available = {
-        (item.entry_id if item.entry_id is not None else item.source_index): item
-        for item in latest_players.statistics.entries
+        item.entry_id: item for item in latest_players.statistics.entries
+        if item.entry_id is not None
     }
     sell_id = st.selectbox(
         "Spiller ud",
@@ -814,27 +802,38 @@ def _experimental_panel(
         str(player_id)
         for player_id in sorted((roster_ids - {int(sell_id)}) | {int(buy_id)})
     )
-    vectors = []
-    positions: dict[str, str] = {}
-    for snapshot in player_index.for_game(manager_game.game):
-        if snapshot.statistics.round_status != "complete":
-            continue
-        vector: dict[str, int | None] = {}
-        for item in snapshot.statistics.entries:
-            item_id = item.entry_id if item.entry_id is not None else item.source_index
-            vector[str(item_id)] = item.round_growth
-            positions[str(item_id)] = item.position
-        vectors.append((snapshot.statistics.round_number, vector))
-    result_key = f"simulation-result-{manager_game.game.slug}-{team_id}"
-    seed_text = st.text_input(
-        "Seed (valgfri)",
-        placeholder="Tomt felt bruger et deterministisk seed",
-        key=f"model-seed-{manager_game.game.slug}",
+    rules, metadata = _rules_and_metadata(manager_game, paths)
+    final_round = None if metadata is None else metadata.final_round
+    feasibility = assess_model_transfer(
+        latest_team, latest_players, rules, sold_id=int(sell_id), bought_id=int(buy_id),
+        final_round=final_round,
     )
-    input_signature = repr((baseline, scenario, positions, vectors, seed_text.strip()))
+    forecast = feasibility.status == "valid"
+    horizon = min(3, final_round - feasibility.round_number + 1) if forecast and final_round is not None else 3
+    if forecast:
+        st.caption(
+            f"Byttet opfylder reglerne for runde {feasibility.round_number} med de "
+            f"senest gemte data og samme kaptajn. Prognosen viser {horizon} runder."
+        )
+    else:
+        st.info("Der vises en hypotetisk historisk sammenligning. " + " · ".join(feasibility.reasons))
+    vectors, positions = completed_model_vectors(
+        player_index, manager_game.game,
+        min(latest_team.team.overview.current_round, latest_players.statistics.round_number),
+    )
+    result_key = f"simulation-result-{manager_game.game.locale}-{manager_game.game.slug}-{team_id}"
+    seed_text = ""
+    if forecast:
+        seed_text = st.text_input(
+            "Seed (valgfri)",
+            placeholder="Tomt felt bruger et deterministisk seed",
+            key=f"model-seed-{manager_game.game.locale}-{manager_game.game.slug}",
+        )
+    input_signature = (baseline, scenario, positions, vectors, feasibility, horizon, seed_text.strip())
     if st.session_state.get(f"{result_key}:inputs") != input_signature:
         st.session_state.pop(result_key, None)
-    if st.button("Kør 10.000 scenarier", type="primary"):
+    action_label = "Beregn model" if forecast else "Vis hypotetisk sammenligning"
+    if st.button(action_label, type="primary"):
         try:
             chosen_seed = None if not seed_text.strip() else int(seed_text)
             if chosen_seed is not None and chosen_seed < 0:
@@ -843,30 +842,34 @@ def _experimental_panel(
             st.error("Seed skal være et ikke-negativt heltal.")
         else:
             st.session_state[f"{result_key}:inputs"] = input_signature
-            with st.spinner("Bootstrapper tre fremtidige runder …"):
+            with st.spinner("Beregner sammenligningen …"):
                 st.session_state[result_key] = simulate_transfer_scenario(
                     vectors,
                     baseline,
                     scenario,
                     positions=positions,
+                    horizon=horizon,
                     seed=chosen_seed,
+                    descriptive_only=not forecast,
                 )
     result = st.session_state.get(result_key)
     if result is None:
         return
     cards = st.columns(4)
+    descriptive = result.status == "descriptive"
     cards[0].metric("Median-delta", _format(result.median_delta))
-    cards[1].metric("P10", _format(result.p10))
-    cards[2].metric("P90", _format(result.p90))
+    cards[1].metric("Minimum" if descriptive else "P10", _format(result.p10))
+    cards[2].metric("Maksimum" if descriptive else "P90", _format(result.p90))
     cards[3].metric(
-        "Slår baseline",
+        "Observeret andel over baseline" if descriptive else "Slår baseline",
         _format(
             None if result.probability_better is None else result.probability_better * 100,
             percent=True,
         ),
     )
+    seed_label = f" · seed {result.seed}" if result.status == "complete" else ""
     st.caption(
-        f"Status: {result.status} · seed {result.seed} · "
+        f"Status: {result.status}{seed_label} · "
         f"{result.provenance.sample_size} historiske runder · "
         f"inputdækning {result.input_coverage:.1%}."
     )
@@ -1121,7 +1124,7 @@ def player_detail_view(
                 help="Standard: " + ", ".join(DEFAULT_PLAYER_TAGS) + ". Egne tags er tilladt.",
             )
             save_note = st.form_submit_button("Gem note og tags", disabled=read_only)
-        if save_note:
+        if save_note and not read_only:
             try:
                 updated_annotation = PlayerAnnotation(
                     manager_game.game.locale.casefold(),
@@ -1134,8 +1137,9 @@ def player_detail_view(
                 others = tuple(
                     item for item in settings.player_annotations if item.player_key != player_key
                 )
-                settings_store.set_player_annotations(settings, (*others, updated_annotation))
-            except ValueError as exc:
+                with editable_game(paths, manager_game.game):
+                    settings_store.set_player_annotations(settings, (*others, updated_annotation))
+            except (OSError, PayloadError, ValueError) as exc:
                 st.error(str(exc))
             else:
                 st.success("Noten og tags er gemt.")
@@ -1208,6 +1212,14 @@ def alerts_view(
         )
 
     store = AnalysisInboxStore(paths.analysis_inbox_file)
+
+    def apply_alert_change(action, *args, **kwargs) -> None:
+        try:
+            with editable_game(paths, game, require_idle=True):
+                action(*args, **kwargs)
+        except (OSError, PayloadError, ValueError) as exc:
+            st.error(f"Alarmen kunne ikke ændres: {exc}")
+
     try:
         alerts = tuple(
             item
@@ -1299,25 +1311,26 @@ def alerts_view(
                     icon=":material/person:",
                     key=f"open-alert-player-{item.alert_id}",
                 )
-                if item.read_at is None:
+                if not read_only and item.read_at is None:
                     st.button(
                         "Markér som læst",
                         key=f"read-alert-{item.alert_id}",
-                        on_click=store.mark_read,
-                        args=(item.alert_id,),
+                        on_click=apply_alert_change,
+                        args=(store.mark_read, item.alert_id),
                     )
-                if item.dismissed_at is None:
+                if not read_only and item.dismissed_at is None:
                     st.button(
                         "Afvis",
                         key=f"dismiss-alert-{item.alert_id}",
-                        on_click=store.dismiss,
-                        args=(item.alert_id,),
+                        on_click=apply_alert_change,
+                        args=(store.dismiss, item.alert_id),
                     )
-    if any(item.dismissed_at is not None for item in alerts):
+    if not read_only and any(item.dismissed_at is not None for item in alerts):
         st.button(
             "Ryd afviste alarmer",
             type="secondary",
             key=f"clear-alerts-{game.locale}-{game.slug}",
-            on_click=store.clear_dismissed,
+            on_click=apply_alert_change,
+            args=(store.clear_dismissed,),
             kwargs={"game_identity": identity},
         )

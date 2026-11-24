@@ -12,11 +12,11 @@ from urllib.parse import unquote, urlsplit, urlunsplit
 from .data_packages import DataPackage, DataTable
 from .groups import GroupDefinition, ManagerGame
 from .hall_of_fame import HallOfFameEvent
-from .hub_settings import HallOfFameScoreProfile
+from .hub_settings import HallOfFameScoreProfile, HubSettings
 from .manager_features import RoundStory
 from .output import sanitize_path_component
 from .persistence import aware_local, publish_immutable
-from .seasons import SeasonDefinition, build_season_standings
+from .seasons import SeasonDefinition, build_season_projection
 from .standings import build_standings
 from .storage import SnapshotIndex
 
@@ -230,20 +230,14 @@ def build_season_report_package(
     score_profile: HallOfFameScoreProfile,
     *,
     generated_at: datetime | None = None,
+    settings: HubSettings | None = None,
 ) -> DataPackage:
     """Project season standings, point components and medal counts."""
 
     created = aware_local(generated_at)
-    selected = tuple(
-        event
-        for event in events
-        if any(
-            event.competition_id == competition
-            or event.competition_id.startswith(f"{competition}:")
-            for competition in season.competition_ids
-        )
-    )
-    standings = build_season_standings(season, events, score_profile)
+    projection = build_season_projection(season, events, score_profile, settings=settings)
+    selected = projection.competition_events
+    standings = projection.standings
     competition_rows: list[dict[str, object]] = []
     for competition_id in season.competition_ids:
         matches = tuple(
@@ -266,7 +260,7 @@ def build_season_report_package(
             }
         )
     medal_counts: dict[tuple[str, str], list[int]] = {}
-    for event in selected:
+    for event in projection.scored_events:
         if event.kind == "round_win":
             continue
         for placement in event.placements:

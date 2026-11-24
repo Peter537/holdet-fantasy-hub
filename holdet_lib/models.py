@@ -2,16 +2,25 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
 from math import isfinite
 from typing import Literal
 from urllib.parse import quote
 
+from .errors import PayloadError
+
 
 HOLDET_ORIGIN = "https://www.holdet.dk"
 SEASON_API_ROOT = f"{HOLDET_ORIGIN}/api/fantasy"
 RoundStatus = Literal["complete", "in_progress", "unknown"]
+
+
+def require_unique_player_ids(entries: Iterable[PlayerEntry]) -> None:
+    identifiers = [entry.entry_id for entry in entries if entry.entry_id is not None]
+    if len(identifiers) != len(set(identifiers)):
+        raise PayloadError("Spillerlisten indeholder gentagne spiller-ID'er")
 
 
 @dataclass(frozen=True, slots=True)

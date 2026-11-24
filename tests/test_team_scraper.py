@@ -63,7 +63,7 @@ def roster_player(
     }
 
 
-def team_page_html(*, golf: bool = False) -> str:
+def team_page_html(*, golf: bool = False, round_number: int | None = 3) -> str:
     players = [
         roster_player(10, "Søren Ægir", 100, points=12, captain=True),
         roster_player(11, "Béla Velo", 200, points=8, disabled=True),
@@ -123,11 +123,14 @@ def team_page_html(*, golf: bool = False) -> str:
             ]
         },
     ]
+    roster_props = {"players": players, "golf": golf}
+    if round_number is not None:
+        roster_props["roundHeading"] = f"Runde {round_number}"
     roster = [
         "$",
         "Roster",
         None,
-        {"roundHeading": "Runde 3", "players": players, "golf": golf},
+        roster_props,
     ]
     return flight_html(header, substitutions, top, roster)
 
@@ -320,7 +323,10 @@ class TeamPayloadTests(unittest.TestCase):
 
 
 class TeamServiceAndOutputTests(unittest.TestCase):
-    def make_service(self) -> tuple[scraper.TeamDataService, scraper.TeamReference]:
+    def make_service(
+        self, *, team_rounds: tuple[int | None, ...] = (3,), salary_cap: int = 500,
+        roster_html: str | None = None,
+    ) -> tuple[scraper.TeamDataService, scraper.TeamReference]:
         game = scraper.normalize_game_url(
             "https://www.holdet.dk/da/fantasy/tour-de-france-2026"
         )
@@ -336,13 +342,20 @@ class TeamServiceAndOutputTests(unittest.TestCase):
             account_label=FICTIONAL_ACCOUNT_LABEL,
             account_user_id=FICTIONAL_USER_ID,
         )
-        text = {
-            "https://www.holdet.dk/da/season/tour-de-france-2026": variant_html("cycling"),
-            f"https://www.holdet.dk/da/season/tour-de-france-2026/cycling/fantasyteams/{FICTIONAL_TEAM_ID}": team_page_html(),
-        }
+        rounds = iter(team_rounds)
+
+        def fetch_text(url: str) -> str:
+            if url == game.season_root_url:
+                return variant_html("cycling")
+            if url == game.team_url("cycling", FICTIONAL_TEAM_ID):
+                if roster_html is not None:
+                    return roster_html
+                return team_page_html(round_number=next(rounds))
+            raise AssertionError(url)
+
         base = "https://www.holdet.dk/api/fantasy"
         json_data = {
-            f"{base}/cartridges/{game.slug}": cartridge_payload(),
+            f"{base}/cartridges/{game.slug}": cartridge_payload(salary_cap=salary_cap),
             f"{base}/fantasyteams/{FICTIONAL_TEAM_ID}/history": history_payload(),
             f"{base}/fantasyteams/{FICTIONAL_TEAM_ID}/fantasyleagues/99/leaderboards/overall": {
                 "items": [{"round": 2, "rank": 100}, {"round": 3, "rank": 80}]
@@ -353,7 +366,7 @@ class TeamServiceAndOutputTests(unittest.TestCase):
         }
         return (
             scraper.TeamDataService(
-                text_fetcher=lambda url: text[url],
+                text_fetcher=fetch_text,
                 json_fetcher=lambda url: json_data[url],
             ),
             reference,
@@ -369,6 +382,52 @@ class TeamServiceAndOutputTests(unittest.TestCase):
         self.assertEqual(team.overview.rank_change, 20)
         self.assertEqual(len(team.roster), 2)
         self.assertEqual(len(team.history), 2)
+
+    def test_persistent_round_mismatch_is_rejected_for_points_and_equal_money_value(self) -> None:
+        for salary_cap in (0, 500):
+            with self.subTest(salary_cap=salary_cap):
+                service, reference = self.make_service(team_rounds=(4, 4), salary_cap=salary_cap)
+                with self.assertRaisesRegex(scraper.PayloadError, "viste runde 4.*historikrunde var 3"):
+                    service.scrape(reference)
+
+    def test_corrected_retry_and_legacy_headingless_page_keep_exact_roster_attribution(self) -> None:
+        for team_rounds in ((4, 3), (None,)):
+            with self.subTest(team_rounds=team_rounds):
+                service, reference = self.make_service(team_rounds=team_rounds)
+                team = service.scrape(reference)
+                self.assertEqual(team.overview.current_round, 3)
+                self.assertEqual(len(team.roster), 2)
+                self.assertIsNone(scraper.build_team_export(team, scope="round", round_number=2).roster)
+
+    def test_roster_round_comes_from_the_candidate_selected_for_players(self) -> None:
+        players = [roster_player(10, "A", 100), roster_player(11, "B", 200)]
+        page = scraper.extract_team_page(flight_html(
+            {"roundHeading": "Runde 2", "players": players[:1]},
+            {"roundHeading": "Runde 3", "players": players},
+        ), salary_cap=True)
+        self.assertEqual(page.current_round, 3)
+        self.assertEqual(len(page.roster), 2)
+
+    def test_current_history_selects_the_matching_roster_over_equally_rich_prior_roster(self) -> None:
+        current = [roster_player(10, "A", 100), roster_player(11, "B", 200)]
+        previous = [roster_player(12, "C", 100), roster_player(13, "D", 200)]
+        for heading in ("Runde 3", "2026 league · Round 3", "3. runde"):
+            with self.subTest(heading=heading):
+                service, reference = self.make_service(roster_html=flight_html(
+                    {"roundHeading": "Runde 2", "players": previous},
+                    {"roundHeading": heading, "players": current},
+                ))
+                result = service.scrape(reference)
+                self.assertEqual(result.overview.current_round, 3)
+                self.assertEqual([entry.player_id for entry in result.roster], [10, 11])
+
+    def test_unrelated_heading_does_not_attribute_a_headingless_roster(self) -> None:
+        players = [roster_player(10, "A", 100), roster_player(11, "B", 200)]
+        service, reference = self.make_service(roster_html=flight_html(
+            {"roundHeading": "Round 2"},
+            {"players": players},
+        ))
+        assert service.scrape(reference).overview.current_round == 3
 
     def test_team_subcommand_accepts_direct_url(self) -> None:
         service, reference = self.make_service()
@@ -563,6 +622,13 @@ class GameInfoTests(unittest.TestCase):
             with self.subTest(payload=payload):
                 with self.assertRaises(scraper.PayloadError):
                     scraper.parse_schedule_final_round(payload)
+
+    def test_schedule_preserves_round_zero_and_rejects_conflicting_duplicates(self) -> None:
+        earliest = {**schedule_payload()["rounds"][0], "round": 0}
+        self.assertEqual(scraper.parse_schedule_final_round({"rounds": [earliest, earliest]}), 0)
+        conflicting = {**earliest, "end": "2026-08-01T13:00:00Z"}
+        with self.assertRaisesRegex(scraper.PayloadError, "modstridende.*runde 0"):
+            scraper.parse_schedule_rounds({"rounds": [earliest, conflicting]})
 
 
 if __name__ == "__main__":

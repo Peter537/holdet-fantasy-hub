@@ -11,12 +11,13 @@ from typing import Callable, Mapping
 
 from .groups import GroupStore
 from .hall_of_fame import HallOfFameStore
-from .hub_settings import HubSettingsStore, effective_manager_profiles
+from .hub_settings import HubSettingsStore, build_effective_manager_settings, effective_manager_profiles
 from .maintenance import build_storage_inventory
 from .paths import AppPaths
+from .persistence import exclusive_file_update, replace_text_atomically
 from .seasons import SeasonStore, build_season_standings
 from .standings import build_standings
-from .storage import PlayerStatisticsStore, SnapshotStore
+from .storage import PlayerStatisticsSnapshot, PlayerStatisticsStore, SnapshotStore
 
 
 LOCAL_API_VERSION = "v1"
@@ -130,7 +131,20 @@ def dataset_definition(name: str) -> DatasetDefinition:
         raise ApiQueryError("Ukendt datasæt") from exc
 
 
-def _matches(row: Mapping[str, object], filters: Mapping[str, str]) -> bool:
+def _filter_values(filters: Mapping[str, str]) -> dict[str, int | str]:
+    parsed: dict[str, int | str] = {}
+    for key, value in filters.items():
+        if key in {"round", "team_id"}:
+            try:
+                parsed[key] = int(value)
+            except ValueError as exc:
+                raise ApiQueryError(f"Filteret {key} skal være et heltal") from exc
+        else:
+            parsed[key] = value.casefold()
+    return parsed
+
+
+def _matches(row: Mapping[str, object], filters: Mapping[str, int | str]) -> bool:
     mapping = {
         "group": "group_id",
         "season": "season_id",
@@ -140,14 +154,9 @@ def _matches(row: Mapping[str, object], filters: Mapping[str, str]) -> bool:
         if key == "game" and "game" not in row and "game_scope" in row:
             column = "game_scope"
         value = row.get(column)
-        if key in {"round", "team_id"}:
-            try:
-                numeric = int(expected)
-            except ValueError as exc:
-                raise ApiQueryError(f"Filteret {key} skal være et heltal") from exc
-            if value != numeric:
-                return False
-        elif str(value).casefold() != expected.casefold():
+        if isinstance(expected, str):
+            value = str(value).casefold()
+        if value != expected:
             return False
     return True
 
@@ -189,8 +198,12 @@ class LocalDataApi:
         missing = [name for name in definition.required_filters if not filters.get(name)]
         if missing:
             raise ApiQueryError("Påkrævede filtre mangler: " + ", ".join(missing))
-        builder: Callable[[], list[dict[str, object]]] = getattr(self, f"_{dataset}")
-        rows = [row for row in builder() if _matches(row, filters)]
+        query = _filter_values(filters)
+        if dataset == "players":
+            rows = self._players(filters["game"], query)
+        else:
+            builder: Callable[[], list[dict[str, object]]] = getattr(self, f"_{dataset}")
+            rows = [row for row in builder() if _matches(row, query)]
         rows.sort(
             key=lambda row: tuple(_sort_value(row.get(column)) for column in definition.columns)
         )
@@ -210,15 +223,21 @@ class LocalDataApi:
     def _rounds(self) -> list[dict[str, object]]:
         players, teams = self._snapshot_indexes()
         grouped: dict[tuple[str, str, int], dict[str, object]] = {}
-        times: dict[tuple[str, str, int], list[datetime]] = {}
-        statuses: dict[tuple[str, str, int], set[str]] = {}
+        latest: dict[tuple[str, str, int], dict[int | None, tuple[datetime, str]]] = {}
+
+        def observe(key: tuple[str, str, int], team_id: int | None, at: datetime, status: str) -> None:
+            sources = latest.setdefault(key, {})
+            previous = sources.get(team_id)
+            if previous is None or at > previous[0]:
+                sources[team_id] = at, status
+
         for snapshot in players.snapshots:
             game = snapshot.statistics.game
-            key = (game.locale, game.slug, snapshot.statistics.round_number)
+            key = (game.locale.casefold(), game.slug, snapshot.statistics.round_number)
             row = grouped.setdefault(
                 key,
                 {
-                    "locale": game.locale,
+                    "locale": key[0],
                     "game": game.slug,
                     "round": snapshot.statistics.round_number,
                     "status": "unknown",
@@ -228,17 +247,16 @@ class LocalDataApi:
                 },
             )
             row["player_snapshots"] = int(row["player_snapshots"]) + 1
-            times.setdefault(key, []).append(snapshot.generated_at)
-            statuses.setdefault(key, set()).add(snapshot.statistics.round_status)
+            observe(key, None, snapshot.generated_at, snapshot.statistics.round_status)
         for snapshot in teams.snapshots:
             team = snapshot.team
             game = team.reference.game
             for summary in team.history:
-                key = (game.locale, game.slug, summary.round_number)
+                key = (game.locale.casefold(), game.slug, summary.round_number)
                 row = grouped.setdefault(
                     key,
                     {
-                        "locale": game.locale,
+                        "locale": key[0],
                         "game": game.slug,
                         "round": summary.round_number,
                         "status": "unknown",
@@ -248,24 +266,32 @@ class LocalDataApi:
                     },
                 )
                 row["team_snapshots"] = int(row["team_snapshots"]) + 1
-                times.setdefault(key, []).append(snapshot.generated_at)
-                statuses.setdefault(key, set()).add(summary.round_status)
+                observe(key, team.reference.team_id, snapshot.generated_at, summary.round_status)
         for key, row in grouped.items():
-            values = statuses.get(key, {"unknown"})
+            observations = latest[key].values()
+            values = {status for _, status in observations}
             row["status"] = "complete" if values == {"complete"} else (
                 "in_progress" if "in_progress" in values else "unknown"
             )
-            row["latest_at"] = max(times[key]).isoformat()
+            row["latest_at"] = max(at for at, _ in observations).isoformat()
         return list(grouped.values())
 
-    def _players(self) -> list[dict[str, object]]:
-        index = PlayerStatisticsStore(self.paths.snapshot_dir).scan()
-        latest: dict[tuple[str, str, int], object] = {}
+    def _players(
+        self, slug: str, query: Mapping[str, int | str]
+    ) -> list[dict[str, object]]:
+        index = PlayerStatisticsStore(self.paths.snapshot_dir).scan(slug)
+        locale = query.get("locale")
+        round_number = query.get("round")
+        latest: dict[tuple[str, str, int], PlayerStatisticsSnapshot] = {}
         for snapshot in index.snapshots:
-            latest.setdefault(snapshot.identity, snapshot)
+            identity = snapshot.identity
+            if locale not in (None, identity[0]) or round_number not in (None, identity[2]):
+                continue
+            latest.setdefault(identity, snapshot)
         result: list[dict[str, object]] = []
         for snapshot in latest.values():
-            statistics = snapshot.statistics  # type: ignore[attr-defined]
+            statistics = snapshot.statistics
+            snapshot_at = snapshot.generated_at.isoformat()
             for entry in statistics.entries:
                 statuses = []
                 if not entry.is_active:
@@ -295,7 +321,7 @@ class LocalDataApi:
                         "trend": entry.trend,
                         "index": entry.index,
                         "statuses": ";".join(statuses),
-                        "snapshot_at": snapshot.generated_at.isoformat(),  # type: ignore[attr-defined]
+                        "snapshot_at": snapshot_at,
                     }
                 )
         return result
@@ -421,12 +447,20 @@ class LocalDataApi:
 
     def _season_standings(self) -> list[dict[str, object]]:
         seasons = SeasonStore(self.paths.seasons_file).load()
+        if not seasons:
+            return []
         events, _ = HallOfFameStore(self.paths.hall_of_fame_dir).scan()
         settings = HubSettingsStore(self.paths.hub_settings_file).load()
+        groups, _ = GroupStore(
+            self.paths.groups_file, self.paths.group_revision_dir,
+        ).load_configuration_with_warnings()
+        settings = build_effective_manager_settings(
+            settings, groups.groups, SnapshotStore(self.paths.snapshot_dir).scan(),
+        )
         result: list[dict[str, object]] = []
         for season in seasons:
             for row in build_season_standings(
-                season, events, settings.hall_of_fame_score
+                season, events, settings.hall_of_fame_score, settings=settings,
             ):
                 result.append(
                     {
@@ -485,8 +519,6 @@ def _artifact_digest(path: Path) -> str:
 def register_artifact(paths: AppPaths, artifact: Path | str) -> RegisteredArtifact:
     """Register one existing export for path-free read-only download lookup."""
 
-    from .persistence import replace_text_atomically
-
     path = Path(artifact).resolve()
     root = paths.export_dir.resolve()
     if not path.is_relative_to(root) or not path.is_file() or path.is_symlink():
@@ -500,31 +532,33 @@ def register_artifact(paths: AppPaths, artifact: Path | str) -> RegisteredArtifa
     artifact_id = hashlib.sha256(
         f"{relative}|{before.st_size}|{digest}".encode("utf-8")
     ).hexdigest()[:24]
-    try:
-        payload = json.loads(paths.artifact_registry_file.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        payload = {"schema_version": 1, "artifacts": []}
-    if not isinstance(payload, dict) or payload.get("schema_version") != 1:
-        raise ValueError("Artifactregisteret har et ukendt schema")
-    records = payload.get("artifacts")
-    if not isinstance(records, list):
-        raise ValueError("Artifactregisteret er ugyldigt")
     record = {
         "id": artifact_id,
         "path": relative,
         "size": before.st_size,
         "sha256": digest,
     }
-    retained = [item for item in records if isinstance(item, dict) and item.get("id") != artifact_id]
-    replace_text_atomically(
-        paths.artifact_registry_file,
-        json.dumps(
-            {"schema_version": 1, "artifacts": [*retained, record]},
-            ensure_ascii=False,
-            indent=2,
+    registry = paths.artifact_registry_file
+    with exclusive_file_update(registry):
+        try:
+            payload = json.loads(registry.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            payload = {"schema_version": 1, "artifacts": []}
+        if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+            raise ValueError("Artifactregisteret har et ukendt schema")
+        records = payload.get("artifacts")
+        if not isinstance(records, list):
+            raise ValueError("Artifactregisteret er ugyldigt")
+        retained = [item for item in records if isinstance(item, dict) and item.get("id") != artifact_id]
+        replace_text_atomically(
+            registry,
+            json.dumps(
+                {"schema_version": 1, "artifacts": [*retained, record]},
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
         )
-        + "\n",
-    )
     return RegisteredArtifact(artifact_id, relative, before.st_size, digest)
 
 

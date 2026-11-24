@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass, replace
 import json
 from pathlib import Path
 from uuid import uuid4
 
 from .errors import PayloadError
-from .hall_of_fame import HallOfFameEvent, build_hall_of_fame
-from .hub_settings import HallOfFameScoreProfile
+from .hall_of_fame import HallOfFameEvent, build_hall_of_fame, current_event_revisions, remap_manager_events
+from .hub_settings import HallOfFameScoreProfile, HubSettings
 from .persistence import aware_local, configuration_transaction, replace_text_atomically
 
 
@@ -40,12 +41,21 @@ class SeasonStanding:
     round_wins: int
 
 
-def build_season_standings(
+@dataclass(frozen=True, slots=True)
+class SeasonProjection:
+    competition_events: tuple[HallOfFameEvent, ...]
+    scored_events: tuple[HallOfFameEvent, ...]
+    standings: tuple[SeasonStanding, ...]
+
+
+def build_season_projection(
     season: SeasonDefinition,
     events: tuple[HallOfFameEvent, ...],
     score_profile: HallOfFameScoreProfile,
-) -> tuple[SeasonStanding, ...]:
-    """Recalculate a season without mutating its raw manager events."""
+    *,
+    settings: HubSettings | None = None,
+) -> SeasonProjection:
+    """Resolve revision and manager identity before scoring or reporting a season."""
 
     def belongs(event: HallOfFameEvent) -> bool:
         return any(
@@ -54,14 +64,18 @@ def build_season_standings(
             for competition in season.competition_ids
         )
 
+    current = current_event_revisions(events)
+    if settings is not None:
+        current = remap_manager_events(current, settings)
+    competition_events = tuple(event for event in current if belongs(event))
     season_games = {
         (event.game_locale.casefold(), event.game_slug)
-        for event in events
-        if event.kind != "round_win" and belongs(event)
+        for event in competition_events
+        if event.kind != "round_win"
     }
     selected = tuple(
         event
-        for event in events
+        for event in current
         if belongs(event)
         or (
             event.kind == "round_win"
@@ -69,7 +83,13 @@ def build_season_standings(
         )
     )
     hall = build_hall_of_fame(selected, score_profile)
-    return tuple(
+    round_wins = Counter(
+        placement.manager_id
+        for event in hall.events
+        for placement in event.placements
+        if event.kind == "round_win" and placement.rank == 1
+    )
+    standings = tuple(
         SeasonStanding(
             row.rank,
             row.manager_id,
@@ -78,17 +98,59 @@ def build_season_standings(
             row.titles,
             row.podiums,
             row.competitions,
-            sum(
-                1
-                for event in hall.events
-                for placement in event.placements
-                if event.kind == "round_win"
-                and placement.rank == 1
-                and placement.manager_id == row.manager_id
-            ),
+            round_wins[row.manager_id],
         )
         for row in hall.rows
     )
+    return SeasonProjection(competition_events, hall.events, standings)
+
+
+def build_season_standings(
+    season: SeasonDefinition,
+    events: tuple[HallOfFameEvent, ...],
+    score_profile: HallOfFameScoreProfile,
+    *,
+    settings: HubSettings | None = None,
+) -> tuple[SeasonStanding, ...]:
+    """Recalculate a season without mutating its raw manager events."""
+
+    return build_season_projection(season, events, score_profile, settings=settings).standings
+
+
+def _seasons_from_dict(payload: object) -> tuple[SeasonDefinition, ...]:
+    if not isinstance(payload, dict) or payload.get("schema_version") != SEASON_SCHEMA_VERSION:
+        raise PayloadError("Ukendt skema for sæsoner")
+    raw_seasons = payload.get("seasons", [])
+    if not isinstance(raw_seasons, list):
+        raise PayloadError("Sæsonlageret skal indeholde en liste")
+    seasons: list[SeasonDefinition] = []
+    for raw in raw_seasons:
+        if not isinstance(raw, dict):
+            raise PayloadError("En sæson skal være et objekt")
+        competition_ids = raw.get("competition_ids")
+        if not isinstance(competition_ids, list) or not all(
+            isinstance(item, str) and item.strip() for item in competition_ids
+        ):
+            raise PayloadError("Sæsonens competition_ids skal være tekstværdier")
+        season_id = str(raw.get("id", "")).strip()
+        name = str(raw.get("name", "")).strip()
+        archived_at = raw.get("archived_at")
+        if not season_id or not name:
+            raise PayloadError("En sæson skal have et ID og et navn")
+        if archived_at is not None and not isinstance(archived_at, str):
+            raise PayloadError("Sæsonens arkiveringstidspunkt skal være tekst")
+        seasons.append(
+            SeasonDefinition(
+                season_id,
+                name,
+                tuple(dict.fromkeys(item.strip() for item in competition_ids)),
+                archived_at,
+            )
+        )
+    ids = [item.season_id for item in seasons]
+    if len(ids) != len(set(ids)):
+        raise PayloadError("S\u00e6son-ID'er skal v\u00e6re entydige")
+    return tuple(seasons)
 
 
 class SeasonStore:
@@ -106,39 +168,7 @@ class SeasonStore:
             raise PayloadError(f"Sæsoner kunne ikke læses: {exc}") from exc
         except json.JSONDecodeError as exc:
             raise PayloadError("Sæsonlageret indeholder ugyldig JSON") from exc
-        if not isinstance(payload, dict) or payload.get("schema_version") != SEASON_SCHEMA_VERSION:
-            raise PayloadError("Ukendt skema for sæsoner")
-        raw_seasons = payload.get("seasons", [])
-        if not isinstance(raw_seasons, list):
-            raise PayloadError("Sæsonlageret skal indeholde en liste")
-        seasons: list[SeasonDefinition] = []
-        for raw in raw_seasons:
-            if not isinstance(raw, dict):
-                raise PayloadError("En sæson skal være et objekt")
-            competition_ids = raw.get("competition_ids")
-            if not isinstance(competition_ids, list) or not all(
-                isinstance(item, str) and item.strip() for item in competition_ids
-            ):
-                raise PayloadError("Sæsonens competition_ids skal være tekstværdier")
-            season_id = str(raw.get("id", "")).strip()
-            name = str(raw.get("name", "")).strip()
-            archived_at = raw.get("archived_at")
-            if not season_id or not name:
-                raise PayloadError("En sæson skal have et ID og et navn")
-            if archived_at is not None and not isinstance(archived_at, str):
-                raise PayloadError("Sæsonens arkiveringstidspunkt skal være tekst")
-            seasons.append(
-                SeasonDefinition(
-                    season_id,
-                    name,
-                    tuple(dict.fromkeys(item.strip() for item in competition_ids)),
-                    archived_at,
-                )
-            )
-        ids = [item.season_id for item in seasons]
-        if len(ids) != len(set(ids)):
-            raise PayloadError("S\u00e6son-ID'er skal v\u00e6re entydige")
-        return tuple(seasons)
+        return _seasons_from_dict(payload)
 
     @configuration_transaction
     def save(self, seasons: tuple[SeasonDefinition, ...]) -> None:
@@ -167,7 +197,7 @@ class SeasonStore:
         self, expected: tuple[SeasonDefinition, ...], candidate: tuple[SeasonDefinition, ...]
     ) -> None:
         """Reject an edit based on seasons superseded by another writer."""
-        if self.path.exists() and self.load() != expected:
+        if self.load() != expected:
             raise ValueError("Sæsonerne er ændret; genindlæs og prøv igen")
         self.save(candidate)
 

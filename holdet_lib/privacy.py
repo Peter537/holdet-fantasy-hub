@@ -1,170 +1,210 @@
-"""Irreversible anonymization and checksummed support bundles."""
+"""Pseudonymized support projections and checksummed ZIP bundles."""
 
 from __future__ import annotations
 
-from dataclasses import replace
+from collections.abc import Mapping
+from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 import hashlib
+import hmac
 from io import BytesIO
 import json
-import re
+import secrets
 import zipfile
 
-from .data_packages import DataPackage, DataTable, package_to_dict
+from .data_packages import DataPackage, DataTable, Scalar, package_to_dict
 
 
 ANONYMIZATION_PROFILES = ("share", "debug")
-
-_PRIVATE_FIELDS = frozenset(
-    {
-        "account",
-        "account_key",
-        "account_label",
-        "owner",
-        "owner_name",
-        "owner_user_id",
-        "manager",
-        "manager_id",
-        "manager_name",
-        "group_id",
-        "group_name",
-        "team_id",
-        "team_name",
-        "user_id",
-        "profile_url",
-    }
-)
-_DEBUG_DROP_MARKERS = (
-    "path",
-    "url",
-    "note",
-    "tag",
-    "label",
-    "description",
-    "comment",
-    "free_text",
-)
-_DEBUG_ENUM_FIELDS = frozenset(
-    {
-        "locale",
-        "format",
-        "unit",
-        "scope",
-        "status",
-        "statuses",
-        "role",
-        "round_status",
-        "document_type",
-        "variant",
-    }
-)
+SUPPORT_BUNDLE_FILENAME = "holdet-support.zip"
 
 
-def _pseudonym(kind: str, value: object, salt: str) -> str:
-    digest = hashlib.sha256(
-        f"{salt}|{kind}|{value}".encode("utf-8", errors="replace")
-    ).hexdigest()[:10].upper()
-    labels = {
-        "manager": "Manager",
-        "team": "Fantasyhold",
-        "account": "Konto",
-        "user": "Bruger",
-        "text": "Tekst",
-    }
-    return f"{labels.get(kind, 'ID')} {digest}"
+@dataclass(frozen=True, slots=True)
+class _PackagePolicy:
+    scope: str
+    provenance: str
+    tables: Mapping[str, str]
 
 
-def _field_kind(field: str) -> str:
-    lowered = field.casefold()
-    if "manager" in lowered or "owner" in lowered:
-        return "manager"
-    if "team" in lowered:
-        return "team"
-    if "account" in lowered:
-        return "account"
-    return "user"
+_TEAM_FIELDS = "team_id team_name manager_name"
+_GROUP_FIELDS = "group_id group_name"
+_MANAGER_FIELDS = "manager_id manager_name"
+_SEASON_RESULTS = f"{_MANAGER_FIELDS} points titles podiums round_wins"
+
+# Adding a field to a report does not add it to these support projections.
+_POLICIES = {
+    "manager_game_report": _PackagePolicy(
+        scope="locale game label",
+        provenance="mode snapshot_count newest_snapshot_at",
+        tables={
+            "game": "locale game label teams groups",
+            "teams": f"{_TEAM_FIELDS} current_round rank total current_change unit snapshot_at",
+            "groups": f"{_GROUP_FIELDS} members latest_round tournament",
+            "group_standings": f"{_GROUP_FIELDS} {_TEAM_FIELDS} round rank total change distance status",
+            "round_history": f"{_TEAM_FIELDS} round round_status total change rank round_rank",
+        },
+    ),
+    "season_report": _PackagePolicy(
+        scope="season_id season_name",
+        provenance="mode event_count latest_capture",
+        tables={
+            "competitions": "competition_id competition_name events complete latest_capture",
+            "season_standings": f"rank {_SEASON_RESULTS} competitions",
+            "points_composition": _SEASON_RESULTS,
+            "medals": f"{_MANAGER_FIELDS} gold silver bronze",
+        },
+    ),
+    "player_export": _PackagePolicy(
+        scope="locale game round",
+        provenance="source_generated_at unit output_order",
+        tables={
+            "players": "name team position value total_growth round_growth popularity popularity_change trend index",
+        },
+    ),
+    "team_export": _PackagePolicy(
+        scope="locale game team_id round scope",
+        provenance="source_generated_at roster_generated_at unit",
+        tables={
+            "team": "team_id team_name owner_name account_key account_label",
+            "overview": (
+                "current_round unit player_value bank total current_change rank rank_change top_percent "
+                "substitutions_remaining substitutions_limit substitutions_used"
+            ),
+            "roster": "player_id name team position value round_change since_purchase_change purchase_round role",
+            "history": (
+                "round total change bank player_value bank_change interest player_change transfer captain_bonus "
+                "special_bonus substitutions_used round_rank overall_rank round_rank_change overall_rank_change"
+            ),
+        },
+    ),
+}
+_IDENTIFIERS = {
+    "account_key": "Konto",
+    "competition_id": "Konkurrence",
+    "game": "Spil",
+    "group_id": "Gruppe",
+    "manager_id": "Manager",
+    "player_id": "Spiller",
+    "season_id": "Sæson",
+    "team_id": "Fantasyhold",
+}
+_LABELS = {
+    "account_label": "Kontonavn",
+    "competition_name": "Konkurrencenavn",
+    "group_name": "Gruppenavn",
+    "label": "Spilnavn",
+    "manager_name": "Managernavn",
+    "name": "Spillernavn",
+    "owner_name": "Managernavn",
+    "position": "Position",
+    "season_name": "Sæsonnavn",
+    "team": "Klubnavn",
+    "team_name": "Holdnavn",
+}
+_CHOICES = {
+    "locale": frozenset({"da", "en", "nb", "no", "sv"}),
+    "mode": frozenset({"cache-only"}),
+    "output_order": frozenset({"query", "display"}),
+    "role": frozenset({"captain", "none"}),
+    "round_status": frozenset({"complete", "in_progress", "unknown"}),
+    "scope": frozenset({"full", "round"}),
+    "status": frozenset({"mangler", "klar"}),
+    "unit": frozenset({"money", "points"}),
+}
+_TIMESTAMPS = frozenset({
+    "latest_capture", "newest_snapshot_at", "roster_generated_at", "snapshot_at", "source_generated_at",
+})
 
 
-def _is_url_or_path(value: str) -> bool:
-    return bool(
-        re.match(r"^[a-z][a-z0-9+.-]*://", value, re.I)
-        or re.match(r"^(?:[A-Za-z]:[\\/]|/)", value)
+def _selected_fields(fields: str, *, debug: bool) -> tuple[str, ...]:
+    return tuple(
+        field for field in fields.split()
+        if not debug or (field not in _LABELS and field not in _TIMESTAMPS)
     )
 
 
-def _anonymize_mapping(
-    values: dict[str, object], *, profile: str, salt: str
-) -> dict[str, object]:
-    result: dict[str, object] = {}
-    for field, value in values.items():
-        lowered = field.casefold()
-        if profile == "debug" and any(marker in lowered for marker in _DEBUG_DROP_MARKERS):
-            result[field] = None
-            continue
-        if lowered in _PRIVATE_FIELDS and value not in {None, ""}:
-            result[field] = _pseudonym(_field_kind(lowered), value, salt)
-            continue
-        if profile == "debug" and isinstance(value, str):
-            if _is_url_or_path(value):
-                result[field] = None
-            elif lowered in _DEBUG_ENUM_FIELDS:
-                result[field] = value
-            elif value:
-                result[field] = _pseudonym("text", value, salt)
-            else:
-                result[field] = value
-            continue
-        if isinstance(value, str) and _is_url_or_path(value):
-            result[field] = None if profile == "debug" else "[fjernet]"
-        else:
-            result[field] = value
-    return result
+def _project_value(field: str, value: Scalar, secret: bytes) -> Scalar:
+    if kind := _IDENTIFIERS.get(field) or _LABELS.get(field):
+        if type(value) not in (str, int) or value == "":
+            return None
+        message = f"{kind}\0{type(value).__name__}\0{value}".encode("utf-8", errors="surrogatepass")
+        token = hmac.digest(secret, message, "sha256").hex()[:16].upper()
+        return f"{kind} {token}"
+    if choices := _CHOICES.get(field):
+        return value if isinstance(value, str) and value in choices else None
+    if field in _TIMESTAMPS:
+        if not isinstance(value, str):
+            return None
+        try:
+            timestamp = datetime.fromisoformat(value)
+            return timestamp.astimezone(timezone.utc).isoformat() if timestamp.tzinfo is not None else None
+        except (ValueError, OverflowError):
+            return None
+    return value if type(value) in (bool, int, float) else None
 
 
 def anonymize_data_package(package: DataPackage, profile: str) -> DataPackage:
+    """Project approved support fields with pseudonyms scoped to this export."""
     selected = profile.casefold()
     if selected not in ANONYMIZATION_PROFILES:
-        raise ValueError(f"Ukendt anonymiseringsprofil: {profile}")
-    salt = hashlib.sha256(
-        (
-            f"{package.document_type}|{package.generated_at.isoformat()}|"
-            + json.dumps(dict(package.scope), sort_keys=True, ensure_ascii=False)
-        ).encode("utf-8")
-    ).hexdigest()
-    tables = tuple(
-        DataTable(
-            table.name,
-            table.columns,
-            tuple(
-                _anonymize_mapping(dict(row), profile=selected, salt=salt)
-                for row in table.rows
-            ),
-        )
-        for table in package.tables
-    )
+        raise ValueError(f"Ukendt profil for supportpakke: {profile}")
+    debug = selected == "debug"
+    secret = secrets.token_bytes(32)
+    policy = _POLICIES.get(package.document_type)
+    scope: dict[str, Scalar] = {}
+    provenance: dict[str, Scalar] = {}
+    tables: list[DataTable] = []
+    if policy is not None:
+        scope = {
+            field: _project_value(field, package.scope[field], secret)
+            for field in _selected_fields(policy.scope, debug=debug)
+            if field in package.scope
+        }
+        provenance = {
+            field: _project_value(field, package.provenance[field], secret)
+            for field in _selected_fields(policy.provenance, debug=debug)
+            if field in package.provenance
+        }
+        for table in package.tables:
+            fields = _selected_fields(policy.tables.get(table.name, ""), debug=debug)
+            columns = tuple(field for field in fields if field in table.columns)
+            if columns:
+                tables.append(DataTable(
+                    table.name,
+                    columns,
+                    tuple(
+                        {field: _project_value(field, row[field], secret) for field in columns}
+                        for row in table.rows
+                    ),
+                ))
+    if not tables:
+        tables.append(DataTable(
+            "summary",
+            ("table_count", "row_count"),
+            ({"table_count": len(package.tables), "row_count": sum(len(table.rows) for table in package.tables)},),
+        ))
     return replace(
         package,
-        scope=_anonymize_mapping(dict(package.scope), profile=selected, salt=salt),
-        provenance=_anonymize_mapping(
-            dict(package.provenance), profile=selected, salt=salt
-        ),
-        tables=tables,
+        document_type=package.document_type if policy is not None else "support_summary",
+        scope=scope,
+        provenance=provenance,
+        tables=tuple(tables),
         privacy_profile=selected,
         restorable=False,
     )
 
 
 def build_support_bundle(package: DataPackage, profile: str) -> bytes:
-    """Create a non-restorable ZIP without a reversible pseudonym mapping."""
-
-    anonymized = anonymize_data_package(package, profile)
+    """Create a non-restorable ZIP without including the pseudonym key."""
+    projected = anonymize_data_package(package, profile)
     payload = (
-        json.dumps(package_to_dict(anonymized), ensure_ascii=False, indent=2) + "\n"
+        json.dumps(package_to_dict(projected), ensure_ascii=False, indent=2) + "\n"
     ).encode("utf-8")
     manifest = {
         "schema_version": 1,
         "document_type": "anonymized_support_bundle",
-        "created_at": anonymized.generated_at.isoformat(),
-        "privacy_profile": anonymized.privacy_profile,
+        "created_at": projected.generated_at.isoformat(),
+        "privacy_profile": projected.privacy_profile,
         "restorable": False,
         "files": [
             {

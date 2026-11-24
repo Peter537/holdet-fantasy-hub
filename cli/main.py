@@ -33,8 +33,9 @@ from holdet_lib.team_exports import (
     build_team_export,
 )
 from holdet_lib.paths import open_in_explorer
+from holdet_lib.restore_transaction import recover_restore
 from holdet_lib.storage import PlayerStatisticsStore, SnapshotStore
-from holdet_lib.players import SORT_ORDERS, normalize_game_url
+from holdet_lib.players import SORT_ORDERS, normalize_game_url, require_requested_round
 from holdet_lib.teams import (
     TeamDataService,
     discover_profile_teams,
@@ -259,6 +260,7 @@ def _fetch_and_export_players(
     """Fetch once, then explicitly persist the canonical and filtered outputs."""
 
     statistics = HoldetClient().fetch_players(raw_url, round_number=round_number)
+    require_requested_round(round_number, statistics.round_number)
     generated_at = datetime.now().astimezone()
     PlayerStatisticsStore(snapshot_dir).save(statistics, now=generated_at)
     document = build_player_export(
@@ -472,6 +474,12 @@ def main(
     args.path_warnings = path_warnings
     for warning in path_warnings:
         print(f"warning: {warning}", file=sys.stderr)
+    if args.command != "data" or args.data_command != "paths":
+        try:
+            recover_restore(app_paths)
+        except (ScraperError, OSError, RefreshRunBusyError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
     if args.command in advisor.COMMANDS:
         try:
             return advisor.run(args, app_paths)

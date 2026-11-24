@@ -9,7 +9,13 @@ from urllib.parse import urlencode
 
 from .game_metadata import GameMetadata
 from .groups import GroupDefinition
-from .tournament import _double_elimination_levels, build_double_elimination_bracket
+from .models import ScheduleRound
+from .storage import SnapshotIndex
+from .tournament import TournamentConfig, _knockout_layout, build_tournament_state
+from .tournament_pairings import TournamentPairingRevision, validate_tournament_pairing_revision
+
+
+CalendarStatus = Literal["scheduled", "published", "provisional", "conditional"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,6 +34,8 @@ class CalendarEvent:
     end: datetime | None
     internal_url: str
     official_url: str | None = None
+    round_numbers: tuple[int, ...] = ()
+    status: CalendarStatus = "scheduled"
 
     @property
     def missing_time(self) -> bool:
@@ -40,21 +48,132 @@ def _calendar_time_key(value: datetime | None) -> tuple[int, int, int, int, int,
     if value is None:
         return (9999, 12, 31, 23, 59, 59, 999999)
     return (
-        value.year,
-        value.month,
-        value.day,
-        value.hour,
-        value.minute,
-        value.second,
-        value.microsecond,
-
+        value.year, value.month, value.day, value.hour, value.minute,
+        value.second, value.microsecond,
     )
+
+
+def _event(
+    group: GroupDefinition,
+    schedule: dict[int, ScheduleRound],
+    event_key: str,
+    title: str,
+    rounds: tuple[int, ...],
+    participant_ids: tuple[int, ...],
+    labels: tuple[str, ...],
+    *,
+    kind: Literal["fixture", "group_round"] = "fixture",
+    status: CalendarStatus = "scheduled",
+) -> CalendarEvent:
+    first_round, final_round = rounds[0], rounds[-1]
+    first = schedule.get(first_round)
+    last = schedule.get(final_round)
+    query = urlencode({"view": "group", "group": group.group_id, "round": first_round})
+    return CalendarEvent(
+        event_id=f"{group.group_id}:{event_key}",
+        kind=kind,
+        title=title,
+        game_locale=group.game.locale,
+        game_slug=group.game.slug,
+        group_id=group.group_id,
+        round_number=first_round,
+        participant_ids=participant_ids,
+        participant_names=labels,
+        start=first.start if first else None,
+        deadline=first.close if first else None,
+        end=last.end if last else None,
+        internal_url=f"?{query}",
+        official_url=group.official_url,
+        round_numbers=rounds,
+        status=status,
+    )
+
+
+def _slot_participant(
+    source: str, config: TournamentConfig, team_names: dict[int, str]
+) -> tuple[int | None, str | None]:
+    if source == "bye":
+        return None, None
+    kind, reference = source.split(":", 1)
+    if kind == "seed":
+        if config.template == "double_elimination":
+            team_id = config.seed_order[int(reference) - 1]
+            return team_id, team_names[team_id]
+        return None, f"Seed {reference}"
+    label = "Vinder" if kind == "winner" else "Taber"
+    return None, f"{label} af {reference}"
+
+
+def _reset_unnecessary(
+    group: GroupDefinition, config: TournamentConfig, snapshots: SnapshotIndex | None
+) -> bool:
+    if snapshots is None or config.pairing_error is not None:
+        return False
+    state = build_tournament_state(group, snapshots, config.final_round)
+    first_final = next((match for match in state.knockout_matches if match.stage == "Finale"), None)
+    return bool(
+        first_final is not None and first_final.complete
+        and first_final.winner_id is not None and first_final.winner_id == first_final.team_a_id
+    )
+
+
+def _knockout_events(
+    group: GroupDefinition,
+    config: TournamentConfig,
+    schedule: dict[int, ScheduleRound],
+    team_names: dict[int, str],
+    snapshots: SnapshotIndex | None,
+) -> Iterable[CalendarEvent]:
+    if config.pairing_error is None and config.published_matches is not None:
+        revision = validate_tournament_pairing_revision(
+            TournamentPairingRevision(
+                group.group_id, group.active_revision, knockout_matches=config.published_matches,
+            ),
+            config,
+            tuple(team_names),
+        )
+        published = {match.match_id: match for match in revision.knockout_matches}
+    else:
+        published = {}
+    event_kind = "double" if config.template == "double_elimination" else "knockout"
+
+    for slot in _knockout_layout(config):
+        match = published.get(slot.match_id)
+        is_reset = slot.match_id == "GF2"
+        if match is not None:
+            ids = tuple(team_id for team_id in (match.team_a_id, match.team_b_id) if team_id is not None)
+            labels = tuple(team_names[team_id] for team_id in ids)
+            rounds = match.round_numbers
+            status: CalendarStatus = "published"
+        else:
+            if is_reset and _reset_unnecessary(group, config, snapshots):
+                continue
+            participants = tuple(
+                _slot_participant(source, config, team_names) for source in (slot.source_a, slot.source_b)
+            )
+            ids = tuple(team_id for team_id, _ in participants if team_id is not None)
+            labels = tuple(label for _, label in participants if label is not None)
+            rounds = slot.round_numbers
+            status = "conditional" if is_reset else "provisional"
+
+        if not labels:
+            continue
+        title = " mod ".join(labels) if len(labels) == 2 else f"{labels[0]} har fri"
+        if is_reset:
+            title = f"{title} (reset-finale{' hvis nødvendig' if match is None else ''})"
+        yield _event(
+            group, schedule, f"{event_kind}:{slot.match_id}", title, rounds, ids, labels,
+            status=status,
+        )
+
 
 def build_calendar_events(
     groups: Iterable[GroupDefinition],
     metadata: Iterable[GameMetadata],
+    *,
+    snapshots: SnapshotIndex | None = None,
 ) -> tuple[CalendarEvent, ...]:
-    """Build a deterministic view without fetching or persisting anything."""
+    """Project cached dates and validated fixtures without fetching or persisting anything."""
 
     schedules = {
         item.identity: {round_.round_number: round_ for round_ in item.rounds}
@@ -63,158 +182,34 @@ def build_calendar_events(
     events: list[CalendarEvent] = []
     for group in groups:
         schedule = schedules.get((group.game.locale.casefold(), group.game.slug), {})
-        official_url = getattr(group, "official_url", None)
         team_names = {item.team_id: item.name for item in group.teams}
-        if group.tournament is not None:
-            if group.tournament.template == "double_elimination":
-                bracket = build_double_elimination_bracket(
-                    len(group.tournament.seed_order)
+        config = group.tournament
+        if config is None:
+            events.extend(
+                _event(
+                    group, schedule, f"round:{round_number}", f"{group.name} - runde {round_number}",
+                    (round_number,), tuple(team_names), tuple(team_names.values()), kind="group_round",
                 )
-                levels = _double_elimination_levels(bracket)
-                possible_teams: dict[str, frozenset[int]] = {}
+                for round_number in schedule
+            )
+            continue
+        fixtures = () if config.template == "double_elimination" else config.group_fixtures
+        for index, fixture in enumerate(fixtures, 1):
+            ids = tuple(
+                team_id for team_id in (fixture.team_a_id, fixture.team_b_id) if team_id is not None
+            )
+            labels = tuple(team_names.get(team_id, f"Seed {team_id}") for team_id in ids)
+            title = " mod ".join(labels) if len(labels) == 2 else f"{labels[0]} har fri"
+            events.append(_event(
+                group, schedule, f"fixture:{index}", title, (fixture.round_number,), ids, labels,
+            ))
+        if config.template in {"group_knockout", "double_elimination"}:
+            events.extend(_knockout_events(group, config, schedule, team_names, snapshots))
 
-                def slot_details(
-                    seed: int | None, source: str | None
-                ) -> tuple[frozenset[int], str | None]:
-                    if seed is not None:
-                        team_id = group.tournament.seed_order[seed - 1]
-                        return frozenset({team_id}), team_names.get(
-                            team_id, f"Seed {seed}"
-                        )
-                    if source is None:
-                        return frozenset(), None
-                    kind, source_match = source.split(":", 1)
-                    label = "Vinder" if kind == "winner" else "Taber"
-                    return possible_teams[source_match], f"{label} af {source_match}"
-
-                for match in bracket:
-                    first_ids, first_label = slot_details(
-                        match.team_a_seed, match.source_a
-                    )
-                    second_ids, second_label = slot_details(
-                        match.team_b_seed, match.source_b
-                    )
-                    possible_teams[match.match_id] = first_ids | second_ids
-                    labels = tuple(
-                        label
-                        for label in (first_label, second_label)
-                        if label is not None
-                    )
-                    first_round = (
-                        group.tournament.start_round
-                        + (levels[match.match_id] - 1)
-                        * group.tournament.rounds_per_tie
-                    )
-                    last_round = (
-                        first_round + group.tournament.rounds_per_tie - 1
-                    )
-                    first_window = schedule.get(first_round)
-                    last_window = schedule.get(last_round)
-                    query = urlencode(
-                        {
-                            "view": "group",
-                            "group": group.group_id,
-                            "round": first_round,
-                        }
-                    )
-                    title = (
-                        " mod ".join(labels)
-                        if len(labels) == 2
-                        else f"{labels[0]} har fri"
-                    )
-                    if match.reset_final:
-                        title = f"{title} (reset-finale hvis nødvendig)"
-                    events.append(
-                        CalendarEvent(
-                            f"{group.group_id}:double:{match.match_id}",
-                            "fixture",
-                            title,
-                            group.game.locale,
-                            group.game.slug,
-                            group.group_id,
-                            first_round,
-                            tuple(sorted(possible_teams[match.match_id])),
-                            labels,
-                            None if first_window is None else first_window.start,
-                            None if first_window is None else first_window.close,
-                            None if last_window is None else last_window.end,
-                            f"?{query}",
-                            official_url,
-                        )
-                    )
-                continue
-            for index, fixture in enumerate(group.tournament.group_fixtures, 1):
-                participant_ids = tuple(
-                    team_id
-                    for team_id in (fixture.team_a_id, fixture.team_b_id)
-                    if team_id is not None
-                )
-                participants = tuple(team_names.get(team_id, f"Seed {team_id}") for team_id in participant_ids)
-                window = schedule.get(fixture.round_number)
-                query = urlencode(
-                    {
-                        "view": "group",
-                        "group": group.group_id,
-                        "round": fixture.round_number,
-                    }
-                )
-                events.append(
-                    CalendarEvent(
-                        f"{group.group_id}:fixture:{index}",
-                        "fixture",
-                        " mod ".join(participants) if len(participants) == 2 else f"{participants[0]} har fri",
-                        group.game.locale,
-                        group.game.slug,
-                        group.group_id,
-                        fixture.round_number,
-                        participant_ids,
-                        participants,
-                        None if window is None else window.start,
-                        None if window is None else window.close,
-                        None if window is None else window.end,
-                        f"?{query}",
-                        official_url,
-                    )
-                )
-        else:
-            team_ids = tuple(item.team_id for item in group.teams)
-            team_labels = tuple(item.name for item in group.teams)
-            for round_number, window in schedule.items():
-                query = urlencode(
-                    {
-                        "view": "group",
-                        "group": group.group_id,
-                        "round": round_number,
-                    }
-                )
-                events.append(
-                    CalendarEvent(
-                        f"{group.group_id}:round:{round_number}",
-                        "group_round",
-                        f"{group.name} - runde {round_number}",
-                        group.game.locale,
-                        group.game.slug,
-                        group.group_id,
-                        round_number,
-                        team_ids,
-                        team_labels,
-                        window.start,
-                        window.close,
-                        window.end,
-                        f"?{query}",
-                        official_url,
-                    )
-                )
-    return tuple(
-        sorted(
-            events,
-            key=lambda item: (
-                item.start is None,
-                _calendar_time_key(item.start),
-                item.game_slug,
-                item.group_id,
-                item.round_number,
-                item.event_id,
-            ),
-        )
-    )
+    return tuple(sorted(
+        events,
+        key=lambda item: (
+            item.start is None, _calendar_time_key(item.start), item.game_slug,
+            item.group_id, item.round_number, item.event_id,
+        ),
+    ))

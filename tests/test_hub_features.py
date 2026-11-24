@@ -514,7 +514,7 @@ def test_backup_checksums_traversal_and_restore(tmp_path: Path) -> None:
     invalid = holdet.validate_backup(bad.getvalue())
     assert not invalid.is_valid
     assert "Usikker sti i ZIP: ../escape.json" in invalid.errors
-    assert invalid.manifest == validation.manifest
+    assert invalid.manifest is None
 
     tampered = BytesIO()
     with zipfile.ZipFile(BytesIO(data)) as original, zipfile.ZipFile(tampered, "w") as changed:

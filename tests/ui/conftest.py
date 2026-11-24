@@ -195,6 +195,24 @@ def _seed_data(root: Path) -> None:
     )
 
 
+def _stop_ui_server(process: subprocess.Popen[str]) -> None:
+    if process.poll() is not None:
+        return
+    if os.name == "nt":
+        # The venv executable can be a launcher whose child owns the log handle.
+        subprocess.run(
+            ("taskkill", "/PID", str(process.pid), "/T", "/F"),
+            capture_output=True, timeout=10, check=False,
+        )
+    else:
+        process.terminate()
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=10)
+
+
 @pytest.fixture(scope="session")
 def ui_server(tmp_path_factory: pytest.TempPathFactory) -> UiServer:
     root = tmp_path_factory.mktemp("holdet-ui-data")
@@ -227,10 +245,10 @@ def ui_server(tmp_path_factory: pytest.TempPathFactory) -> UiServer:
         **os.environ,
         "HOLDET_DATA_DIR": str(root),
         "PYTHONUTF8": "1",
-        "STREAMLIT_BROWSER_GATHER_USAGE_STATS": "false",
         "STREAMLIT_SERVER_FILE_WATCHER_TYPE": "none",
         "PYTHONPATH": os.pathsep.join((str(root), str(PROJECT_ROOT), os.environ.get("PYTHONPATH", ""))),
     }
+    environment.pop("STREAMLIT_BROWSER_GATHER_USAGE_STATS", None)
     command = (
         sys.executable,
         "-m",
@@ -244,47 +262,37 @@ def ui_server(tmp_path_factory: pytest.TempPathFactory) -> UiServer:
         "--server.headless",
         "true",
     )
-    with log_path.open("w", encoding="utf-8") as log:
-        process = subprocess.Popen(
-            command,
-            cwd=PROJECT_ROOT,
-            env=environment,
-            stdout=log,
-            stderr=subprocess.STDOUT,
-            text=True,
-        )
-        deadline = time.monotonic() + 35
-        last_error: Exception | None = None
-        while time.monotonic() < deadline:
-            if process.poll() is not None:
-                break
-            try:
-                with urlopen(f"{base_url}/api/v1/health", timeout=1) as response:
-                    if response.status == 200:
-                        last_error = None
-                        break
-            except (OSError, URLError) as exc:
-                last_error = exc
-                time.sleep(0.2)
-        else:
-            process.terminate()
-            process.wait(timeout=10)
-            pytest.fail(f"UI-serveren startede ikke: {last_error}\n{log_path.read_text(encoding='utf-8')}")
-        if process.poll() is not None:
-            pytest.fail(
-                "UI-serveren stoppede under opstart:\n"
-                + log_path.read_text(encoding="utf-8")
+    try:
+        with log_path.open("w", encoding="utf-8") as log:
+            process = subprocess.Popen(
+                command,
+                cwd=PROJECT_ROOT,
+                env=environment,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                text=True,
             )
-        try:
-            yield UiServer(base_url, root)
-        finally:
-            process.terminate()
             try:
-                process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=10)
-    shutil.rmtree(root)
+                deadline = time.monotonic() + 35
+                last_error: Exception | None = None
+                while time.monotonic() < deadline and process.poll() is None:
+                    try:
+                        with urlopen(f"{base_url}/api/v1/health", timeout=1) as response:
+                            if response.status == 200:
+                                break
+                    except (OSError, URLError) as exc:
+                        last_error = exc
+                    time.sleep(0.2)
+                else:
+                    pytest.fail(
+                        f"UI-serveren startede ikke: {last_error}\n"
+                        + log_path.read_text(encoding="utf-8")
+                    )
+                yield UiServer(base_url, root)
+            finally:
+                _stop_ui_server(process)
+    finally:
+        shutil.rmtree(root)
 
 
 @pytest.fixture(scope="session")
@@ -295,4 +303,5 @@ def browser_context_args(browser_context_args: dict[str, object]) -> dict[str, o
         "locale": "da-DK",
         "timezone_id": "Europe/Copenhagen",
         "color_scheme": "dark",
+        "service_workers": "block",
     }

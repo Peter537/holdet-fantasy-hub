@@ -912,6 +912,26 @@ class DashboardTests(unittest.TestCase):
             dashboard._home((alpha,), (), holdet.SnapshotIndex(()))
             self.assertEqual(table.call_args.args[0][0]["Gemt runde"], "–")
 
+    def test_home_picker_opens_each_same_named_game_by_its_full_identity(self) -> None:
+        with website_environment() as (config, _):
+            groups = holdet.GroupStore(config / "groups.json")
+            games = tuple(groups.create_manager_game(
+                f"https://www.holdet.dk/{locale}/fantasy/picker-test", "Samme navn",
+            ) for locale in ("da", "en"))
+            with patch("holdet_lib.http.HttpClient.fetch_text", side_effect=AssertionError("network")):
+                app = AppTest.from_file(APP_PATH).run(timeout=15)
+                for manager in games:
+                    picker = widget(app, "selectbox", "Åbn spil")
+                    label = f"Samme navn ({manager.game.locale}/{manager.game.slug})"
+                    self.assertEqual(len(set(picker.options)), 2)
+                    self.assertEqual(widget(app, "multiselect", "Managerspil").options, picker.options)
+                    picker.select_index(picker.options.index(label)).run(timeout=15)
+                    self.assertFalse(app.exception)
+                    self.assertEqual(query_param_values(app, "locale"), [manager.game.locale])
+                    self.assertEqual(query_param_values(app, "game"), [manager.game.slug])
+                    self.assertEqual([item.value for item in app.title], [manager.name])
+                    navigate(app, "home")
+
     def test_game_overview_and_competition_rows_keep_results_and_native_navigation(self) -> None:
         with website_environment() as (config, output):
             teams = tuple(sample_team(number, name=f"Hold {number}", current_round=1,
@@ -945,10 +965,10 @@ class DashboardTests(unittest.TestCase):
                 self.assertEqual(home.loc[0, "Gemt runde"], "1")
                 self.assertTrue(home["Hold"].dtype.kind in "iu")
                 self.assertEqual(home["Managerspil"].tolist(), [manager.name])
-                game_menu = widget(app, "menu_button", "Åbn spil")
+                game_menu = widget(app, "selectbox", "Åbn spil")
                 self.assertEqual(game_menu.options, [manager.name])
 
-                game_menu.click_index(0).run(timeout=15)
+                game_menu.select_index(0).run(timeout=15)
                 self.assertFalse(app.exception)
                 self.assertEqual(query_param_values(app, "game"), [game.slug])
                 self.assertEqual(query_param_values(app, "locale"), [game.locale])
@@ -1511,7 +1531,8 @@ class DashboardTests(unittest.TestCase):
                     ).run(timeout=20)
                 button(dialog, "Start opdatering").click().run(timeout=30)
                 self.assertFalse(dialog.exception)
-                run = wait_for(coordinator, dialog.session_state["visible-refresh-run"],
+                (started_run,) = coordinator.list_runs()
+                run = wait_for(coordinator, started_run["run_id"],
                     lambda state: state["status"] in {"success", "partial", "failed"})
                 self.assertEqual(run["status"], "partial")
                 self.assertEqual(
@@ -2567,7 +2588,9 @@ class DashboardTests(unittest.TestCase):
                 )
             self.assertFalse(app.exception)
             self.assertEqual([item.value for item in app.title], ["Scouting"])
-            self.assertTrue(any(item.value == "Smartlister" for item in app.segmented_control))
+            scouting_view = next(item for item in app.segmented_control if item.label == "Visning")
+            self.assertEqual(scouting_view.value, "smartlists")
+            self.assertIn("Smartlister", scouting_view.options)
             self.assertTrue(app.dataframe)
             self.assertEqual(client.calls, 0)
             after = {

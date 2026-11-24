@@ -165,15 +165,29 @@ def relative_url(page_id: PageId, **parameters: object) -> str:
     return f"{path}?{query}" if query else path
 
 
+def query_segmented_control(
+    label: str, labels: dict[str, str], *, parameter: str, key: str, default: str,
+) -> str:
+    """Synchronize stable URL values independently of displayed labels."""
+    requested = st.query_params.get(parameter, "")
+    observed_key = f"{key}:url"
+    if st.session_state.get(observed_key) != requested or key not in st.session_state:
+        st.session_state[key] = requested if requested in labels else default
+    selected = st.segmented_control(
+        label, tuple(labels), format_func=labels.__getitem__, required=True, key=key,
+    )
+    result = selected if isinstance(selected, str) and selected in labels else default
+    if requested != result:
+        st.query_params[parameter] = result
+    st.session_state[observed_key] = result
+    return result
+
+
 def redirect_legacy_query(current_page: PageId | None = None) -> None:
     view = st.query_params.get("view")
     if view is None:
         return
-    if current_page is PageId.SCOUTING and str(view) in {
-        "watchlist",
-        "smartlists",
-        "notes",
-    }:
+    if current_page is PageId.SCOUTING and str(view) not in _LEGACY_VIEWS:
         return
     parameters = st.query_params.to_dict()
     parameters.pop("view", None)

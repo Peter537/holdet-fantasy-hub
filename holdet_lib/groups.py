@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime
 import json
@@ -444,7 +445,7 @@ def _group_to_dict(group: GroupDefinition, *, external_revisions: bool = False) 
 def _group_from_dict(
     raw: object,
     *,
-    revision_dir: Path | None = None,
+    read_revision: Callable[[str], object] | None = None,
     revision_warnings: list[str] | None = None,
 ) -> GroupDefinition:
     if not isinstance(raw, dict):
@@ -491,18 +492,9 @@ def _group_from_dict(
                 if not isinstance(revision, int) or isinstance(revision, bool):
                     raise PayloadError(f"Gruppe {group_id} har en ugyldig revision")
                 expected = f"{group_id}/revision-{revision}.json"
-                if relative != expected or revision_dir is None:
+                if relative != expected or read_revision is None:
                     raise PayloadError(f"Gruppe {group_id} har en ugyldig revisionsfil")
-                path = revision_dir / Path(expected)
-                try:
-                    revision_raw = json.loads(path.read_text(encoding="utf-8"))
-                except OSError as exc:
-                    raise PayloadError(
-                        f"Turneringsrevisionen {path} kunne ikke læses: {exc}"
-                    ) from exc
-                except json.JSONDecodeError as exc:
-                    raise PayloadError(f"Turneringsrevisionen {path} indeholder ugyldig JSON") from exc
-                loaded = _revision_from_dict(group_id, revision_raw)
+                loaded = _revision_from_dict(group_id, read_revision(expected))
                 if (
                     loaded.revision != revision
                     or loaded.archived_at != item.get("archived_at")
@@ -555,6 +547,55 @@ def _publish_revision_file(
         _publish_revision_file(revision_dir, group_id, revision)
 
 
+def _configuration_from_dict(
+    payload: object,
+    *,
+    read_revision: Callable[[str], object] | None = None,
+    revision_warnings: list[str] | None = None,
+) -> HubConfiguration:
+    if isinstance(payload, dict) and payload.get("schema_version") == 8:
+        payload = dict(payload)
+        payload["schema_version"] = 7
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schema_version") not in {1, 2, 3, 4, 5, 6, 7}
+    ):
+        raise PayloadError("Ikke-understøttet skema for gruppekonfiguration")
+    groups_raw = payload.get("groups")
+    if not isinstance(groups_raw, list):
+        raise PayloadError("Gruppekonfigurationen skal indeholde en groups-liste")
+    groups = tuple(
+        _group_from_dict(
+            item,
+            read_revision=read_revision,
+            revision_warnings=revision_warnings,
+        )
+        for item in groups_raw
+    )
+    group_ids = [group.group_id for group in groups]
+    if len(group_ids) != len(set(group_ids)):
+        raise PayloadError("Gruppekonfigurationen indeholder duplikerede ID'er")
+
+    if payload["schema_version"] in {5, 6, 7}:
+        games_raw = payload.get("games")
+        if not isinstance(games_raw, list):
+            raise PayloadError("Konfiguration med skema 5 skal indeholde en games-liste")
+        games = tuple(_manager_game_from_dict(item) for item in games_raw)
+    else:
+        inferred: dict[tuple[str, str], ManagerGame] = {}
+        for group in groups:
+            if group.teams:
+                inferred.setdefault(
+                    _game_identity(group.game),
+                    normalize_manager_game(group.game),
+                )
+        games = tuple(inferred.values())
+    identities = [manager_game.identity for manager_game in games]
+    if len(identities) != len(set(identities)):
+        raise PayloadError("Gruppekonfigurationen indeholder duplikerede managerspil")
+    return HubConfiguration(games, groups)
+
+
 class GroupStore:
     """Atomically maintain manager games and editable group definitions."""
 
@@ -580,47 +621,18 @@ class GroupStore:
             raise PayloadError(f"Gruppekonfigurationen kunne ikke læses: {exc}") from exc
         except json.JSONDecodeError as exc:
             raise PayloadError("Gruppekonfigurationen indeholder ugyldig JSON") from exc
-        if isinstance(payload, dict) and payload.get("schema_version") == 8:
-            payload = dict(payload)
-            payload["schema_version"] = 7
-        if (
-            not isinstance(payload, dict)
-            or payload.get("schema_version") not in {1, 2, 3, 4, 5, 6, 7}
-        ):
-            raise PayloadError("Ikke-understøttet skema for gruppekonfiguration")
-        groups_raw = payload.get("groups")
-        if not isinstance(groups_raw, list):
-            raise PayloadError("Gruppekonfigurationen skal indeholde en groups-liste")
-        groups = tuple(
-            _group_from_dict(
-                item,
-                revision_dir=self.revision_dir,
-                revision_warnings=revision_warnings,
-            )
-            for item in groups_raw
+        return _configuration_from_dict(
+            payload, read_revision=self._read_revision, revision_warnings=revision_warnings
         )
-        group_ids = [group.group_id for group in groups]
-        if len(group_ids) != len(set(group_ids)):
-            raise PayloadError("Gruppekonfigurationen indeholder duplikerede ID'er")
 
-        if payload["schema_version"] in {5, 6, 7}:
-            games_raw = payload.get("games")
-            if not isinstance(games_raw, list):
-                raise PayloadError("Konfiguration med skema 5 skal indeholde en games-liste")
-            games = tuple(_manager_game_from_dict(item) for item in games_raw)
-        else:
-            inferred: dict[tuple[str, str], ManagerGame] = {}
-            for group in groups:
-                if group.teams:
-                    inferred.setdefault(
-                        _game_identity(group.game),
-                        normalize_manager_game(group.game),
-                    )
-            games = tuple(inferred.values())
-        identities = [manager_game.identity for manager_game in games]
-        if len(identities) != len(set(identities)):
-            raise PayloadError("Gruppekonfigurationen indeholder duplikerede managerspil")
-        return HubConfiguration(games, groups)
+    def _read_revision(self, name: str) -> object:
+        path = self.revision_dir / name
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except OSError as exc:
+            raise PayloadError(f"Turneringsrevisionen {path} kunne ikke læses: {exc}") from exc
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise PayloadError(f"Turneringsrevisionen {path} indeholder ugyldig JSON") from exc
 
     def load_configuration_with_warnings(
         self,

@@ -120,28 +120,91 @@ def test_parquet_is_optional_or_carries_package_metadata() -> None:
         assert table.column("value").to_pylist() == [12_345_678, -4]
 
 
-def test_anonymization_is_stable_irreversible_and_debug_minimizes() -> None:
-    package = sample_package(two_tables=True)
-    shared = holdet.anonymize_data_package(package, "share")
-    repeated = holdet.anonymize_data_package(package, "share")
-    assert shared == repeated
-    assert shared.restorable is False
-    assert shared.tables[1].rows[0]["manager_name"] != "Åse"
-    assert shared.provenance["path"] == "[fjernet]"
-
-    debug = holdet.anonymize_data_package(package, "debug")
-    assert debug.provenance["path"] is None
-    assert debug.tables[0].rows[0]["name"] != "Ægir; Ørn"
-    bundle = holdet.build_support_bundle(package, "debug")
+@pytest.mark.parametrize("profile", ["share", "debug"])
+def test_support_bundle_projects_only_approved_season_fields(profile: str) -> None:
+    package = holdet.DataPackage(
+        "season_report",
+        {
+            "season_id": "private-season-id",
+            "season_name": "Private Season",
+            "unknown_scope_key": 832143,
+        },
+        NOW,
+        {
+            "mode": "cache-only", "path": r"C:\private\cache.json", "score_profile": "Private Scoring",
+            "latest_capture": NOW.isoformat(), "unknown_provenance_key": True,
+        },
+        (
+            holdet.DataTable(
+                "competitions",
+                ("competition_id", "competition_name", "events", "complete", "note", "new_identifier"),
+                ({
+                    "competition_id": "private-competition-id", "competition_name": "Private Competition",
+                    "events": 17, "complete": True, "note": "Private Note", "new_identifier": 876653,
+                },),
+            ),
+            holdet.DataTable("private_table_name", ("value",), ({"value": 837234},)),
+        ),
+    )
+    bundle = holdet.build_support_bundle(package, profile)
     with zipfile.ZipFile(BytesIO(bundle)) as archive:
+        assert set(archive.namelist()) == {"support-manifest.json", "data-package.json"}
         manifest = json.loads(archive.read("support-manifest.json"))
-        assert manifest["restorable"] is False
-        assert "mapping" not in json.dumps(manifest).casefold()
+        payload = archive.read("data-package.json")
+
+    text = payload.decode("utf-8")
+    assert "private" not in text.casefold()
+    for unknown in ("unknown_scope_key", "unknown_provenance_key", "score_profile", "note", "new_identifier"):
+        assert unknown not in text
+    projected = json.loads(payload)
+    competition = projected["tables"][0]["rows"][0]
+    assert competition["events"] == 17
+    assert competition["complete"] is True
+    assert competition["competition_id"].startswith("Konkurrence ")
+    assert projected["scope"]["season_id"].startswith("Sæson ")
+    assert ("competition_name" in competition) == (profile == "share")
+    assert ("season_name" in projected["scope"]) == (profile == "share")
+    assert ("latest_capture" in projected["provenance"]) == (profile == "share")
+    assert manifest["privacy_profile"] == projected["privacy_profile"] == profile
+    assert manifest["restorable"] is projected["restorable"] is False
+    assert manifest["files"] == [{
+        "path": "data-package.json", "size": len(payload), "sha256": hashlib.sha256(payload).hexdigest(),
+    }]
+
+
+def test_support_pseudonyms_repeat_within_one_package_and_change_across_exports() -> None:
+    package = holdet.DataPackage(
+        "manager_game_report", {"locale": "unknown-enum-value", "game": "private-game"},
+        NOW, {},
+        (holdet.DataTable("game", ("game", "teams"), (
+            {"game": "private-game", "teams": 3},
+        )),),
+    )
+    first = holdet.anonymize_data_package(package, "share")
+    second = holdet.anonymize_data_package(package, "share")
+    for projected in (first, second):
+        assert projected.scope["game"] == projected.tables[0].rows[0]["game"]
+        assert projected.scope["locale"] is None
+        assert projected.tables[0].rows[0]["teams"] == 3
+    assert first.scope["game"] != second.scope["game"]
+
+
+def test_unknown_support_package_type_only_exposes_counts() -> None:
+    sample = sample_package()
+    package = holdet.DataPackage("private-document-type", sample.scope, NOW, sample.provenance, sample.tables)
+    projected = holdet.anonymize_data_package(package, "share")
+    assert projected.document_type == "support_summary"
+    assert projected.scope == projected.provenance == {}
+    assert [table.name for table in projected.tables] == ["summary"]
+    assert projected.tables[0].rows == ({"table_count": 1, "row_count": 2},)
 
 
 def test_support_import_rejects_tampering(tmp_path: Path) -> None:
     paths = paths_for(tmp_path / "hub")
     bundle = holdet.build_support_bundle(sample_package(), "share")
+    valid = holdet.preview_import(bundle, paths, filename="support.zip")
+    assert valid.kind == "archive_only"
+    assert valid.can_apply
     changed = BytesIO()
     with zipfile.ZipFile(BytesIO(bundle)) as original, zipfile.ZipFile(changed, "w") as target:
         for info in original.infolist():

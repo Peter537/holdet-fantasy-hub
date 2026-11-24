@@ -128,15 +128,7 @@ def parse_account_profile_user_id(profile_url: str) -> int:
         raise UrlValidationError("Kontoprofilen indeholder et ugyldigt bruger-ID") from exc
 
 
-def load_accounts(path: Path) -> tuple[AccountConfig, ...]:
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return ()
-    except OSError as exc:
-        raise PayloadError(f"Kontofilen {path} kunne ikke læses: {exc}") from exc
-    except json.JSONDecodeError as exc:
-        raise PayloadError(f"Kontofilen {path} indeholder ugyldig JSON") from exc
+def _accounts_from_dict(raw: object) -> tuple[AccountConfig, ...]:
     items = raw.get("accounts") if isinstance(raw, dict) else raw
     if not isinstance(items, list):
         raise PayloadError("Kontofilen skal indeholde en accounts-liste")
@@ -160,6 +152,18 @@ def load_accounts(path: Path) -> tuple[AccountConfig, ...]:
         seen_ids.add(user_id)
         accounts.append(AccountConfig(key, label, profile_url, user_id))
     return tuple(accounts)
+
+
+def load_accounts(path: Path) -> tuple[AccountConfig, ...]:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return ()
+    except OSError as exc:
+        raise PayloadError(f"Kontofilen {path} kunne ikke læses: {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise PayloadError(f"Kontofilen {path} indeholder ugyldig JSON") from exc
+    return _accounts_from_dict(raw)
 
 
 def select_accounts(
@@ -342,8 +346,23 @@ def _looks_like_roster_player(value: object) -> bool:
     return bool(_person_name(person)) and isinstance(value.get("id"), int)
 
 
-def _extract_roster(html: str, *, salary_cap: bool) -> tuple[RosterEntry, ...]:
-    candidates: list[tuple[int, list[dict[str, object]]]] = []
+def _round_heading_number(heading: object) -> int | None:
+    if not isinstance(heading, str):
+        return None
+    for pattern in (
+        r"\b(?:spilrunde|runde|round)\s*[:#]?\s*(\d+)\b",
+        r"\b(\d+)\.?\s+(?:spilrunde|runde|round)\b",
+        r"^\s*(\d+)\s*$",
+    ):
+        if match := re.search(pattern, heading, re.IGNORECASE):
+            return int(match[1])
+    return None
+
+
+def _extract_roster(
+    html: str, *, salary_cap: bool, expected_round: int | None
+) -> tuple[tuple[RosterEntry, ...], int | None]:
+    candidates: list[tuple[int, list[dict[str, object]], int | None]] = []
     for node in walk_flight(html):
         if not isinstance(node, dict) or not isinstance(node.get("players"), list):
             continue
@@ -353,10 +372,17 @@ def _extract_roster(html: str, *, salary_cap: bool) -> tuple[RosterEntry, ...]:
         score = len(players) * 100
         score += sum("sinceRound" in item for item in players) * 5
         score += sum("isCaptain" in item for item in players) * 3
-        candidates.append((score, players))
+        candidates.append((score, players, _round_heading_number(node.get("roundHeading"))))
     if not candidates:
-        return ()
-    players = max(candidates, key=lambda item: item[0])[1]
+        return (), None
+    _, players, round_number = max(
+        candidates,
+        key=lambda item: (
+            expected_round is not None and item[2] == expected_round,
+            expected_round is not None and item[2] is not None,
+            item[0],
+        ),
+    )
     result: list[RosterEntry] = []
     for index, raw in enumerate(players):
         person = raw["person"]
@@ -395,7 +421,7 @@ def _extract_roster(html: str, *, salary_cap: bool) -> tuple[RosterEntry, ...]:
                 ),
             )
         )
-    return tuple(result)
+    return tuple(result), round_number
 
 
 def _metric_numbers(html: str, label: str) -> tuple[int, ...]:
@@ -425,7 +451,9 @@ def _metric_numbers(html: str, label: str) -> tuple[int, ...]:
     return tuple(numbers)
 
 
-def extract_team_page(html: str, *, salary_cap: bool) -> TeamPageData:
+def extract_team_page(
+    html: str, *, salary_cap: bool, expected_round: int | None = None,
+) -> TeamPageData:
     team_name: str | None = None
     owner_name: str | None = None
     owner_user_id: int | None = None
@@ -450,11 +478,13 @@ def extract_team_page(html: str, *, salary_cap: bool) -> TeamPageData:
             values = rendered_scalars(node.get("children"))
             if values and isinstance(values[0], str):
                 team_name = values[0].strip()
-        round_heading = node.get("roundHeading")
-        if current_round is None and isinstance(round_heading, str):
-            match = re.search(r"\d+", round_heading)
-            if match:
-                current_round = int(match.group())
+        if current_round is None and not node.get("players"):
+            current_round = _round_heading_number(node.get("roundHeading"))
+    roster, roster_round = _extract_roster(
+        html, salary_cap=salary_cap, expected_round=expected_round,
+    )
+    if roster:
+        current_round = roster_round
     substitutions = _metric_numbers(html, "Udskiftninger")
     top = _metric_numbers(html, "Top")
     return TeamPageData(
@@ -465,7 +495,7 @@ def extract_team_page(html: str, *, salary_cap: bool) -> TeamPageData:
         substitutions_remaining=substitutions[0] if substitutions else None,
         substitutions_limit=substitutions[1] if len(substitutions) > 1 else None,
         top_percent=top[0] if top else None,
-        roster=_extract_roster(html, salary_cap=salary_cap),
+        roster=roster,
     )
 
 
@@ -520,6 +550,19 @@ def parse_game_context(game: GameUrl, variant: str, payload: object) -> GameCont
     )
 
 
+def _validated_schedule_rounds(rounds: Iterable[ScheduleRound]) -> tuple[ScheduleRound, ...]:
+    by_number: dict[int, ScheduleRound] = {}
+    for item in rounds:
+        number = item.round_number
+        if isinstance(number, bool) or not isinstance(number, int) or number < 0:
+            raise PayloadError("Kampprogrammet indeholder et ugyldigt rundenummer")
+        if not item.start <= item.close <= item.end:
+            raise PayloadError(f"Runde {number} i kampprogrammet har ugyldige tidsgrænser")
+        if by_number.setdefault(number, item) != item:
+            raise PayloadError(f"Kampprogrammet har modstridende tidsgrænser for runde {number}")
+    return tuple(sorted(by_number.values(), key=lambda item: item.round_number))
+
+
 def parse_schedule_rounds(payload: object) -> tuple[ScheduleRound, ...]:
     """Return validated rounds from a public schedule payload."""
 
@@ -550,8 +593,6 @@ def parse_schedule_rounds(payload: object) -> tuple[ScheduleRound, ...]:
             if parsed.tzinfo is None:
                 parsed = parsed.replace(tzinfo=timezone.utc)
             timestamps[field] = parsed
-        if not (timestamps["start"] <= timestamps["close"] <= timestamps["end"]):
-            raise PayloadError(f"Runde {round_number} i kampprogrammet har ugyldige tidsgrænser")
         result.append(
             ScheduleRound(
                 round_number=round_number,
@@ -560,7 +601,7 @@ def parse_schedule_rounds(payload: object) -> tuple[ScheduleRound, ...]:
                 end=timestamps["end"],
             )
         )
-    return tuple(sorted(result, key=lambda value: value.round_number))
+    return _validated_schedule_rounds(result)
 
 
 def parse_schedule_final_round(payload: object) -> int:
@@ -765,26 +806,37 @@ class TeamDataService:
         page: TeamPageData | None = None
         history: tuple[RoundSummary, ...] = ()
         for attempt in range(2):
-            page = extract_team_page(
-                self.fetch_text(team_url), salary_cap=context.salary_cap > 0
-            )
+            html = self.fetch_text(team_url)
             history = parse_history(
                 self.fetch_json(history_url),
                 salary_cap=context.salary_cap > 0,
                 round_ranks=round_ranks,
                 overall_ranks=overall_ranks,
             )
-            if not history or context.salary_cap <= 0 or not page.roster:
+            page = extract_team_page(
+                html, salary_cap=context.salary_cap > 0,
+                expected_round=history[0].round_number if history else None,
+            )
+            if not history:
                 break
-            expected = history[0].player_value
-            actual = sum(player.value for player in page.roster)
-            if expected == actual:
+            latest = history[0]
+            if page.roster and page.current_round is not None and page.current_round != latest.round_number:
+                error = (
+                    f"Hold {reference.team_id} viste runde {page.current_round}, "
+                    f"men den seneste historikrunde var {latest.round_number}"
+                )
+            elif context.salary_cap > 0 and page.roster:
+                actual = sum(player.value for player in page.roster)
+                if latest.player_value == actual:
+                    break
+                error = (
+                    f"Hold {reference.team_id} har trupværdien {actual}, som ikke matcher "
+                    f"spillerhistorikkens værdi {latest.player_value}"
+                )
+            else:
                 break
             if attempt == 1:
-                raise PayloadError(
-                    f"Hold {reference.team_id} har trupværdien {actual}, som ikke matcher "
-                    f"spillerhistorikkens værdi {expected}"
-                )
+                raise PayloadError(error)
         assert page is not None
         observed_at = self._clock()
         annotated_history: list[RoundSummary] = []

@@ -1,4 +1,4 @@
-"""Regenerate the audited Windows/Python 3.14 dependency lock."""
+"""Regenerate the audited Windows AMD64 CPython 3.14 dependency lock."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import sysconfig
 import tempfile
 import time
 import tomllib
@@ -59,8 +60,14 @@ def load_requirements() -> tuple[str, ...]:
 
 
 def ensure_supported_runtime(*, require_lock_command: bool = True) -> None:
-    if sys.platform != "win32" or sys.version_info[:2] != EXPECTED_PYTHON:
-        raise LockError("The lock must be generated on Windows with CPython 3.14.")
+    if (
+        sys.platform != "win32"
+        or sys.implementation.name != "cpython"
+        or sys.version_info[:2] != EXPECTED_PYTHON
+        or sysconfig.get_platform().casefold() != "win-amd64"
+        or sysconfig.get_config_var("Py_GIL_DISABLED")
+    ):
+        raise LockError("The dependency lock requires Windows with standard AMD64 (x64) CPython 3.14.")
     if not require_lock_command:
         return
     completed = subprocess.run(
@@ -179,8 +186,7 @@ def request_json(url: str, *, body: bytes | None = None) -> Any:
     raise LockError(f"Authoritative dependency evidence is unavailable from {url}: {last_error}")
 
 
-def verify_pypi_artifacts(artifacts: tuple[dict[str, str], ...]) -> int:
-    provenance_gaps = 0
+def verify_pypi_artifacts(artifacts: tuple[dict[str, str], ...]) -> None:
     for artifact in artifacts:
         url = PYPI_JSON.format(name=quote(artifact["name"]), version=quote(artifact["version"]))
         metadata = request_json(url)
@@ -198,9 +204,6 @@ def verify_pypi_artifacts(artifacts: tuple[dict[str, str], ...]) -> int:
             or registry_digest != artifact["sha256"]
         ):
             raise LockError(f"PyPI artifact evidence does not match the lock for {artifact['name']}.")
-        if not selected.get("has_sig") and not selected.get("provenance"):
-            provenance_gaps += 1
-    return provenance_gaps
 
 
 def verify_osv(artifacts: tuple[dict[str, str], ...]) -> None:
@@ -268,7 +271,7 @@ def run(check: bool) -> int:
             )
         generate_lock(requirements, candidate, constraints=constraints)
         _, artifacts = load_and_validate_lock(candidate, requirements)
-        provenance_gaps = verify_pypi_artifacts(artifacts)
+        verify_pypi_artifacts(artifacts)
         verify_osv(artifacts)
         content = candidate.read_bytes()
     digest = hashlib.sha256(content).hexdigest()
@@ -281,7 +284,7 @@ def run(check: bool) -> int:
         action = "updated"
     print(
         f"{action} {LOCK_PATH.name}: {len(artifacts)} packages, sha256={digest}, "
-        f"OSV clean, {provenance_gaps} artifacts without registry signature/provenance"
+        "PyPI wheel metadata matched, OSV clean, attestations unchecked"
     )
     return 0
 

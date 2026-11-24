@@ -6,9 +6,11 @@ import json
 from pathlib import Path
 import shutil
 import unittest
+from unittest.mock import patch
 from uuid import uuid4
 
 import holdet_lib as holdet
+from cli.main import main
 
 
 @contextmanager
@@ -235,8 +237,10 @@ class PlayerPayloadTests(unittest.TestCase):
             requested.append(url)
             if url == "https://www.holdet.dk/da/season/tour-de-france-2026":
                 return flight_html({"variant": "cycling"})
-            if url == "https://www.holdet.dk/da/season/tour-de-france-2026/cycling/statistics?round=6":
+            if url in {game.statistics_url("cycling", 6), game.statistics_url("cycling", 5)}:
                 return statistics_html(round_number=6)
+            if url == game.statistics_url("cycling"):
+                return statistics_html(round_number=7)
             raise AssertionError(url)
 
         cartridge = {
@@ -252,12 +256,28 @@ class PlayerPayloadTests(unittest.TestCase):
                 },
             },
         }
-        result = holdet.HoldetClient(
+        client = holdet.HoldetClient(
             text_fetcher=fetch, json_fetcher=lambda _url: cartridge
-        ).fetch_players(game, round_number=6)
+        )
+        result = client.fetch_players(game, round_number=6)
         self.assertEqual(result.round_number, 6)
         self.assertEqual(requested[-1], game.statistics_url("cycling", 6))
         self.assertEqual(result.round_status, "unknown")
+        with self.assertRaisesRegex(holdet.PayloadError, "returnerede runde 6.*runde 5"):
+            client.fetch_players(game, round_number=5)
+        self.assertEqual(client.fetch_players(game).round_number, 7)
+
+    def test_player_cli_checks_injected_client_round_before_publishing(self) -> None:
+        statistics = sample_statistics()
+        with writable_directory() as temporary, patch("cli.main.HoldetClient") as client:
+            client.return_value.fetch_players.return_value = statistics
+            result = main([
+                "players", statistics.game.original, "--round", str(statistics.round_number + 1),
+                "--data-dir", str(temporary), "--output-dir", str(temporary / "export"),
+            ])
+            self.assertEqual(result, 1)
+            self.assertFalse((temporary / "data" / "snapshots").exists())
+            self.assertFalse((temporary / "export").exists())
 
     def test_nfl_client_resolves_root_cartridge_and_statistics_route(self) -> None:
         game = holdet.GameUrl(

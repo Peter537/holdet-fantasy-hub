@@ -80,6 +80,27 @@ def strategy_to_dict(strategy: TeamStrategy) -> dict:
     return value
 
 
+def _strategies_from_dict(raw: object) -> dict[tuple[str, str, int], TeamStrategy]:
+    if not isinstance(raw, dict) or raw.get("schema_version") != 1 or not isinstance(raw.get("teams"), list):
+        raise PayloadError("Unsupported team-strategy file")
+    result = {}
+    for item in raw["teams"]:
+        if not isinstance(item, dict):
+            raise PayloadError("Invalid team strategy")
+        game = item.get("game")
+        team_id = item.get("team_id")
+        if (not isinstance(game, dict) or not isinstance(game.get("locale"), str)
+                or not game["locale"] or not isinstance(game.get("slug"), str)
+                or not game["slug"] or isinstance(team_id, bool)
+                or not isinstance(team_id, int) or team_id <= 0):
+            raise PayloadError("Strategy needs an exact game and positive team ID")
+        identity = game["locale"].casefold(), game["slug"], team_id
+        if identity in result:
+            raise PayloadError("Duplicate team strategy")
+        result[identity] = strategy_from_dict(item.get("strategy"))
+    return result
+
+
 class StrategyStore:
     def __init__(self, path: Path):
         self.path = Path(path)
@@ -88,24 +109,7 @@ class StrategyStore:
         if not self.path.exists():
             return {}
         raw = json.loads(self.path.read_text(encoding="utf-8"))
-        if not isinstance(raw, dict) or raw.get("schema_version") != 1 or not isinstance(raw.get("teams"), list):
-            raise PayloadError("Unsupported team-strategy file")
-        result = {}
-        for item in raw["teams"]:
-            if not isinstance(item, dict):
-                raise PayloadError("Invalid team strategy")
-            game = item.get("game")
-            team_id = item.get("team_id")
-            if (not isinstance(game, dict) or not isinstance(game.get("locale"), str)
-                    or not game["locale"] or not isinstance(game.get("slug"), str)
-                    or not game["slug"] or isinstance(team_id, bool)
-                    or not isinstance(team_id, int) or team_id <= 0):
-                raise PayloadError("Strategy needs an exact game and positive team ID")
-            identity = game["locale"].casefold(), game["slug"], team_id
-            if identity in result:
-                raise PayloadError("Duplicate team strategy")
-            result[identity] = strategy_from_dict(item.get("strategy"))
-        return result
+        return _strategies_from_dict(raw)
 
     def get(self, game: GameUrl, team_id: int) -> TeamStrategy | None:
         return self.load().get((game.locale.casefold(), game.slug, team_id))

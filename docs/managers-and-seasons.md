@@ -77,6 +77,8 @@ En `SeasonDefinition` indeholder ID, navn, valgte gruppe-/turnerings-ID'er og va
 
 Ændring af pointprofilen genberegner alle visninger uden at ændre råevents. En gruppe i en aktiv sæson kan arkiveres, men må ikke slettes, før den er fjernet fra sæsonen.
 
+Sæsonfanen, rapporterne og det lokale API bruger de seneste eventrevisioner og den aktuelle mapping af manageridentiteter. Omdøbning, sammenlægning eller opsplitning kan derfor ændre visningen, mens de gemte events bevarer deres rå identiteter.
+
 ## Eventrevisioner
 
 Eventledger schema 2 er append-only. `ManagerEvent` er den kanoniske in-memory-type, mens `HallOfFameEvent` er det bevarede kompatibilitetsnavn. Hver revision bærer logisk event-ID, revision, eventuelt `supersedes_revision`, konkurrence/revision, runde, eventuelt match-ID, tidspunkt og fulde placeringer med valgfrie identitetsnøgler.

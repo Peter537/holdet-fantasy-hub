@@ -4,7 +4,7 @@ Pytest er projektets autoritative test runner. Suiten indeholder både unittest-
 
 ## Installation og komplet suite
 
-Opret projektets eget Python 3.14-miljø, og installer website- og testafhængigheder fra repositoryets rod:
+Opret projektets miljø med standardudgaven af AMD64 (x64) CPython 3.14 på Windows, og installer website- og testafhængigheder fra repositoryets rod:
 
 ```powershell
 py -3.14 -m venv .venv
@@ -12,7 +12,7 @@ py -3.14 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install --no-deps --no-build-isolation --no-index -e .
 ```
 
-Den ene repositorylås indeholder core-, website-, Parquet-, test- og UI-testgrafen for Windows/Python 3.14. Installationsscriptet validerer den eksisterende lås og installerer dens eksakte wheel-URL'er med SHA-256-kontrol. Installation kræver ikke, at låsen genberegnes. Brug samme `.venv`-interpreter til appen og testene.
+Den ene repositorylås indeholder core-, website-, Parquet-, test- og UI-testgrafen for x64 Windows/Python 3.14. Installationsscriptet validerer den eksisterende lås og installerer dens eksakte wheel-URL'er med SHA-256-kontrol. Installation kræver ikke, at låsen genberegnes. Brug samme `.venv`-interpreter til appen og testene.
 
 Kør hele suiten:
 
@@ -24,14 +24,14 @@ De almindelige tests må ikke kontakte Holdet.dk. HTTP-svar kommer fra lokale fi
 
 ## Afhængighedslåsen
 
-Genberegn kun `pylock.toml`, når afhængighederne skal ændres. Scriptet kræver Windows og Python 3.14. Den låste installation omfatter også en kontrolleret pip-version med `pip lock`, så `.venv`-miljøet kan bruges til både kontrol og genberegning.
+Genberegn kun `pylock.toml`, når afhængighederne skal ændres. Scriptet kræver Windows med AMD64 (x64) CPython 3.14. Den låste installation omfatter også en kontrolleret pip-version med `pip lock`, så `.venv`-miljøet kan bruges til både kontrol og genberegning.
 
 ```powershell
 .\.venv\Scripts\python.exe .\scripts\refresh_dependency_lock.py
 .\.venv\Scripts\python.exe .\scripts\refresh_dependency_lock.py --check
 ```
 
-Kontrollen bruger resolver, wheelmetadata og OSV. Både genberegning og `--check` kræver netværk og sender offentlige pakkenavne og versioner; de sender ingen repositoryfiler eller private data. De er særskilte kontroller ud over den almindelige offline-testsuite.
+Kontrollen sammenholder wheel-URL og SHA-256 med PyPI og tjekker de låste versioner for kendte sårbarheder i OSV. Attestering verificeres ikke. Genberegning og `--check` kræver netværk, og forespørgslerne omfatter offentlige pakkenavne og versioner. De er særskilte kontroller ud over den almindelige offline-testsuite.
 
 ## Parser-canary
 
@@ -64,7 +64,7 @@ Uden flaget skippes canary-testene, og standardsuiten er helt offline. Canarien 
 | Historik | Huller, seneste snapshot pr. runde og omvendte rangakser på spil-, gruppe- og holdniveau |
 | Managers og sæsoner | Identitetsgraf, stabilt ID ved merge/rename/unmerge, legacy-remapping uden writes, bedste hold, locale- og puljeisoleret Elo, awards, streaks, historier, H2H-aggregater, sæsonredigering og pointprofil |
 | Eventledger og kalender | Revisioner, legacy-events, manglende metadata, cache-only events og nul navigation-writes |
-| Dataportabilitet | DataPackage, Unicode, rå taltyper, CSV-injection, XLSX-ark, valgfri Parquet, rapportescaping, forklarlige historiefakta, sikre dual links og anonymiseringsprofiler |
+| Dataportabilitet | DataPackage, Unicode, rå taltyper, CSV-injection, XLSX-ark, valgfri Parquet, rapportescaping, forklarlige historiefakta, sikre dual links og pseudonymiserede supportpakker |
 | Lagring og backup | AppData, atomiske writes, HubSettings 1–4 → 5, spiller-snapshot 1–3 → 4, inbox 1 → 2 og GameMetadata 1 → 2 uden startup-write, parringer schema 1–2, kørselsjournaler, integritetsindeks, importklassifikation, arkivgrænser, SHA-256, path traversal, preview, staging og rollback |
 | Lokalt API | Catalog, filtre, pagination, CSV/JSON-paritet, ETag/304, Host/loopback, sikre headere, nul writes og nul netværk |
 | Turnering | Liga, Swiss, gruppespil + knockout, double elimination, fuld Swiss-afslutning, custom byepoint, Buchholz, seedning, tie-breakers, bronzekamp, publicerede knockoutopgør og konflikter efter resultatkorrektioner |

@@ -9,8 +9,8 @@ from pathlib import Path
 from typing import Any, Literal
 
 from .errors import PayloadError
+from .filenames import game_cache_stem
 from .models import GameUrl, ScheduleRound
-from .output import sanitize_path_component
 from .persistence import aware_local, publish_immutable_text, replace_text_atomically
 from .rules import (
     GameRuleProfile,
@@ -18,7 +18,7 @@ from .rules import (
     game_rule_to_dict,
     rule_profile_for_game,
 )
-from .teams import GameContext
+from .teams import GameContext, _validated_schedule_rounds
 
 
 GAME_METADATA_SCHEMA_VERSION = 2
@@ -299,7 +299,7 @@ def _metadata_from_dict(payload: object) -> GameMetadata:
         salary_cap,
         _integer(game.get("final_round"), "game.final_round", optional=True),
         _text(game.get("display_name"), "game.display_name", optional=True),
-        tuple(sorted(parsed_rounds, key=lambda item: item.round_number)),
+        _validated_schedule_rounds(parsed_rounds),
         _timestamp(payload.get("fetched_at"), "fetched_at"),
         rule_profile,
     )
@@ -365,14 +365,10 @@ class GameMetadataStore:
         self.directory = Path(directory)
 
     def _path(self, game: GameUrl) -> Path:
-        locale = sanitize_path_component(game.locale.casefold(), fallback="da")
-        slug = sanitize_path_component(game.slug, fallback="game")
-        return self.directory / f"{locale}--{slug}.json"
+        return self.directory / f"{game_cache_stem(game)}.json"
 
     def _revision_directory(self, game: GameUrl) -> Path:
-        locale = sanitize_path_component(game.locale.casefold(), fallback="da")
-        slug = sanitize_path_component(game.slug, fallback="game")
-        return self.directory / "revisions" / f"{locale}--{slug}"
+        return self.directory / "revisions" / game_cache_stem(game)
 
     def _save_revision(self, revision: GameMetadataRevision) -> Path:
         directory = self._revision_directory(revision.metadata.game)
@@ -418,6 +414,9 @@ class GameMetadataStore:
             if isinstance(value, GameMetadata)
             else game_metadata_from_context(value, fetched_at=fetched_at)
         )
+        rounds = _validated_schedule_rounds(metadata.rounds)
+        if metadata.rounds != rounds:
+            metadata = replace(metadata, rounds=rounds)
         try:
             previous = self.load(metadata.game)
         except (PayloadError, ValueError):

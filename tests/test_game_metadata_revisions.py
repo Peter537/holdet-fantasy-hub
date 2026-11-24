@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+import json
+
+import pytest
 
 from holdet_lib import (
     GameMetadata,
     GameMetadataStore,
     GameUrl,
+    PayloadError,
     ScheduleRound,
     compare_game_metadata,
 )
@@ -118,3 +123,29 @@ def test_explicit_save_recovers_a_corrupt_canonical_metadata_file(tmp_path) -> N
     assert not warnings
     assert len(revisions) == 1
     assert revisions[0].changes == ()
+
+
+def test_rejected_duplicate_schedule_keeps_previous_metadata_and_revision(tmp_path) -> None:
+    original = _metadata(fetched_at=datetime(2026, 8, 9, 10, tzinfo=timezone.utc))
+    round_zero = replace(original.rounds[0], round_number=0)
+    store = GameMetadataStore(tmp_path)
+    good = store.save(replace(original, rounds=(round_zero, round_zero)))
+    assert good.rounds == (round_zero,)
+    before, _ = store.revisions(original.game)
+    wrong = replace(round_zero, end=round_zero.end + timedelta(hours=1))
+    with pytest.raises(PayloadError, match="modstridende.*runde 0"):
+        store.save(replace(original, rounds=(round_zero, wrong)))
+    assert store.load(original.game) == good
+    assert store.revisions(original.game) == (before, ())
+
+
+def test_cached_metadata_rejects_conflicting_duplicate_schedule_round(tmp_path) -> None:
+    metadata = _metadata(fetched_at=datetime(2026, 8, 9, 10, tzinfo=timezone.utc))
+    store = GameMetadataStore(tmp_path)
+    store.save(metadata)
+    current = tmp_path / "da--demo.json"
+    payload = json.loads(current.read_text(encoding="utf-8"))
+    payload["rounds"].append({**payload["rounds"][0], "end": "2026-08-12T10:00:00Z"})
+    current.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(PayloadError, match="modstridende.*runde 1"):
+        store.load(metadata.game)

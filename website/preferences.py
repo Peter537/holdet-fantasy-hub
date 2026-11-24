@@ -7,6 +7,8 @@ import streamlit as st
 from holdet_lib.errors import PayloadError
 from holdet_lib.hub_settings import HubFeature, HubSettings, HubSettingsStore, feature_enabled
 from holdet_lib.paths import AppPaths
+from holdet_lib.refresh_runs import data_operation_running
+from holdet_lib.restore_fence import restore_read_version, update_current_installation
 from website.navigation import PageId, page_link
 
 
@@ -85,32 +87,54 @@ def require_tool(
     return False
 
 
+def _save_feature_preferences(
+    paths: AppPaths, expected: HubSettings, restore_version: str | None,
+) -> None:
+    selected = tuple(
+        feature for feature in FEATURE_LABELS
+        if st.session_state.get(f"feature:{feature.value}", False)
+    )
+    try:
+        with update_current_installation(paths, restore_version):
+            if data_operation_running(paths.data_dir):
+                raise PayloadError("Indstillinger kan gemmes, når opdateringen er afsluttet")
+            HubSettingsStore(paths.hub_settings_file).set_enabled_features(expected, selected)
+    except (OSError, PayloadError, ValueError) as exc:
+        st.session_state["feature-preferences-error"] = str(exc)
+    else:
+        for feature in HubFeature:
+            st.session_state.pop(f"tool-open-once:{feature.value}", None)
+        st.session_state["feature-preferences-saved"] = True
+
+
 def render_settings(paths: AppPaths) -> None:
     st.title("Indstillinger")
     st.subheader("Valgfrie værktøjer")
     st.caption("Vælg de værktøjer, du vil se. Deaktivering sletter ingen gemte data. Alarmer oprettes kun, mens Statusalarmer er aktiveret.")
-    store = HubSettingsStore(paths.hub_settings_file)
-    settings = settings_for(paths)
-    readable = settings_readable(paths)
+    try:
+        restore_version = restore_read_version(paths)
+    except PayloadError as exc:
+        st.error(str(exc))
+        return
+    settings, readable = _settings_snapshot(paths)
+    if not readable:
+        _settings_warning()
+    if st.session_state.get("feature-preferences-baseline") != settings:
+        for feature in FEATURE_LABELS:
+            st.session_state.pop(f"feature:{feature.value}", None)
+        st.session_state["feature-preferences-baseline"] = settings
     with st.form("feature-preferences"):
-        selected = tuple(
-            feature for feature, label in FEATURE_LABELS.items()
-            if st.checkbox(
+        for feature, label in FEATURE_LABELS.items():
+            st.checkbox(
                 label, value=feature_enabled(settings, feature),
                 key=f"feature:{feature.value}", disabled=not readable,
             )
+        st.form_submit_button(
+            "Gem værktøjer", type="primary", disabled=not readable,
+            on_click=_save_feature_preferences, args=(paths, settings, restore_version),
         )
-        save = st.form_submit_button("Gem værktøjer", type="primary", disabled=not readable)
-    if save and readable:
-        try:
-            store.set_enabled_features(store.load(), selected)
-        except (OSError, PayloadError, ValueError):
-            _settings_warning()
-        else:
-            for feature in HubFeature:
-                st.session_state.pop(f"tool-open-once:{feature.value}", None)
-            st.session_state["feature-preferences-saved"] = True
-            st.rerun()
+    if error := st.session_state.pop("feature-preferences-error", None):
+        st.error(f"Værktøjsindstillingerne kunne ikke gemmes: {error}")
     if st.session_state.pop("feature-preferences-saved", False):
         st.success("Værktøjsindstillingerne er gemt.")
     st.subheader("Data og administration")

@@ -326,6 +326,17 @@ def select_alert_baseline(
     return index.newest(game, max(eligible_rounds))
 
 
+def _inbox_from_dict(raw: object) -> tuple[WatchlistAlert, ...]:
+    if not isinstance(raw, dict) or raw.get("schema_version") not in {
+        1, ANALYSIS_INBOX_SCHEMA_VERSION
+    }:
+        raise PayloadError("Ukendt skema for alarmindbakken")
+    items = raw.get("alerts", [])
+    if not isinstance(items, list):
+        raise PayloadError("Alarmindbakken mangler alerts-listen")
+    return tuple(_alert_from_dict(item, index) for index, item in enumerate(items))
+
+
 class AnalysisInboxStore:
     """Atomically store alert state; loading is side-effect free."""
 
@@ -341,14 +352,7 @@ class AnalysisInboxStore:
             raise PayloadError(f"Alarmindbakken kunne ikke læses: {exc}") from exc
         except json.JSONDecodeError as exc:
             raise PayloadError("Alarmindbakken indeholder ugyldig JSON") from exc
-        if not isinstance(raw, dict) or raw.get("schema_version") not in {
-            1, ANALYSIS_INBOX_SCHEMA_VERSION
-        }:
-            raise PayloadError("Ukendt skema for alarmindbakken")
-        items = raw.get("alerts", [])
-        if not isinstance(items, list):
-            raise PayloadError("Alarmindbakken mangler alerts-listen")
-        return tuple(_alert_from_dict(item, index) for index, item in enumerate(items))
+        return _inbox_from_dict(raw)
 
     @configuration_transaction
     def save(self, alerts: tuple[WatchlistAlert, ...]) -> None:

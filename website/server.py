@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 import csv
 from datetime import timezone
 from email.utils import format_datetime
@@ -9,10 +10,13 @@ import hashlib
 from io import StringIO
 import ipaddress
 import json
+import logging
 from pathlib import Path
+import re
 from urllib.parse import urlsplit
 
 import streamlit as st
+from starlette.concurrency import run_in_threadpool
 from starlette.middleware import Middleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
@@ -27,7 +31,11 @@ from holdet_lib.local_api import (
     resolve_registered_artifact,
 )
 from holdet_lib.data_packages import neutralize_spreadsheet_text
+from holdet_lib.errors import PayloadError
 from holdet_lib.paths import resolve_paths
+from holdet_lib.restore_fence import restore_read_version
+from holdet_lib.refresh_runs import RefreshRunBusyError
+from holdet_lib.restore_transaction import recover_restore
 
 
 APP_PATHS = resolve_paths()
@@ -36,6 +44,8 @@ _ALLOWED_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 _ALLOWED_DATA_PARAMS = frozenset(
     {"format", "limit", "offset", "locale", "game", "round", "group", "season", "team_id"}
 )
+# Commas inside an opaque tag belong to its value.
+_ENTITY_TAG_ITEM = re.compile(r'[ \t,]*(?:W/)?("[\x21\x23-\x7e\x80-\xff]*")[ \t]*(?:,|$)')
 
 
 def _json(payload: object, status_code: int = 200, headers: dict[str, str] | None = None) -> Response:
@@ -60,6 +70,20 @@ class LoopbackSecurityMiddleware(BaseHTTPMiddleware):
                 {"error": {"code": "loopback_required", "message": "Kun lokale forespørgsler er tilladt."}},
                 403,
             )
+        elif request.url.path.startswith(("/api/v1/data/", "/downloads/")):
+            try:
+                version = await run_in_threadpool(restore_read_version, APP_PATHS)
+            except PayloadError:
+                response = _restore_unavailable()
+            else:
+                response = await call_next(request)
+                try:
+                    current = await run_in_threadpool(restore_read_version, APP_PATHS)
+                except PayloadError:
+                    response = _restore_unavailable()
+                else:
+                    if current != version:
+                        response = _restore_unavailable()
         else:
             response = await call_next(request)
         response.headers["X-Content-Type-Options"] = "nosniff"
@@ -67,6 +91,13 @@ class LoopbackSecurityMiddleware(BaseHTTPMiddleware):
         response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
         return response
+
+
+def _restore_unavailable() -> Response:
+    return _json(
+        {"error": {"code": "restore_pending", "message": "Data gendannes. Prøv forespørgslen igen."}},
+        503,
+    )
 
 
 async def health(request: Request) -> Response:
@@ -154,7 +185,23 @@ def _conditional_headers(body: bytes, last_modified) -> dict[str, str]:
     return headers
 
 
-async def data_endpoint(request: Request) -> Response:
+def _if_none_match(header_values: list[str], etag: str) -> bool:
+    """Apply the weak comparison and list syntax for GET and HEAD."""
+    value = ",".join(header_values)
+    if value.strip(" \t") == "*":
+        return True
+    matched = False
+    offset = 0
+    while offset < len(value):
+        item = _ENTITY_TAG_ITEM.match(value, offset)
+        if item is None:
+            return matched and not value[offset:].strip(" \t,")
+        matched |= item.group(1) == etag
+        offset = item.end()
+    return matched
+
+
+def data_endpoint(request: Request) -> Response:
     dataset = request.path_params["dataset"]
     try:
         pairs = request.query_params.multi_items()
@@ -194,7 +241,7 @@ async def data_endpoint(request: Request) -> Response:
             ).encode("utf-8")
             media_type = "application/json"
         headers = _conditional_headers(body, DATA_API.last_modified())
-        if request.headers.get("if-none-match") == headers["ETag"]:
+        if _if_none_match(request.headers.getlist("if-none-match"), headers["ETag"]):
             return Response(status_code=304, headers=headers)
         headers["Content-Length"] = str(len(body))
         if request.method == "HEAD":
@@ -209,15 +256,25 @@ async def data_endpoint(request: Request) -> Response:
         )
 
 
-async def download_artifact(request: Request) -> Response:
+def download_artifact(request: Request) -> Response:
     path = resolve_registered_artifact(APP_PATHS, request.path_params["artifact_id"])
     if path is None:
         return _json({"error": {"code": "not_found", "message": "Artifactet findes ikke eller er ændret."}}, 404)
     return FileResponse(path, filename=path.name, media_type="application/octet-stream")
 
 
+@asynccontextmanager
+async def _restore_on_startup(_app):
+    try:
+        await run_in_threadpool(recover_restore, APP_PATHS)
+    except (OSError, PayloadError, RefreshRunBusyError) as exc:
+        logging.getLogger(__name__).warning("Restore recovery is pending (%s)", type(exc).__name__)
+    yield
+
+
 app = st.App(
     Path(__file__).with_name("app.py"),
+    lifespan=_restore_on_startup,
     routes=[
         Route("/api/v1/health", health, methods=["GET"]),
         Route("/api/v1/catalog", catalog, methods=["GET"]),

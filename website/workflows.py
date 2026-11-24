@@ -9,7 +9,7 @@ import streamlit as st
 from holdet_lib.game_metadata import GameMetadataStore
 from holdet_lib.errors import PayloadError
 from holdet_lib.output import sanitize_path_component
-from holdet_lib.refresh_runs import RefreshRunBusyError
+from holdet_lib.refresh_runs import RefreshRunBusyError, data_operation_running
 from holdet_lib.scope_exports import prepare_scope_export, serialize_scope_export
 from holdet_lib.scopes import resolve_scope
 from holdet_lib.storage import ManifestStore, PlayerStatisticsStore
@@ -25,7 +25,7 @@ def _coordinator(paths):
 
 
 def updates_running(paths) -> bool:
-    return any(run["status"] in {"running", "unstarted"} for run in _coordinator(paths).list_runs())
+    return data_operation_running(paths.data_dir)
 
 
 def _task(manager, *, competition_id=None, force=False):
@@ -41,11 +41,10 @@ def _task(manager, *, competition_id=None, force=False):
 
 def _start(paths, tasks, *, export_after=False, export_history=False):
     try:
-        run = _coordinator(paths).start(tasks, scope={"export_after": export_after, "export_history": export_history})
+        _coordinator(paths).start(tasks, scope={"export_after": export_after, "export_history": export_history})
     except (OSError, ValueError, RefreshRunBusyError) as exc:
         st.error(str(exc))
         return
-    st.session_state["visible-refresh-run"] = run["run_id"]
     st.rerun()
 
 
@@ -74,15 +73,25 @@ def start_manager_update(paths, manager, *, force=False, retry_manifest=None):
 def render_global_update(paths, games):
     active = tuple(game for game in games if not game.is_archived)
     busy = updates_running(paths)
+    # Streamlit uses the formatted label as the widget's wire value.
+    show_identity = len({game.name for game in active}) < len(active)
+
+    def game_label(game):
+        return f"{game.name} ({game.game.locale}/{game.game.slug})" if show_identity else game.name
+
     with st.container(horizontal=True, vertical_alignment="center", gap="small"):
-        chosen = st.menu_button("Åbn spil", active, format_func=lambda game: game.name,
-            icon=":material/arrow_forward:", key="open-game-menu") if active else None
-        if chosen is not None:
-            go_to(PageId.GAME, locale=chosen.game.locale, game=chosen.game.slug)
+        if active:
+            chosen = st.selectbox(
+                "Åbn spil", active, index=None, format_func=game_label,
+                placeholder="Åbn spil", label_visibility="collapsed",
+                key="open-game-picker", width=200,
+            )
+            if chosen is not None:
+                go_to(PageId.GAME, locale=chosen.game.locale, game=chosen.game.slug)
         if st.button("Opdater alle", type="primary", icon=":material/sync:", disabled=not active or busy, key="refresh-all-games"):
             _start(paths, [_task(game) for game in active])
         with st.popover("Vælg spil og omfang", icon=":material/tune:"):
-            selected = st.multiselect("Managerspil", active, default=active, format_func=lambda game: game.name, key="refresh-selected-games")
+            selected = st.multiselect("Managerspil", active, default=active, format_func=game_label, key="refresh-selected-games")
             force = st.checkbox("Genhent også aktuelle data", key="refresh-force-games")
             st.caption("Manglende og tidligere foreløbige runder hentes. Arkiverede spil er ikke med.")
             if st.button("Opdater valgte spil", disabled=not selected or busy, key="refresh-start-selection"):
@@ -168,29 +177,47 @@ def _completed_export(paths, run):
 
 
 @st.fragment(run_every="1s")
-def render_run_progress(paths):
+def render_run_progress(paths, *, show_history=True):
     coordinator = _coordinator(paths)
     runs, warnings = coordinator.scan_runs()
+    running_states = {"running", "unstarted"}
+    busy = updates_running(paths)
+    busy_changed = st.session_state.get("refresh-busy", busy) != busy
+    st.session_state["refresh-busy"] = busy
+    terminal = {
+        run["run_id"]: (run["status"], run.get("updated_at"))
+        for run in runs if run["status"] not in running_states
+    }
+    seen = st.session_state.get("refresh-terminal-versions", {})
+    st.session_state["refresh-terminal-versions"] = terminal
+    terminal_changed = any(seen.get(run_id) != version for run_id, version in terminal.items())
+    if terminal_changed:
+        st.cache_data.clear()
+    if terminal_changed or busy_changed:
+        st.rerun()
+    if not show_history:
+        return
     if warnings:
         st.warning("En tidligere opdateringsjournal kunne ikke læses. Se Data og lager før oprydning.")
     if not runs:
         return
-    run_id = st.session_state.get("visible-refresh-run", runs[0]["run_id"])
-    try:
-        run = coordinator.snapshot(run_id)
-    except (OSError, ValueError):
-        run = runs[0]
-        run_id = run["run_id"]
-    status = run["status"]
+
     labels = {"success": "Opdatering gennemført", "partial": "Opdatering delvist gennemført", "failed": "Opdatering mislykkedes", "cancelled": "Opdatering stoppet", "interrupted": "Opdatering blev afbrudt", "running": "Opdaterer data", "unstarted": "Forbereder opdatering"}
-    previous = st.session_state.get(f"refresh-observed:{run_id}")
-    st.session_state[f"refresh-observed:{run_id}"] = status
-    invalidation_key = f"refresh-invalidated:{run_id}:{run.get('updated_at', '')}"
-    if status not in {"running", "unstarted"} and not st.session_state.get(invalidation_key):
-        st.session_state[invalidation_key] = True
-        st.cache_data.clear()
-        st.rerun()
-    active = status in {"running", "unstarted"}
+    active_run = next((run for run in runs if run["status"] in running_states), None)
+    run = active_run or max(runs, key=lambda item: str(item.get("updated_at") or item.get("created_at", "")))
+    if active_run is None and len(runs) > 1:
+        history = {item["run_id"]: item for item in runs}
+        current_id = run["run_id"]
+        selected = st.selectbox(
+            "Opdateringshistorik",
+            (current_id, *(run_id for run_id in history if run_id != current_id)),
+            key=f"refresh-history:{current_id}",
+            format_func=lambda run_id: f"{labels.get(history[run_id]['status'], history[run_id]['status'])} · {run_id[-8:]}",
+        )
+        if selected is not None:
+            run = history[selected]
+    run_id, status = run["run_id"], run["status"]
+    active = active_run is not None
     with st.expander(labels.get(status, status), expanded=active or status != "success"):
         complete = sum(game["status"] == "success" for game in run["games"])
         processed = sum(game["status"] in {"success", "partial", "failed", "cancelled"} for game in run["games"])

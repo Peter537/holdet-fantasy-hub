@@ -21,7 +21,7 @@ from holdet_lib.paths import APP_NAME, PathOverrides, resolve_paths
 from holdet_lib.persistence import replace_text_atomically
 from holdet_lib.refresh import RefreshMode, build_refresh_plan
 from holdet_lib.refresh_runs import exclusive_data_operation
-from holdet_lib.rule_pages import fetch_rule_page, public_capture, reviewed_rule_profile, validate_capture
+from holdet_lib.rule_pages import capture_matches_profile, fetch_rule_page, public_capture, reviewed_rule_profile, validate_capture
 from holdet_lib.rules import game_rule_to_dict
 from holdet_lib.storage import ManifestStore, PlayerStatisticsStore
 from holdet_lib.strategies import strategy_from_dict, strategy_to_dict
@@ -276,7 +276,7 @@ def run(args, paths):
                 warnings.append("metadata_unreadable")
             profile = data.rules(manager, metadata, warnings=warnings)
             # A fresh unsaved capture can invalidate a cached audit too.
-            if capture and profile.source_sha256 != capture["source_sha256"]:
+            if capture and not capture_matches_profile(capture, profile):
                 from dataclasses import replace
                 profile = replace(profile, verified=False)
             value = {"schema_version": 1, "profile": game_rule_to_dict(profile),

@@ -27,18 +27,20 @@ Den samlede eksport er et selvstændigt JSON-dokument med `schema_version: 1`, U
 - `competitions` indeholder definitioner, medlemmer og stillinger. Turneringer indeholder også revisioner, publicerede kampe, kampplan, resultater, status og eventuelle parringskonflikter. Både aktive og arkiverede revisioner indlæser deres egne gemte parringer og validerer dem mod revisionens deltagere. En ulæselig eller konfliktfyldt kampplan markeres med `quality: ["unverified"]` i den berørte definition og en advarsel i filen; øvrige data kan stadig downloades, og aktive uverificerede resultater giver ingen placeringer eller mester.
 - `metadata` indeholder, når den findes, seneste spilinfo, regler, rundetider og hentetidspunkt. `refresh_manifest` indeholder et resumé af den seneste valgte opdateringskørsel og relevante deltrin, når et manifest er tilgængeligt. Manifestets samlede resultat beskriver hele den oprindelige kørsel, også hvis konkurrencens eksport viser et udsnit af holdtrinnene. `warnings` angiver antallet af advarsler fra de indlæste kilder; detaljerne ses i appen.
 
-Kvalitetsmarkører inkluderer `missing`, `stale` (mindst 24 timer gammelt), `older_round`, `before_round_end`, `preliminary` og `unverified`. De beskriver det kendte lokale grundlag og garanterer ikke, at kilden ikke er ændret efter hentning. Lokale filstier, kontokonfiguration, noter og indstillinger indgår ikke; fejltekster og filreferencer fra opdateringsmanifestet udelades. Udtrækket kan indeholde hold-, ejer- og spilleridentiteter og er ikke en anonymiseret supportpakke.
+Kvalitetsmarkører inkluderer `missing`, `stale` (mindst 24 timer gammelt), `older_round`, `before_round_end`, `preliminary` og `unverified`. De beskriver det kendte lokale grundlag og garanterer ikke, at kilden ikke er ændret efter hentning. Lokale filstier, kontokonfiguration, noter og indstillinger indgår ikke; fejltekster og filreferencer fra opdateringsmanifestet udelades. Brug den pseudonymiserede supportpakke ved deling af rapportdata med support.
 
-## Rapporter og anonymisering
+## Rapporter og supportpakker
 
 Managerspilrapporten indeholder dataproveniens, rundestatus, hold, grupper/turneringer, stillinger og rundehistorik. Sæsonrapporten indeholder konkurrencer, samlet managerstilling, pointsammensætning, medaljer og provenance. Rundens historie kan desuden eksporteres som forklarlig standalone HTML med validerede Holdet-links og valgfri, på forhånd byggede loopback-links; **Åbn i lokal Hub** virker kun, mens Hubben kører. HTML er autoritativ: én escaped fil med indlejret CSS, skærm- og A4-printlayout, ingen JavaScript og ingen eksterne assets. Brug browserens **Udskriv → Gem som PDF** for PDF. Se [Rundecenter og daglig arbejdsgang](round-center.md) for fakta- og linkkontrakten.
 
-En forberedt rapport er et mærket øjebliksbillede med eget tidspunkt. Senere dataændringer kræver en ny eksplicit forberedelse. Gemte rapportlinks og supportpakker bindes til pakkens indhold, identitet, titel og filnavn; et ændret grundlag skjuler tidligere downloads i den aktuelle handling. Skift mellem anonymiseringsprofiler kræver en ny supportpakke. Allerede gemte eksportfiler ændres ikke.
+En forberedt rapport er et mærket øjebliksbillede med eget tidspunkt. Senere dataændringer kræver en ny eksplicit forberedelse. Gemte rapportlinks og supportpakker bindes til den forberedte rapport. Ved et ændret grundlag eller skift af privatlivsprofil skal supportpakken forberedes igen.
 
-Supportpakker har `support-manifest.json`, SHA-256 for indholdet, `restorable: false` og ingen pseudonymmapping:
+Supportpakken downloades som `holdet-support.zip`. Den indeholder `support-manifest.json`, SHA-256 for indholdet og `restorable: false`. Felterne vælges ud fra rapporttypen. Stier, URL'er, noter, fritekst og ukendte felter udelades i begge profiler.
 
-- `share` erstatter konto-, manager-, fantasyhold- og brugeridentiteter med stabile pseudonymer inden for pakken. Offentlige sportsmålinger bevares.
-- `debug` minimerer yderligere og fjerner lokale stier, URL'er, noter, tags, fritekst og genkendelige labels.
+- `share` bevarer udvalgte sportsmålinger og kildetider. Navne og id'er får pseudonymer fra en hemmelig nøgle, der oprettes for hver pakke. Gentagelser af en identitet kan følges inden for samme pakke.
+- `debug` udelader også navnefelter og kildetider. Ukendte rapporttyper giver kun en optælling af tabeller og rækker.
+
+Sportsmålingerne kan stadig genkendes fra andre kilder. Del pakken med den tilsigtede modtager.
 
 ## Importregler
 
@@ -52,7 +54,7 @@ flowchart LR
     Preview -->|"Konflikt eller usikkert arkiv"| Reject["Afvis hele operationen"]
 ```
 
-Identiske SHA-256-værdier springes over. En identitetskollision med andet indhold afviser operationen før første write. Ældre JSON blandes aldrig ind i analyser, og tekst/Markdown/CSV parses ikke til domænedata. En anonymiseret supportpakke kan arkiveres, men aldrig gendannes.
+Identiske SHA-256-værdier springes over. En identitetskollision med andet indhold afviser operationen før første write. Ældre JSON blandes aldrig ind i analyser, og tekst/Markdown/CSV parses ikke til domænedata. Pseudonymiserede supportpakker kan arkiveres.
 
 Forskellige gyldige observationer, som får samme tidsbaserede filnavn, tildeles numeriske suffikser. Preview reserverer alle planlagte mål og søger også efter identiske eksisterende suffiksfiler, når basisfilen er fjernet. Ikke-backupimport genberegner planen under datalåsen og beholder låsen gennem publicering eller tilbagerulning. En ændret placering kan give et andet genereret suffiks; de godkendte kildebytes bevares, og eksisterende indhold overskrives ikke.
 

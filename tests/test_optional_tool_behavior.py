@@ -56,13 +56,14 @@ def _bulk_watchlist_app(root: str) -> None:
     )
 
 
-def _transfer_app() -> None:
+def _transfer_app(root: str) -> None:
     from datetime import datetime, timezone
     from pathlib import Path
 
     import streamlit as st
 
     import holdet_lib as holdet
+    from holdet_lib.paths import PathOverrides, resolve_paths
     from tests.test_library_storage import sample_team
     from website.hub_pages import transfer_lab_panel
 
@@ -81,6 +82,35 @@ def _transfer_app() -> None:
     transfer_lab_panel(
         holdet.TeamSnapshot(Path("team.json"), generated, team),
         holdet.PlayerStatisticsSnapshot(Path("players.json"), generated, players),
+        paths=resolve_paths(overrides=PathOverrides(data_root=Path(root))),
+        team_round_status="complete",
+    )
+
+
+def _audited_transfer_app(root: str, missing: str = "") -> None:
+    from dataclasses import replace
+    from pathlib import Path
+
+    from holdet_lib.paths import PathOverrides, resolve_paths
+    from tests.test_decision_analysis import entry, player_snapshot, roster, summary, team_snapshot
+    from website.hub_pages import transfer_lab_panel
+
+    team = team_snapshot(101, 3, (roster(1, 1, role="captain"), roster(2, 2)), (summary(3, 3),))
+    if missing == "bank":
+        team = replace(team, team=replace(team.team, overview=replace(team.team.overview, bank=None)))
+    if missing == "contracts":
+        team = replace(team, team=replace(team.team, overview=replace(team.team.overview, substitutions_remaining=None)))
+    if missing == "spent contracts":
+        team = replace(team, team=replace(team.team, overview=replace(
+            team.team.overview, substitutions_remaining=0, substitutions_used=100,
+        )))
+    players = player_snapshot(3, (
+        entry(1, 1, value=1_100_000 if missing == "retained price" else 1_000_000),
+        entry(2, 2, value=1_100_000 if missing == "sale price" else 1_000_000),
+        entry(3, 3, position="Defender"),
+    ))
+    transfer_lab_panel(
+        team, players, paths=resolve_paths(overrides=PathOverrides(data_root=Path(root))),
         team_round_status="complete",
     )
 
@@ -150,8 +180,8 @@ def test_custom_alarm_inputs_are_editable_before_saving(tmp_path: Path, single: 
 
 
 @pytest.mark.parametrize("changed_input", ("Runde for handlerne", "Testpris"))
-def test_transfer_results_disappear_when_scenario_or_source_changes(changed_input: str) -> None:
-    app = AppTest.from_function(_transfer_app).run()
+def test_transfer_results_disappear_when_scenario_or_source_changes(tmp_path: Path, changed_input: str) -> None:
+    app = AppTest.from_function(_transfer_app, args=(str(tmp_path),)).run()
     app.multiselect[0].set_value([1010]).run()
     app.multiselect[1].set_value([1]).run()
     next(item for item in app.button if item.label == "Simulér scenarie").click().run()
@@ -164,6 +194,105 @@ def test_transfer_results_disappear_when_scenario_or_source_changes(changed_inpu
     assert not app.exception
     assert not any(item.label == "Bank efter handler" for item in app.metric)
     assert any("Simulér igen" in item.value for item in app.info)
+
+
+def _audit_transfer_rules(tmp_path: Path, *, base_contracts: int | None = None):
+    from holdet_lib.game_metadata import GameMetadata, GameMetadataStore
+    from holdet_lib.rule_pages import RulePageStore
+    from holdet_lib.rules import game_rule_to_dict
+    from tests.rule_page_fixtures import capture
+    from tests.test_decision_analysis import GAME, NOW, verified_rules
+
+    paths = resolve_paths(overrides=PathOverrides(data_root=tmp_path))
+    store = RulePageStore(paths.rules_dir)
+    rules = verified_rules(
+        sport="soccer", free_through_round=1, fee_free_through_round=1,
+        transfer_fee_basis_points=250, captain_positions=("Angriber",),
+        position_limits=(("Forward", 1, 2), ("Defender", 0, 1)),
+        base_contracts=base_contracts,
+    )
+    store.audit(GAME, capture(), game_rule_to_dict(rules), "Synthetic Transfer Lab rules")
+    GameMetadataStore(paths.game_metadata_dir).save(GameMetadata(
+        GAME, "soccer", "soccer", 1, 3_000_000, 5, "Test", (), NOW,
+    ))
+    return store
+
+
+def test_transfer_lab_uses_audited_rules_and_eligible_captains(tmp_path: Path) -> None:
+    from tests.rule_page_fixtures import HTML, capture
+    from tests.test_decision_analysis import GAME, NOW
+
+    store = _audit_transfer_rules(tmp_path)
+    app = AppTest.from_function(_audited_transfer_app, args=(str(tmp_path),)).run()
+    assert not app.exception
+    assert app.multiselect[2].label == "Kaptajn"
+    assert app.multiselect[2].value == [1]
+
+    app.multiselect[0].set_value([2]).run()
+    app.multiselect[1].set_value([3]).run()
+    assert app.multiselect[2].value == [1]
+    assert app.multiselect[2].options == ["Player 1"]
+    next(item for item in app.button if item.label == "Simulér scenarie").click().run()
+    assert not app.exception
+    assert any("afsluttede rundedata" in item.value for item in app.success)
+    assert next(item for item in app.metric if item.label == "Købsgebyr").value == "25.000"
+
+    target = next(item for item in app.number_input if item.label == "Runde for handlerne")
+    target.set_value(2).run()
+    assert any("før hold- eller spillersnapshotets runde" in item.value for item in app.error)
+    assert next(item for item in app.button if item.label == "Simulér scenarie").disabled
+    assert not app.success
+    target.set_value(6).run()
+    assert any("efter spillets sidste runde" in item.value for item in app.error)
+    assert next(item for item in app.button if item.label == "Simulér scenarie").disabled
+    target.set_value(5).run()
+    assert not next(item for item in app.button if item.label == "Simulér scenarie").disabled
+
+    app.multiselect[0].set_value([1]).run()
+    assert app.multiselect[2].value == []
+    app.multiselect[2].set_value([2]).run()
+    next(item for item in app.button if item.label == "Simulér scenarie").click().run()
+    assert not app.exception
+    assert any("afsluttede rundedata" in item.value for item in app.success)
+
+    store.save(GAME, capture(HTML + "<!-- changed -->", now=NOW + timedelta(days=1)))
+    app.run()
+    assert not app.exception
+    assert len(app.multiselect) == 2
+    assert not app.success
+    next(item for item in app.button if item.label == "Simulér scenarie").click().run()
+    assert not app.success
+    assert any("Reglerne kan ikke valideres" in item.value for item in app.warning)
+    assert next(item for item in app.metric if item.label == "Købsgebyr").value == "10.000"
+
+
+@pytest.mark.parametrize(("missing", "reason"), (
+    ("bank", "Banksaldoen mangler"),
+    ("contracts", "Kontraktsaldoen mangler"),
+    ("retained price", "forskellige priser"),
+    ("sale price", "forskellige priser"),
+))
+def test_transfer_lab_downgrades_incomplete_source_evidence(tmp_path: Path, missing: str, reason: str) -> None:
+    _audit_transfer_rules(tmp_path)
+    app = AppTest.from_function(_audited_transfer_app, args=(str(tmp_path), missing)).run()
+    app.multiselect[0].set_value([2]).run()
+    app.multiselect[1].set_value([3]).run()
+    next(item for item in app.button if item.label == "Simulér scenarie").click().run()
+    assert not app.exception
+    assert not app.success
+    assert any(reason in item.value and "estimat" in item.value for item in app.warning)
+
+
+def test_transfer_lab_preset_does_not_restore_spent_contracts(tmp_path: Path) -> None:
+    _audit_transfer_rules(tmp_path, base_contracts=10)
+    app = AppTest.from_function(_audited_transfer_app, args=(str(tmp_path), "spent contracts")).run()
+    app.multiselect[0].set_value([2]).run()
+    app.multiselect[1].set_value([3]).run()
+    next(item for item in app.segmented_control if item.label == "Kontrakter").set_value("Basis").run()
+    next(item for item in app.button if item.label == "Simulér scenarie").click().run()
+    assert not app.exception
+    assert not app.success
+    assert any("scenarieantagelse" in item.value for item in app.warning)
 
 
 @pytest.mark.parametrize("single", (True, False))

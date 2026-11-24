@@ -42,6 +42,7 @@ from website.hub_pages import (
     managers_view,
 )
 from website.navigation import PageId, go_to, page_link, relative_url
+from website.game_access import editable_game, is_game_archived, require_active_game
 from website.round_center_page import render_round_center
 from website.preferences import require_tool, settings_for, settings_readable, tool_visible, render_settings
 from holdet_lib.hub_settings import HubFeature, OwnTeamSelection, feature_enabled
@@ -141,6 +142,8 @@ from holdet_lib.refresh import (
 )
 from holdet_lib.storage import RefreshManifest
 from holdet_lib.refresh_runs import RefreshRunBusyError, exclusive_data_operation
+from holdet_lib.restore_transaction import recover_restore
+from holdet_lib.restore_fence import restore_read_version
 
 
 def _configure_paths() -> None:
@@ -1237,6 +1240,7 @@ def _fetch_player_statistics(game: GameUrl, round_number: int | None) -> None:
             if round_number is None
             else f"Henter spillerstatistik for runde {round_number} …"
         ):
+            require_active_game(APP_PATHS, game)
             before_index = snapshot_store.scan(game)
             _save_game_metadata_if_available(game)
 
@@ -1246,7 +1250,8 @@ def _fetch_player_statistics(game: GameUrl, round_number: int | None) -> None:
                     f"Holdet returnerede runde {statistics.round_number} "
                     f"i stedet for runde {round_number}."
                 )
-            saved = snapshot_store.save(statistics)
+            with editable_game(APP_PATHS, game):
+                saved = snapshot_store.save(statistics)
             alert_count = 0
             previous = select_alert_baseline(
                 before_index,
@@ -1901,7 +1906,7 @@ def _player_export_section(
 
 
 @st.fragment
-def _player_list_panel(selected, empty_label: str) -> None:
+def _player_list_panel(selected, empty_label: str, *, read_only: bool = False) -> None:
     statistics, game = selected.statistics, selected.statistics.game
     scope = f"player-filter-{game.locale}-{game.slug}"
     applied_key = f"{scope}-applied-query"
@@ -2000,7 +2005,7 @@ def _player_list_panel(selected, empty_label: str) -> None:
             if bulk.open:
                 render_player_bulk_controls(scope=f"player-list:{game.locale}:{game.slug}", selected_keys=selected_keys, game=game,
                     entries=dict(zip(player_keys, entries, strict=True)), paths=APP_PATHS,
-                    read_only=get_ui_context().read_only or updates_running(APP_PATHS))
+                    read_only=read_only)
     _player_export_section(statistics, applied, selected, scope, ordered_entries=entries)
 
 
@@ -2009,8 +2014,14 @@ def _player_statistics_panel(
     game: GameUrl,
     *,
     read_only: bool = False,
+    busy: bool = False,
     empty_label: str = "spillet",
 ) -> None:
+    source_disabled = read_only or busy
+    source_help = (
+        "Gendan managerspillet for at hente data." if read_only else
+        "Vent til den igangværende opdatering er afsluttet." if busy else None
+    )
     store = PlayerStatisticsStore(OUTPUT_DIR)
     index = store.scan(game)
     rounds = index.rounds_for(game)
@@ -2062,7 +2073,7 @@ def _player_statistics_panel(
             )
         else:
             st.warning(f"Seneste hentning mislykkedes: {details}")
-        if not read_only and st.button(
+        if not source_disabled and st.button(
             "Prøv igen",
             icon=":material/refresh:",
             key=(
@@ -2094,12 +2105,12 @@ def _player_statistics_panel(
                 type="primary",
                 icon=":material/download:",
                 key=f"fetch-latest-players-{game.locale}-{game.slug}-{empty_label}",
-                disabled=read_only,
-                help="Gendan managerspillet for at hente data." if read_only else None,
+                disabled=source_disabled,
+                help=source_help,
             ):
                 _fetch_player_statistics(game, None)
 
-            if not read_only:
+            if not source_disabled:
                 with st.expander("Hent manglende runder"):
                     st.caption(
                         "Henter kun runder, der ikke allerede er gemt, i stigende "
@@ -2136,13 +2147,14 @@ def _player_statistics_panel(
                             with exclusive_data_operation(APP_PATHS.data_dir), st.spinner(
                                 f"Henter manglende runder {from_round}-{to_round} ..."
                             ):
+                                require_active_game(APP_PATHS, game)
                                 result = _fetch_missing_player_rounds(
                                     game,
                                     from_round,
                                     to_round,
                                     store=store,
                                 )
-                        except (OSError, RefreshRunBusyError) as exc:
+                        except (OSError, PayloadError, RefreshRunBusyError) as exc:
                             st.error(f"Runderne kunne ikke hentes: {exc}")
                         else:
                             st.session_state.setdefault(
@@ -2170,8 +2182,8 @@ def _player_statistics_panel(
             action_label,
             icon=":material/refresh:" if selected is not None else ":material/download:",
             key=f"fetch-player-round-{game.locale}-{game.slug}-{empty_label}",
-            disabled=read_only,
-            help="Gendan managerspillet for at hente data." if read_only else None,
+            disabled=source_disabled,
+            help=source_help,
         ):
             _fetch_player_statistics(game, selected_round)
     if selected is None:
@@ -2210,30 +2222,46 @@ def _player_statistics_panel(
             continue
         with tab:
             if slug == "list":
-                _player_list_panel(selected, empty_label)
+                _player_list_panel(selected, empty_label, read_only=read_only or busy)
             elif slug == "compare":
                 player_compare_panel(game, index.through(game, round_number=selected_round, generated_at=selected.generated_at), APP_PATHS, int(selected_round))
             elif slug == "changes":
                 player_changes_panel(game, index.through(game, round_number=selected_round, generated_at=selected.generated_at), _scan_snapshots(str(OUTPUT_DIR.resolve())), int(selected_round))
-            elif require_tool(APP_PATHS, HubFeature.SCOUTING, read_only=read_only):
+            elif require_tool(APP_PATHS, HubFeature.SCOUTING, read_only=read_only or busy):
                 scoped_index = index.through(game, round_number=selected_round, generated_at=selected.generated_at)
                 if slug == "scouting":
-                    render_contextual_scouting_panel(game, scoped_index, APP_PATHS, read_only=read_only)
+                    render_contextual_scouting_panel(game, scoped_index, APP_PATHS, read_only=read_only or busy)
                 else:
-                    render_contextual_watchlist_panel(game, scoped_index, APP_PATHS, read_only=read_only)
+                    render_contextual_watchlist_panel(game, scoped_index, APP_PATHS, read_only=read_only or busy)
 
 def _player_statistics_tab(
-    manager_game: ManagerGame, *, read_only: bool = False
+    manager_game: ManagerGame, *, read_only: bool = False, busy: bool = False,
 ) -> None:
     st.header("Spillerstatistik", anchor="spillerstatistik")
     _player_statistics_panel(
         manager_game.game,
         read_only=read_only,
+        busy=busy,
         empty_label="managerspillet",
     )
 
 
-def _standalone_player_statistics(games: tuple[ManagerGame, ...]) -> None:
+def _sync_standalone_game(selection_key: str) -> None:
+    selected = st.session_state.get(selection_key)
+    try:
+        game = normalize_manager_game(str(selected)).game if selected else None
+    except (PayloadError, ValueError):
+        game = None
+    if game is not None:
+        st.query_params.update(locale=game.locale, game=game.slug)
+    elif "locale" in st.query_params or "game" in st.query_params:
+        st.query_params.from_dict({
+            key: st.query_params.get_all(key)
+            for key in st.query_params if key not in {"locale", "game"}
+        })
+
+
+def _standalone_player_statistics(games: tuple[ManagerGame, ...], *, busy: bool = False) -> None:
     st.title("Spillerstatistik", anchor="spillerstatistik")
     st.caption(
         "Vælg et gemt spil, eller indtast en Holdet-URL eller slug. Spillet "
@@ -2271,17 +2299,6 @@ def _standalone_player_statistics(games: tuple[ManagerGame, ...]) -> None:
             requested[0].original if requested is not None else requested_game.original
         )
 
-    def sync_standalone_game() -> None:
-        selected = st.session_state.get(selection_key)
-        if not selected:
-            return
-        try:
-            selected_game = normalize_manager_game(str(selected)).game
-        except (PayloadError, ValueError):
-            return
-        st.query_params["locale"] = selected_game.locale
-        st.query_params["game"] = selected_game.slug
-
     selected_source = st.selectbox(
         "Spil eller Holdet-URL",
         option_values,
@@ -2290,7 +2307,8 @@ def _standalone_player_statistics(games: tuple[ManagerGame, ...]) -> None:
         placeholder="Vælg et spil, eller indtast URL/slug",
         format_func=lambda value: option_labels.get(value, value),
         key=selection_key,
-        on_change=sync_standalone_game,
+        on_change=_sync_standalone_game,
+        args=(selection_key,),
     )
     if not selected_source:
         st.info("Vælg eller indtast et managerspil for at se spillerstatistik.")
@@ -2316,7 +2334,7 @@ def _standalone_player_statistics(games: tuple[ManagerGame, ...]) -> None:
             locale=game.locale,
             game=game.slug,
         )
-    _player_statistics_panel(game, empty_label="spillet")
+    _player_statistics_panel(game, read_only=is_game_archived(games, game), busy=busy)
 @st.dialog("Arkivér managerspil")
 def _confirm_archive_manager_game(
     store: GroupStore,
@@ -2341,9 +2359,9 @@ def _confirm_archive_manager_game(
     if confirm:
         try:
             _freeze_complete_hall_of_fame(groups, include_round_wins=True)
-
-            store.archive_manager_game(manager_game.game)
-        except PayloadError as exc:
+            with exclusive_data_operation(APP_PATHS.data_dir):
+                store.archive_manager_game(manager_game.game)
+        except (OSError, PayloadError, RefreshRunBusyError) as exc:
             st.error(str(exc))
         else:
             st.session_state.pop("pending_archive_manager_game", None)
@@ -2771,35 +2789,36 @@ def _game_settings_tab(
 
 
 
-def _game_view(manager_game, groups, index, store, *, read_only=False) -> None:
-    _entity_header(manager_game, groups, index, read_only=read_only, game_menu=True)
+def _game_view(manager_game, groups, index, store, *, read_only=False, busy=False) -> None:
+    writes_blocked = read_only or busy
+    _entity_header(manager_game, groups, index, read_only=writes_blocked, game_menu=True)
     game_groups = tuple(group for group in groups if _game_identity(group.game) == manager_game.identity)
     requested = str(st.query_params.get("section", "round-center"))
     if requested in {"alerts", "analysis", "teams", "history", "administration", "settings"}:
         page_link(PageId.GAME, "Tilbage til overblik", locale=manager_game.game.locale, game=manager_game.game.slug, section="round-center")
-        if requested == "alerts" and require_tool(APP_PATHS, HubFeature.ALERTS, read_only=read_only):
-            alerts_view(APP_PATHS, manager_game.game, read_only=read_only)
-        elif requested == "analysis" and require_tool(APP_PATHS, HubFeature.ANALYSIS, read_only=read_only):
-            analysis_panel(manager_game, groups, index, APP_PATHS, read_only=read_only)
+        if requested == "alerts" and require_tool(APP_PATHS, HubFeature.ALERTS, read_only=writes_blocked):
+            alerts_view(APP_PATHS, manager_game.game, read_only=writes_blocked)
+        elif requested == "analysis" and require_tool(APP_PATHS, HubFeature.ANALYSIS, read_only=writes_blocked):
+            analysis_panel(manager_game, groups, index, APP_PATHS, read_only=writes_blocked)
         elif requested == "teams":
-            _team_statistics_game_tab(manager_game, groups, index, read_only=read_only)
+            _team_statistics_game_tab(manager_game, groups, index, read_only=writes_blocked)
         elif requested == "history":
             game_history_panel(manager_game, groups, index)
         elif requested == "administration":
-            _manage_game(manager_game, game_groups, index, store, read_only=read_only)
+            _manage_game(manager_game, game_groups, index, store, read_only=writes_blocked)
         elif requested == "settings":
-            _game_settings_tab(manager_game, game_groups, store, read_only=read_only)
+            _game_settings_tab(manager_game, game_groups, store, read_only=writes_blocked)
         return
     tabs = _stateful_tabs(("Overblik", "Ligaer og turneringer", "Spillere"), ("round-center", "groups", "players"), key=f"game-tabs-{manager_game.game.locale}-{manager_game.game.slug}", parameter="section")
     if tabs[0].open:
         with tabs[0]:
-            _game_overview(manager_game, groups, index, read_only=read_only)
+            _game_overview(manager_game, groups, index, read_only=writes_blocked)
     if tabs[1].open:
         with tabs[1]:
-            _game_groups_tab(manager_game, groups, index, read_only=read_only)
+            _game_groups_tab(manager_game, groups, index, read_only=writes_blocked)
     if tabs[2].open:
         with tabs[2]:
-            _player_statistics_tab(manager_game, read_only=read_only)
+            _player_statistics_tab(manager_game, read_only=read_only, busy=busy)
 
 
 def _standing_warning(row: StandingRow) -> str | None:
@@ -2945,13 +2964,14 @@ def _standings_group_view(group: GroupDefinition, index: SnapshotIndex) -> None:
                         "Visning",
                         ("Samlet", "Runde"),
                         default="Samlet",
+                        required=True,
                         key=f"mode-{group.group_id}",
                     )
                 _standings_table(
                     group,
                     index,
                     int(round_number),
-                    "overall" if label == "Samlet" else "round",
+                    "round" if label == "Runde" else "overall",
                 )
                 _round_story_panel(group, index, int(round_number))
     if history_tab.open:
@@ -3465,9 +3485,11 @@ def _fetch_team_statistics(reference: TeamReference) -> None:
     key = _team_error_key(reference)
     try:
         with exclusive_data_operation(APP_PATHS.data_dir), st.spinner(f"Henter {reference.team_name} …"):
+            require_active_game(APP_PATHS, reference.game)
             _save_game_metadata_if_available(reference.game)
             team = _client().fetch_team(reference)
-            saved = SnapshotStore(OUTPUT_DIR).save_team_json(team)
+            with editable_game(APP_PATHS, reference.game):
+                saved = SnapshotStore(OUTPUT_DIR).save_team_json(team)
             _invalidate_snapshot_index()
     except Exception as exc:
         st.session_state.setdefault("team_statistics_errors", {})[key] = {
@@ -3599,6 +3621,7 @@ def _render_team_snapshot(
     default_round: int | None = None,
     caption: str | None = None,
     history_groups: tuple[GroupDefinition, ...] = (),
+    read_only: bool = False,
 ) -> None:
     team = snapshot.team
     rounds = index.rounds_for(team.reference.game, (team.reference.team_id,))
@@ -3726,11 +3749,12 @@ def _render_team_snapshot(
                 player_snapshot = PlayerStatisticsStore(OUTPUT_DIR).scan(
                     team.reference.game
                 ).newest(team.reference.game, round_number)
-                if not require_tool(APP_PATHS, HubFeature.ANALYSIS, read_only=get_ui_context().read_only):
+                if not require_tool(APP_PATHS, HubFeature.ANALYSIS, read_only=read_only):
                     return
                 transfer_lab_panel(
                     roster_snapshot,
                     player_snapshot,
+                    paths=APP_PATHS,
                     team_round_status=(
                         "unknown" if summary is None else summary.round_status
                     ),
@@ -3814,9 +3838,13 @@ def _team_statistics_panel(
         candidates[locked_reference.team_id] = locked_reference
     if not read_only and locked_reference is None:
         if st.button("Find hold på konfigurerede konti", key=f"discover-teams-{game.locale}-{game.slug}"):
-            references, warnings = _discover_account_teams(game)
-            _remember_discovery(game, references, warnings)
-            st.rerun()
+            try:
+                references, warnings = _discover_account_teams(game)
+            except (OSError, PayloadError, RefreshRunBusyError, ValueError) as exc:
+                _action_failure("Holdene kunne ikke findes", exc)
+            else:
+                _remember_discovery(game, references, warnings)
+                st.rerun()
         _render_discovery_status(game)
         direct = st.text_input(
             "Direkte fantasy-team URL eller ID",
@@ -3898,6 +3926,7 @@ def _team_statistics_panel(
         default_round=default_round,
         caption=caption,
         history_groups=groups,
+        read_only=read_only,
     )
 
 
@@ -3916,6 +3945,8 @@ def _standalone_team_statistics(
     games: tuple[ManagerGame, ...],
     groups: tuple[GroupDefinition, ...],
     index: SnapshotIndex,
+    *,
+    busy: bool = False,
 ) -> None:
     st.title("Holdstatistik", anchor="holdstatistik")
     st.caption("Vælg et gemt spil, eller indtast en Holdet-URL eller slug. Spillet bliver ikke føjet til Mine managerspil.")
@@ -3928,6 +3959,13 @@ def _standalone_team_statistics(
     sorted_known = sorted(known.values(), key=_game_label_sort_key)
     option_values = [item[0].original for item in sorted_known]
     option_labels = {item[0].original: item[1] for item in sorted_known}
+    selection_key = "standalone-team-game"
+    requested_game = _requested_game_from_query()
+    if requested_game is not None:
+        requested = known.get(_game_identity(requested_game))
+        st.session_state[selection_key] = (
+            requested[0].original if requested is not None else requested_game.original
+        )
     source = st.selectbox(
         "Spil eller Holdet-URL",
         option_values,
@@ -3935,7 +3973,9 @@ def _standalone_team_statistics(
         accept_new_options=True,
         placeholder="V\u00e6lg et spil, eller indtast URL/slug",
         format_func=lambda value: option_labels.get(value, value),
-        key="standalone-team-game",
+        key=selection_key,
+        on_change=_sync_standalone_game,
+        args=(selection_key,),
     )
     if not source:
         st.info("Vælg eller indtast et managerspil.")
@@ -3946,7 +3986,7 @@ def _standalone_team_statistics(
         st.error(str(exc))
         return
     st.caption(f"Valgt spil: {game.slug} · sprog: {game.locale}")
-    _team_statistics_panel(game, groups, index)
+    _team_statistics_panel(game, groups, index, read_only=is_game_archived(games, game) or busy)
 
 
 def _team_view(
@@ -4050,17 +4090,18 @@ def _discovered_candidates() -> dict[str, _TeamCandidate]:
 def _discover_account_teams(
     game: GameUrl,
 ) -> tuple[tuple[TeamReference, ...], tuple[str, ...]]:
-    accounts = load_accounts(ACCOUNTS_PATH)
-    found: dict[tuple[str, int], TeamReference] = {}
+    found: dict[tuple[str, str, int], TeamReference] = {}
     warnings: list[str] = []
-    for account in accounts:
-        try:
-            references = _client().discover_account_teams(account, game=game)
-        except Exception as exc:
-            warnings.append(f"{account.label}: {exc}")
-            continue
-        for reference in references:
-            found.setdefault((reference.game.locale.casefold(), reference.game.slug, reference.team_id), reference)
+    with exclusive_data_operation(APP_PATHS.data_dir):
+        require_active_game(APP_PATHS, game)
+        for account in load_accounts(ACCOUNTS_PATH):
+            try:
+                references = _client().discover_account_teams(account, game=game)
+            except Exception as exc:
+                warnings.append(f"{account.label}: {exc}")
+                continue
+            for reference in references:
+                found.setdefault(_team_error_key(reference), reference)
     return tuple(found.values()), tuple(warnings)
 
 
@@ -4075,6 +4116,7 @@ def _remember_game_info(game: GameUrl, info: object) -> None:
 
 def _fetch_and_remember_game_info(game: GameUrl) -> object:
     with exclusive_data_operation(APP_PATHS.data_dir):
+        require_active_game(APP_PATHS, game)
         info = _client().fetch_game_info(game)
         _remember_game_info(game, info)
     return info
@@ -5052,6 +5094,7 @@ class UiContext:
     group: GroupDefinition | None
     selected_game: ManagerGame | None
     read_only: bool
+    restore_version: str | None
 
 
 _UI_CONTEXT_KEY = "_holdet_ui_context"
@@ -5063,6 +5106,15 @@ def install_styles() -> None:
 
 def build_ui_context() -> UiContext:
     _configure_paths()
+    try:
+        recovered = recover_restore(APP_PATHS)
+        version = restore_read_version(APP_PATHS)
+        if recovered or st.session_state.get("restore-version") != version:
+            _invalidate_snapshot_index()
+            st.session_state["restore-version"] = version
+    except (OSError, PayloadError, RefreshRunBusyError) as exc:
+        st.error(f"Gendannelsen skal afsluttes, før Hubben kan læse data: {exc}")
+        st.stop()
     group_store = GroupStore(GROUPS_PATH, APP_PATHS.group_revision_dir)
     account_store = AccountStore(ACCOUNTS_PATH)
     try:
@@ -5112,7 +5164,18 @@ def build_ui_context() -> UiContext:
         group=group,
         selected_game=selected_game,
         read_only=bool(selected_game and selected_game.is_archived),
+        restore_version=version,
     )
+
+
+def verify_ui_context(context: UiContext) -> None:
+    try:
+        current = restore_read_version(APP_PATHS)
+    except PayloadError as exc:
+        st.error(str(exc))
+        st.stop()
+    if current != context.restore_version:
+        st.rerun()
 
 
 def set_ui_context(context: UiContext) -> None:
@@ -5165,11 +5228,15 @@ def render_page(page_id: PageId) -> None:
     selected_game = context.selected_game
     group = context.group
     busy = updates_running(APP_PATHS)
+    st.session_state["refresh-busy"] = busy
     read_only = context.read_only or busy
     if busy and (page_id in {PageId.MANAGE_GAMES, PageId.SETTINGS, PageId.DATA, PageId.SCOUTING, PageId.MANAGERS} or (page_id is PageId.GAME and st.query_params.get("section") in {"administration", "settings"})):
         st.info("En opdatering er i gang. Administration er tilgængelig igen, når den er afsluttet. Du kan stadig se spil, stillinger og spillere.")
         render_run_progress(APP_PATHS)
         return
+
+    if page_id not in {PageId.HOME, PageId.GAME, PageId.GROUP}:
+        render_run_progress(APP_PATHS, show_history=False)
 
     if page_id is PageId.HOME:
         _home(context.active_games, groups, index)
@@ -5183,7 +5250,8 @@ def render_page(page_id: PageId) -> None:
             groups,
             index,
             context.group_store,
-            read_only=read_only,
+            read_only=context.read_only,
+            busy=busy,
         )
     elif page_id is PageId.MANAGERS:
         if require_tool(APP_PATHS, HubFeature.MANAGERS):
@@ -5202,16 +5270,16 @@ def render_page(page_id: PageId) -> None:
             APP_PATHS,
         )
     elif page_id is PageId.ALERTS:
-        _render_alerts_page(context)
+        _render_alerts_page(context, read_only=read_only)
     elif page_id is PageId.PLAYER:
-        _render_player_page(context)
+        _render_player_page(context, read_only=read_only)
     elif page_id is PageId.PLAYERS:
-        _standalone_player_statistics(games)
+        _standalone_player_statistics(games, busy=busy)
     elif page_id is PageId.SCOUTING:
         if require_tool(APP_PATHS, HubFeature.SCOUTING):
             render_scouting_page(games, APP_PATHS)
     elif page_id is PageId.TEAMS:
-        _standalone_team_statistics(games, groups, index)
+        _standalone_team_statistics(games, groups, index, busy=busy)
     elif page_id is PageId.GROUP and group is not None:
         if group.kind == "tournament":
             _tournament_view(group, groups, index, read_only=read_only)
@@ -5233,7 +5301,7 @@ def render_page(page_id: PageId) -> None:
         _not_found_view()
 
 
-def _render_alerts_page(context: UiContext) -> None:
+def _render_alerts_page(context: UiContext, *, read_only: bool) -> None:
     requested_game = _requested_game_from_query()
     if requested_game is not None and context.selected_game is not None:
         _navigate(
@@ -5243,7 +5311,7 @@ def _render_alerts_page(context: UiContext) -> None:
             section="alerts",
         )
     elif requested_game is not None:
-        alerts_view(APP_PATHS, requested_game, standalone=True)
+        alerts_view(APP_PATHS, requested_game, standalone=True, read_only=read_only)
     elif target := _legacy_alert_target(context.games):
         _navigate(
             "game",
@@ -5259,7 +5327,7 @@ def _render_alerts_page(context: UiContext) -> None:
         )
 
 
-def _render_player_page(context: UiContext) -> None:
+def _render_player_page(context: UiContext, *, read_only: bool) -> None:
     detail_game = context.selected_game
     if detail_game is None:
         requested_game = _requested_game_from_query()
@@ -5271,7 +5339,7 @@ def _render_player_page(context: UiContext) -> None:
             detail_game,
             player_key,
             APP_PATHS,
-            read_only=context.read_only,
+            read_only=read_only,
         )
     else:
         st.title("Spilleren blev ikke fundet")

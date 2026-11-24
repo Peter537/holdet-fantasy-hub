@@ -339,6 +339,11 @@ def test_transfer_ledger_computes_one_round_counterfactual_and_rejects_gaps() ->
     )
     assert ledger.decisions[0].decision_delta == 50_000
     assert ledger.decisions[0].no_trade_change == 150_000
+    exempt = holdet.build_team_decision_ledger(
+        holdet.SnapshotIndex((first, second)), players, GAME, 1,
+        verified_rules(fee_free_through_round=2),
+    )
+    assert exempt.decisions[0].decision_delta == 60_000
 
     gap = replace(
         second,
@@ -355,6 +360,49 @@ def test_transfer_ledger_computes_one_round_counterfactual_and_rejects_gaps() ->
     assert "sammenhængende" in " ".join(
         gap_ledger.decisions[0].provenance.missing_reasons
     )
+
+
+def test_transfer_ledger_requires_stable_growth_matches() -> None:
+    history = (summary(1, 40_000), summary(2, 100_000))
+    teams = holdet.SnapshotIndex((
+        team_snapshot(1, 1, (roster(1, 40_000),), history[:1]),
+        team_snapshot(1, 2, (roster(3, 100_000),), history),
+    ))
+    same_position = replace(entry(99, 900_000), entry_id=None, source_index=3)
+    observations = holdet.PlayerStatisticsIndex((
+        player_snapshot(2, (entry(1, 40_000), same_position)),
+    ))
+
+    ledger = holdet.build_team_decision_ledger(teams, observations, GAME, 1, verified_rules())
+    assert ledger.decisions[0].bought_growth is None
+    assert ledger.decisions[0].provenance.certainty == "unverified"
+
+
+def test_captain_analysis_requires_and_enforces_formula1_positions() -> None:
+    drivers = (replace(roster(1, 10, role="captain"), position="Kører"),
+               replace(roster(3, 7), position="Driver"))
+    constructor = replace(roster(2, 100), position="Konstruktør")
+    round_summary = summary(1, 110, captain_bonus=10)
+    current = team_snapshot(1, 1, (drivers[0], constructor, drivers[1]), (round_summary,))
+    rules = verified_rules(sport="formula1", captain_positions=("Kører",))
+
+    result = holdet.build_captain_analysis(current, round_summary, rules)
+    assert result.provenance.certainty == "final"
+    assert {row.player_ids for row in result.alternatives} == {(1,), (3,)}
+
+    invalid = team_snapshot(1, 1, (replace(drivers[0], role="none"),
+                                  replace(constructor, role="captain"), drivers[1]), (round_summary,))
+    for snapshot, profile in ((invalid, rules), (current, replace(rules, captain_positions=()))):
+        result = holdet.build_captain_analysis(snapshot, round_summary, profile)
+        assert result.provenance.certainty == "unverified"
+        assert not result.alternatives
+
+    combined = team_snapshot(1, 1, (drivers[0], constructor, replace(drivers[1], role="captain")),
+                             (summary(1, 110, captain_bonus=17),))
+    result = holdet.build_captain_analysis(
+        combined, combined.team.history[0], replace(rules, captain_count=2),
+    )
+    assert tuple(row.player_ids for row in result.alternatives) == ((1, 3),)
 
 
 def test_exposure_reports_coverage_denominator() -> None:
@@ -401,6 +449,42 @@ def test_ideal_team_is_exact_and_deterministic() -> None:
         candidates[:1], verified_rules(), round_number=1
     )
     assert infeasible.status == "infeasible"
+
+
+def test_ideal_team_enforces_the_rules_required_by_each_sport() -> None:
+    cyclists = (entry(1, 100), entry(2, 90), entry(3, 80, team="B"))
+    cycling = verified_rules(sport="cycling", position_limits=(), max_from_team=1)
+    result = holdet.optimize_ideal_team(cyclists, cycling)
+    assert result.status == "optimal"
+    assert {item.entry_id for item in result.players} == {1, 3}
+
+    soccer = verified_rules(sport="soccer", max_from_team=None)
+    result = holdet.optimize_ideal_team(cyclists, soccer)
+    assert result.status == "unverified"
+    assert "Grænsen for spillere pr. hold mangler" in result.provenance.missing_reasons
+
+    racing = (entry(1, 100, position="Kører"), entry(2, 90, position="Driver"),
+              entry(3, 80, position="Konstruktør"))
+    formula1 = verified_rules(sport="formula1", max_from_team=None,
+                              position_limits=(("Driver", 1, 1), ("Konstruktør", 1, 1)))
+    result = holdet.optimize_ideal_team(racing, formula1)
+    assert result.status == "optimal"
+    assert {item.entry_id for item in result.players} == {1, 3}
+
+    golfers = (entry(1, 100, position="A"), entry(2, 90, position="A"), entry(3, 80, position="B"))
+    golf = verified_rules(sport="golf", position_limits=(), category_count=2, category_size=1,
+                          max_from_team=None, budget_enabled=False, salary_cap=None)
+    result = holdet.optimize_ideal_team(golfers, golf)
+    assert result.status == "optimal"
+    assert {item.entry_id for item in result.players} == {1, 3}
+
+
+def test_ideal_team_handles_large_tied_catalogues_without_recursion() -> None:
+    candidates = tuple(entry(player_id, 1) for player_id in range(1, 1_101))
+    rules = verified_rules(roster_size=1, position_limits=(("forward", 1, 1),))
+    result = holdet.optimize_ideal_team(candidates, rules, timeout_seconds=30)
+    assert result.status == "optimal"
+    assert tuple(player.entry_id for player in result.players) == (1,)
 
 
 def test_ideal_team_matches_brute_force_and_handles_four_hundred_candidates() -> None:

@@ -1,8 +1,23 @@
-"""Shared filename components for scraper output files."""
+"""Shared filenames for scraper outputs and game caches."""
 
 from __future__ import annotations
 
 from datetime import datetime
+
+from .models import GameUrl
+from .output import sanitize_path_component
+
+
+TEAM_SNAPSHOT_GLOB = "team-round*.json"
+PLAYER_SNAPSHOT_GLOB = "player-round*.json"
+
+
+def game_cache_stem(game: GameUrl) -> str:
+    """Build the shared game metadata and fixture cache filename stem."""
+
+    locale = sanitize_path_component(game.locale.casefold(), fallback="da")
+    slug = sanitize_path_component(game.slug, fallback="game")
+    return f"{locale}--{slug}"
 
 
 def compact_local_timestamp(now: datetime) -> str:

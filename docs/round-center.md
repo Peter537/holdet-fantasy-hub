@@ -56,6 +56,8 @@ Der er tre tilstande:
 
 Efter bekræftelse vises fremdrift pr. datakilde med antal afsluttede trin. Et trin ender som hentet, genbrugt aktuel cache, genbrugt cache efter fejl, fejlet uden cache eller sprunget over som utilgængeligt. En delvis kørsel bevarer gyldig cache og kan danne et nyt retry-preview; den starter aldrig automatisk et nyt netværksforsøg.
 
+Fremdriften følger den aktive kørsel, også hvis en anden session startede den. Når ingen kørsel er aktiv, kan du vælge en tidligere kørsel i opdateringshistorikken. Hvis en alarm fortsat afventer behandling efter en almindelig opdatering, skal du genoptage den oprindelige kørsel. Den har de gemte oplysninger om spillersnapshot og alarmregler.
+
 ```mermaid
 stateDiagram-v2
     [*] --> CachePreview: Byg RefreshPlan fra lokal cache

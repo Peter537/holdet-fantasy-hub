@@ -208,6 +208,13 @@ def test_smartlists_are_derived_and_recent_activation_uses_fetch_time() -> None:
     )
 
 
+def test_boolean_formulas_short_circuit_only_unneeded_operands() -> None:
+    assert holdet.evaluate_player_formula("0 and (1 / 0)", {}).value is False
+    assert holdet.evaluate_player_formula("1 or form_3 > 0", {"form_3": None}).value is True
+    assert holdet.evaluate_player_formula("1 and (1 / 0)", {}).error
+    assert holdet.evaluate_player_formula("0 or form_3 > 0", {"form_3": None}).error
+
+
 def test_formula_engine_allows_closed_grammar_and_fails_cells_closed() -> None:
     result = holdet.evaluate_player_formula(
         "ifelse(form_3 > 10 and value > 0, clamp(form_3 / 2, 0, 100), 0)",

@@ -80,9 +80,32 @@ def test_explicit_preference_save_revokes_temporary_grants_and_preserves_records
 
     with patch.object(preferences, "st", ui), patch.object(preferences, "page_link"):
         preferences.render_settings(paths)
+        submitted = ui.form_submit_button.call_args.kwargs
+        submitted["on_click"](*submitted["args"])
         assert not preferences.tool_visible(paths, "scouting")
         assert not preferences.tool_visible(paths, "calendar")
 
     assert store.load().enabled_features == ()
     assert store.load().watchlist == (watched,)
     assert ui.session_state["unrelated"] == "preserved"
+
+
+def test_preference_submit_cannot_recreate_settings_removed_by_restore(tmp_path: Path) -> None:
+    from holdet_lib.backup import create_backup_bytes, restore_backup
+
+    paths = resolve_paths(overrides=PathOverrides(data_root=tmp_path))
+    backup, _ = create_backup_bytes(paths)
+    store = HubSettingsStore(paths.hub_settings_file)
+    store.save(HubSettings())
+    ui = fake_ui()
+
+    with patch.object(preferences, "st", ui), patch.object(preferences, "page_link"):
+        preferences.render_settings(paths)
+        submitted = ui.form_submit_button.call_args.kwargs
+        restore_backup(backup, paths)
+        ui.session_state["feature:scouting"] = True
+        submitted["on_click"](*submitted["args"])
+        preferences.render_settings(paths)
+
+    assert not paths.hub_settings_file.exists()
+    assert "genindlæs" in ui.error.call_args.args[0]

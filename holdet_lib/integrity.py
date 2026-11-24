@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 import hashlib
 import json
 from pathlib import Path
 
-from .backup import is_refresh_run_file, known_schema_error
+from .canonical_validation import canonical_encoding, is_refresh_run_file, known_payload_error
+from .groups import GroupStore
 from .paths import AppPaths
 from .persistence import exclusive_configuration_update, file_update_lock_path, replace_text_atomically
 from .refresh_runs import exclusive_data_operation
@@ -134,23 +136,25 @@ def _digest(path: Path) -> str:
     return hasher.hexdigest()
 
 
-def _schema(relative: str, path: Path) -> tuple[int | None, str | None]:
+def _schema(
+    relative: str, path: Path, read_revision: Callable[[str], object]
+) -> tuple[int | None, str | None]:
     if path.suffix.casefold() != ".json":
         return None, None
     try:
-        payload = json.loads(path.read_text(encoding="utf-8-sig"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        payload = json.loads(path.read_text(encoding=canonical_encoding(relative)))
+    except (OSError, UnicodeDecodeError, ValueError, RecursionError) as exc:
         return None, f"Ugyldig JSON: {exc}"
-    if not isinstance(payload, dict):
-        return None, "JSON-roden skal være et objekt"
-    version = payload.get("schema_version")
+    version = payload.get("schema_version") if isinstance(payload, dict) else None
     parsed_version = version if isinstance(version, int) and not isinstance(version, bool) else None
-    return parsed_version, known_schema_error(relative, json.dumps(payload).encode("utf-8"))
+    return parsed_version, known_payload_error(relative, payload, read_revision=read_revision)
 
 
-def _entry(relative: str, path: Path) -> tuple[IntegrityEntry, IntegrityIssue | None]:
+def _entry(
+    relative: str, path: Path, read_revision: Callable[[str], object]
+) -> tuple[IntegrityEntry, IntegrityIssue | None]:
     stat = path.stat()
-    schema_version, schema_problem = _schema(relative, path)
+    schema_version, schema_problem = _schema(relative, path, read_revision)
     entry = IntegrityEntry(
         relative,
         _kind(relative),
@@ -216,6 +220,7 @@ def load_integrity_index(path: Path | str) -> tuple[IntegrityEntry, ...]:
 
 
 def quick_integrity_check(paths: AppPaths) -> IntegrityCheck:
+    read_revision = GroupStore(paths.groups_file, paths.group_revision_dir)._read_revision
     issues: list[IntegrityIssue] = []
     try:
         indexed = load_integrity_index(paths.integrity_index_file)
@@ -258,7 +263,7 @@ def quick_integrity_check(paths: AppPaths) -> IntegrityCheck:
                     "Størrelse eller ændringstid matcher ikke indekset",
                 )
             )
-        _, schema_problem = _schema(relative, path)
+        _, schema_problem = _schema(relative, path, read_revision)
         if schema_problem:
             issues.append(IntegrityIssue("schema", relative, schema_problem))
     for relative in sorted(set(actual) - set(expected)):
@@ -267,11 +272,12 @@ def quick_integrity_check(paths: AppPaths) -> IntegrityCheck:
 
 
 def full_integrity_check(paths: AppPaths) -> IntegrityCheck:
+    read_revision = GroupStore(paths.groups_file, paths.group_revision_dir)._read_revision
     issues: list[IntegrityIssue] = []
     entries: list[IntegrityEntry] = []
     for relative, path in canonical_local_files(paths):
         try:
-            entry, schema_issue = _entry(relative, path)
+            entry, schema_issue = _entry(relative, path, read_revision)
         except OSError as exc:
             issues.append(IntegrityIssue("unreadable", relative, f"Filen kan ikke læses: {exc}"))
             continue

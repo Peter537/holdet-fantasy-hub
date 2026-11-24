@@ -12,8 +12,11 @@ from pathlib import Path
 import altair as alt
 import pandas as pd
 import streamlit as st
+from holdet_lib.restore_fence import restore_read_version, update_current_installation
 from holdet_lib.refresh_runs import exclusive_data_operation
 from holdet_lib.errors import PayloadError
+from holdet_lib.rule_pages import RulePageStore
+from holdet_lib.transfers import captain_position_allowed, roster_prices_match
 
 from website.navigation import PageId, page_link
 from website.preferences import tool_visible
@@ -358,6 +361,7 @@ def transfer_lab_panel(
     team_snapshot: TeamSnapshot,
     player_snapshot: PlayerStatisticsSnapshot | None,
     *,
+    paths: AppPaths,
     team_round_status: str = "unknown",
 ) -> None:
     """Render a transfer scenario for an already selected team and round."""
@@ -375,11 +379,30 @@ def transfer_lab_panel(
         )
         return
     statistics = player_snapshot.statistics
-    profile = transfer_rule_profile(
-        variant=statistics.variant,
-        game_format=statistics.format or "",
-        game_slug=statistics.game.slug,
-    )
+    if team_snapshot.identity[:2] != player_snapshot.identity[:2]:
+        st.error("Hold- og spillersnapshot tilhører forskellige spil.")
+        return
+    game = team.reference.game
+    try:
+        metadata = GameMetadataStore(paths.game_metadata_dir).load(game)
+    except (OSError, PayloadError, ValueError):
+        metadata = None
+    rules = RulePageStore(paths.rules_dir).effective_profile(game, metadata)
+    profile = rules.to_transfer_profile()
+    if (
+        not profile.known
+        or rules.game_id is not None and rules.game_id != team.game_id
+        or metadata is not None and metadata.game_id != team.game_id
+        or rules.captain_count is None
+        or rules.free_through_round is None
+        or team.overview.unit != statistics.unit
+        or rules.budget_enabled != (statistics.unit == "money")
+        or profile.budget_enabled and (
+            rules.transfer_fee_basis_points is None
+            or rules.transfer_fee_basis_points > 0 and rules.fee_free_through_round is None
+        )
+    ):
+        profile = transfer_rule_profile(variant=statistics.variant, game_format=statistics.format or "")
     context_key = (
         f"{statistics.game.locale}:{statistics.game.slug}:"
         f"{team.reference.team_id}:{round_number}:"
@@ -410,24 +433,13 @@ def transfer_lab_panel(
     kept_ids = {
         item.player_id for item in roster if item.player_id not in set(sold)
     }
-    available = tuple(
-        entry
-        for entry in statistics.entries
-        if (
-            entry.entry_id
-            if entry.entry_id is not None
-            else entry.source_index
-        )
-        not in kept_ids
-    )
     available_labels = {
-        (
-            entry.entry_id if entry.entry_id is not None else entry.source_index
-        ): (
+        entry.entry_id: (
             f"{entry.name} · {entry.team} · {entry.position} · "
             f"{format_integer(entry.value)}"
         )
-        for entry in available
+        for entry in statistics.entries
+        if entry.entry_id is not None and entry.entry_id not in kept_ids
     }
     bought = st.multiselect(
         f"Køb ({len(sold)} plads(er) ledige)",
@@ -437,9 +449,32 @@ def transfer_lab_panel(
         format_func=lambda player_id: available_labels[player_id],
         key=f"transfer-bought:{context_key}",
     )
+    catalogue = {entry.entry_id: entry for entry in statistics.entries if entry.entry_id is not None}
+    captain_ids = ()
+    if profile.known and profile.captain_count > 0:
+        ending = {item.player_id: catalogue.get(item.player_id, item) for item in roster if item.player_id in kept_ids}
+        ending.update((player_id, catalogue[player_id]) for player_id in bought)
+        eligible = {
+            player_id: entry.name for player_id, entry in ending.items()
+            if captain_position_allowed(profile, entry.position)
+        }
+        incumbent = [
+            entry.player_id for entry in roster
+            if entry.player_id in kept_ids and entry.player_id in eligible
+            and entry.role.strip().casefold() in {"captain", "kaptajn"}
+        ]
+        captain_ids = tuple(st.multiselect(
+            "Kaptajn", tuple(eligible), default=incumbent[:profile.captain_count],
+            max_selections=profile.captain_count, format_func=eligible.__getitem__,
+            key=f"transfer-captains:{context_key}:{tuple(eligible)}",
+        ))
     actual_contracts = team.overview.substitutions_remaining
     presets = ["Snapshot"] if actual_contracts is not None else []
-    presets.extend(("Basis", "Guld", "Manuel"))
+    if not profile.known or profile.base_contracts is not None:
+        presets.append("Basis")
+    if not profile.known or profile.gold_contracts is not None:
+        presets.append("Guld")
+    presets.append("Manuel")
     preset = st.segmented_control(
         "Kontrakter",
         presets,
@@ -448,19 +483,19 @@ def transfer_lab_panel(
     )
     if preset == "Snapshot":
         contracts = actual_contracts
-    elif preset == "Basis":
-        contracts = profile.base_contracts
-    elif preset == "Guld":
-        contracts = profile.gold_contracts
+    elif preset in {"Basis", "Guld"}:
+        limit = profile.base_contracts if preset == "Basis" else profile.gold_contracts
+        used = team.overview.substitutions_used
+        contracts = (
+            max(0, limit - used) if limit is not None and used is not None else None
+        ) if profile.known else limit
     else:
-        contracts = int(
-            st.number_input(
-                "Resterende kontrakter",
-                min_value=0,
-                value=0,
-                step=1,
-                key=f"transfer-manual-contracts:{context_key}",
-            )
+        contracts = st.number_input(
+            "Resterende kontrakter",
+            min_value=0,
+            value=None if profile.known else 0,
+            step=1,
+            key=f"transfer-manual-contracts:{context_key}",
         )
     target_round = int(
         st.number_input(
@@ -481,20 +516,42 @@ def transfer_lab_panel(
         target_round=target_round,
         team_round=round_number,
         player_round=statistics.round_number,
+        captain_player_ids=captain_ids,
         team_round_status=team_round_status,
         player_round_status=statistics.round_status,
     )
-    signature = (profile, scenario, player_snapshot.generated_at)
+    blocked = None
+    simulation_profile = profile
+    if profile.known:
+        if target_round < max(round_number, statistics.round_number):
+            blocked = "Handelsrunden ligger før hold- eller spillersnapshotets runde."
+        elif metadata is not None and metadata.final_round is not None and target_round > metadata.final_round:
+            blocked = f"Handelsrunden ligger efter spillets sidste runde ({metadata.final_round})."
+        missing = []
+        if profile.budget_enabled:
+            if team.overview.bank is None:
+                missing.append("Banksaldoen mangler.")
+            if not roster_prices_match(roster, catalogue):
+                missing.append("Hold- og spillersnapshot har forskellige priser.")
+        if sold and target_round > profile.free_through_round and contracts is None:
+            missing.append("Kontraktsaldoen mangler.")
+        elif sold and target_round > profile.free_through_round and preset != "Snapshot":
+            missing.append("Kontraktsaldoen er en scenarieantagelse.")
+        if missing:
+            simulation_profile = replace(profile, known=False)
+            st.warning(" ".join((*missing, "Scenariet vises som et estimat.")))
+    signature = (simulation_profile, scenario, player_snapshot.generated_at, blocked)
     if st.button(
         "Simulér scenarie",
         type="primary",
         icon=":material/science:",
         key=f"simulate-transfers:{context_key}",
+        disabled=blocked is not None,
     ):
         st.session_state[f"transfer-scenario:{context_key}"] = scenario
         st.session_state[f"transfer-signature:{context_key}"] = signature
         st.session_state[f"transfer-result:{context_key}"] = simulate_transfers(
-            profile, scenario
+            simulation_profile, scenario
         )
     result = st.session_state.get(f"transfer-result:{context_key}")
     changed = result is not None and st.session_state.get(
@@ -504,6 +561,9 @@ def transfer_lab_panel(
         for prefix in ("transfer-result", "transfer-scenario", "transfer-signature"):
             st.session_state.pop(f"{prefix}:{context_key}", None)
         result = None
+    if blocked is not None:
+        st.error(blocked)
+        return
     if result is None:
         st.info(
             "Scenariet eller datagrundlaget er ændret. Simulér igen for at se resultatet."
@@ -540,9 +600,9 @@ def transfer_lab_panel(
         st.success("Scenariet overholder regelprofilen med afsluttede rundedata.")
     elif result.status == "valid":
         st.info("Scenariet overholder de kendte regler, men resultatet er ikke endeligt.")
-    elif result.status == "unverified":
+    elif result.status == "unverified" and not profile.known:
         st.warning("Reglerne kan ikke valideres for dette format.")
-    else:
+    elif result.status == "invalid":
         for error in result.errors:
             st.error(error)
     for warning in result.warnings:
@@ -1628,10 +1688,10 @@ def managers_view(
             live = _cached_manager_live_events(
                 groups, teams, settings, final_rounds
             )
-            frozen, ledger_warnings = HallOfFameStore(
+            frozen_events, ledger_warnings = HallOfFameStore(
                 paths.hall_of_fame_dir
             ).scan()
-            frozen = remap_manager_events(frozen, settings)
+            frozen = remap_manager_events(frozen_events, settings)
             round_results = _cached_manager_round_results(groups, teams, settings)
             profiles = effective_manager_profiles(settings)
 
@@ -1999,6 +2059,8 @@ def managers_view(
     if season_tab.open:
         with season_tab:
             season_store = SeasonStore(paths.seasons_file)
+            restore_version = restore_read_version(paths)
+            form_version = restore_version or "initial"
             try:
                 seasons = season_store.load()
             except Exception as exc:
@@ -2024,8 +2086,9 @@ def managers_view(
                 )
                 standings = build_season_standings(
                     season,
-                    frozen,
+                    frozen_events,
                     settings.hall_of_fame_score,
+                    settings=settings,
                 )
                 dataframe(
                     [
@@ -2054,7 +2117,7 @@ def managers_view(
                                 for group in groups
                             }
                             with st.form(
-                                f"edit-season-{season.season_id}"
+                                f"edit-season-{season.season_id}:{form_version}"
                             ):
                                 edited_name = st.text_input(
                                     "S\u00e6sonnavn",
@@ -2075,14 +2138,11 @@ def managers_view(
                                 )
                             if save_season:
                                 try:
-                                    season_store.update(
-                                        seasons,
-                                        season.season_id,
-                                        name=edited_name,
-                                        competition_ids=tuple(
-                                            edited_competitions
-                                        ),
-                                    )
+                                    with update_current_installation(paths, restore_version):
+                                        season_store.update(
+                                            seasons, season.season_id, name=edited_name,
+                                            competition_ids=tuple(edited_competitions),
+                                        )
                                 except Exception as exc:
                                     st.error(str(exc))
                                 else:
@@ -2091,11 +2151,12 @@ def managers_view(
                     not season.is_archived
                     and st.button(
                         "Arkivér sæson",
-                        key=f"archive-season-{season.season_id}",
+                        key=f"archive-season-{season.season_id}:{form_version}",
                     )
                 ):
                     try:
-                        season_store.archive(seasons, season.season_id)
+                        with update_current_installation(paths, restore_version):
+                            season_store.archive(seasons, season.season_id)
                     except (OSError, ValueError, PayloadError) as exc:
                         st.error(str(exc))
                     else:
@@ -2103,7 +2164,7 @@ def managers_view(
             with st.expander("Opret s\u00e6son", on_change="rerun") as create_expander:
                 if create_expander.open:
                     competitions = {group.group_id: group.name for group in groups}
-                    with st.form("create-season"):
+                    with st.form(f"create-season:{form_version}"):
                         name = st.text_input("Navn")
                         selected = st.multiselect(
                             "Grupper og turneringer",
@@ -2113,7 +2174,8 @@ def managers_view(
                         create = st.form_submit_button("Opret s\u00e6son")
                     if create:
                         try:
-                            season_store.create(seasons, name, tuple(selected))
+                            with update_current_installation(paths, restore_version):
+                                season_store.create(seasons, name, tuple(selected))
                         except Exception as exc:
                             st.error(str(exc))
                         else:
@@ -2577,7 +2639,7 @@ def calendar_view(
     with calendar_slot:
         with st.skeleton(height=140):
             metadata, warnings = GameMetadataStore(paths.game_metadata_dir).scan()
-            events = build_calendar_events(groups, metadata)
+            events = build_calendar_events(groups, metadata, snapshots=teams)
             _, settings = _manager_settings(paths)
             settings = build_effective_manager_settings(settings, groups, teams)
             manager_names: dict[str, str] = {}
@@ -2668,8 +2730,15 @@ def calendar_view(
     )
     timed = tuple(item for item in selected if not item.missing_time)
     missing = tuple(item for item in selected if item.missing_time)
+    status_labels = {
+        "scheduled": "Planlagt",
+        "published": "Publiceret",
+        "provisional": "Foreløbig",
+        "conditional": "Betinget",
+    }
     st.caption(f"{len(selected)} kalenderbegivenheder matcher de anvendte filtre.")
     if timed:
+        show_final_round = any(len(item.round_numbers) > 1 for item in timed)
         dataframe(
             [
                 {
@@ -2683,6 +2752,8 @@ def calendar_view(
                     ),
                     "Kamp": item.title,
                     "Runde": item.round_number,
+                    **({"Slutrunde": item.round_numbers[-1]} if show_final_round else {}),
+                    "Status": status_labels[item.status],
                 }
                 for item in timed
             ],
@@ -2712,7 +2783,11 @@ def calendar_view(
         st.subheader("Tidspunkt mangler")
         for item in missing:
             with st.container(horizontal=True):
-                st.write(f"{item.title} - runde {item.round_number}")
+                rounds = (
+                    f"{item.round_numbers[0]}–{item.round_numbers[-1]}"
+                    if len(item.round_numbers) > 1 else str(item.round_number)
+                )
+                st.write(f"{item.title} · {status_labels[item.status]} · runde {rounds}")
                 page_link(
                     PageId.GAME,
                     "Åbn spilinfo",

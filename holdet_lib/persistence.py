@@ -13,6 +13,8 @@ import time
 import threading
 from uuid import uuid4
 
+from .errors import PayloadError
+
 
 _FILE_UPDATE_LOCKS: dict[str, threading.Lock] = {}
 _FILE_UPDATE_GUARD = threading.Lock()
@@ -92,14 +94,23 @@ def exclusive_file_update(path: Path, *, timeout: float = 5.0):
         thread_lock.release()
 
 
+def restore_journal_path(config_dir: Path) -> Path:
+    resolved = config_dir.resolve()
+    return resolved.with_name(f".{resolved.name}.restore.json")
+
+
 @contextmanager
-def exclusive_configuration_update(config_dir: Path, *, timeout: float = 5.0):
+def exclusive_configuration_update(
+    config_dir: Path, *, timeout: float = 5.0, allow_pending_restore: bool = False,
+):
     """Lock the config namespace using a sibling outside the replaced directory.
 
     Writers retain this through read/modify/write or rollback. Same-thread
     nesting lets a composed transaction call another store's guarded methods.
     """
     with exclusive_file_update(config_dir, timeout=timeout):
+        if not allow_pending_restore and restore_journal_path(config_dir).exists():
+            raise PayloadError("En afbrudt gendannelse skal afsluttes før konfigurationen ændres")
         yield
 
 
@@ -148,24 +159,35 @@ def publish_immutable_text(path: Path, content: str) -> None:
     publish_immutable(path, content.encode("utf-8"))
 
 
-def replace_text_atomically(path: Path, content: str) -> None:
+def replace_with_retry(source: Path, destination: Path) -> None:
+    """Retry transient Windows failures of an atomic rename for a bounded time."""
+    for delay in (0.025, 0.05, 0.1, 0.2, None):
+        try:
+            os.replace(source, destination)
+            return
+        except OSError as exc:
+            if (
+                os.name != "nt"
+                or getattr(exc, "winerror", None) not in {5, 32, 33}
+                or delay is None
+            ):
+                raise
+            time.sleep(delay)
+
+
+def replace_text_atomically(path: Path, content: str, *, durable: bool = False) -> None:
     """Replace one UTF-8 text file atomically."""
 
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.parent / f".{path.name}.{uuid4().hex}.tmp"
     try:
-        temporary.write_text(content, encoding="utf-8", newline="\n")
-        for delay in (0.025, 0.05, 0.1, 0.2, None):
-            try:
-                os.replace(temporary, path)
-                break
-            except OSError as exc:
-                if (
-                    os.name != "nt"
-                    or getattr(exc, "winerror", None) not in {5, 32, 33}
-                    or delay is None
-                ):
-                    raise
-                time.sleep(delay)
+        if durable:
+            with temporary.open("x", encoding="utf-8", newline="\n") as handle:
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+        else:
+            temporary.write_text(content, encoding="utf-8", newline="\n")
+        replace_with_retry(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)

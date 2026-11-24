@@ -106,7 +106,7 @@ def test_restore_with_busy_configuration_leaves_settings_untouched_and_releases_
             assert held.wait(5)
             with patch(
                 "holdet_lib.backup.exclusive_configuration_update",
-                side_effect=lambda path: exclusive_configuration_update(path, timeout=0),
+                side_effect=lambda path, **kwargs: exclusive_configuration_update(path, timeout=0, **kwargs),
             ):
                 with pytest.raises(TimeoutError, match="busy"):
                     restore_backup(backup, paths, now=NOW)

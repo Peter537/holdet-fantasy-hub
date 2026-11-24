@@ -214,7 +214,7 @@ class _Evaluator:
         return result
 
     def visit_BoolOp(self, node: ast.BoolOp) -> bool:
-        values = [bool(self._required(self.visit(item))) for item in node.values]
+        values = (bool(self._required(self.visit(item))) for item in node.values)
         return all(values) if isinstance(node.op, ast.And) else any(values)
 
     def visit_Compare(self, node: ast.Compare) -> bool:

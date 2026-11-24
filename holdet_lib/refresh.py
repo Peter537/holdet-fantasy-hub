@@ -51,6 +51,10 @@ class RefreshMode(StrEnum):
 # Daily workflows must not silently treat indefinitely old cache as current.
 # The boundary is inclusive: data is stale when it is at least 24 hours old.
 DAILY_REFRESH_MAX_AGE = timedelta(hours=24)
+_PENDING_ALERT_REPLAY = (
+    "Statusalarmer: En tidligere alarm afventer behandling. "
+    "Vælg den oprindelige kørsel i opdateringshistorikken og genoptag den."
+)
 
 
 RefreshSource = Literal["metadata", "players", "team", "postprocess"]
@@ -407,6 +411,19 @@ def _apply_manifest_failure(
     if outcome.status == "reused_after_error":
         return True, "Seneste opdatering fejlede og genbrugte ældre cache"
     return True, "Seneste opdatering fejlede uden brugbar cache"
+
+
+def _postprocess_outcome(manifest: RefreshManifest | None) -> RefreshManifestStep | None:
+    if manifest is None:
+        return None
+    return next(
+        (item for item in manifest.steps if item.step_id == "postprocess" and item.source == "postprocess"),
+        None,
+    )
+
+
+def _failed_status_alerts(step: RefreshManifestStep | None) -> bool:
+    return step is not None and step.retryable and "Statusalarmer:" in (step.error or "")
 
 
 def _known_player_target_round(
@@ -769,25 +786,13 @@ def build_refresh_plan(
                 )
             )
     if include_postprocess:
-        previous_postprocess = (
-            None
-            if failure_manifest is None
-            else next(
-                (
-                    item
-                    for item in failure_manifest.steps
-                    if item.step_id == "postprocess"
-                    and item.source == "postprocess"
-                ),
-                None,
-            )
-        )
+        previous_postprocess = _postprocess_outcome(failure_manifest)
         upstream_selected = any(
             item.selected and item.source != "postprocess" for item in steps
         )
         postprocess_failed = bool(
             previous_postprocess is not None and previous_postprocess.retryable
-        )
+        ) or _failed_status_alerts(_postprocess_outcome(previous_manifest))
         postprocess_selected = (
             selected_mode == RefreshMode.ALL
             or (
@@ -1768,36 +1773,20 @@ def refresh_manager_game(
             errors: list[str] = []
             alert_count = 0
             retrying_alerts = False
-            if plan.mode == RefreshMode.RETRY_FAILED:
-                prior_postprocess = next(
-                    (
-                        item
-                        for item in (
-                            ()
-                            if plan.previous_manifest is None
-                            else plan.previous_manifest.steps
-                        )
-                        if item.step_id == "postprocess"
-                    ),
-                    None,
-                )
+            prior_postprocess = _postprocess_outcome(plan.previous_manifest)
+            pending_alerts = _failed_status_alerts(prior_postprocess)
+            inherited_failure = (
+                prior_postprocess is not None and _PENDING_ALERT_REPLAY in (prior_postprocess.error or "")
+            )
+            if plan.mode == RefreshMode.RETRY_FAILED and not inherited_failure:
                 retrying_alerts = bool(
                     prior_postprocess is not None
-                    and (prior_postprocess.status == "cancelled" or (
-                        prior_postprocess.error
-                        and "Statusalarmer:" in prior_postprocess.error))
+                    and (prior_postprocess.status == "cancelled" or pending_alerts)
                 )
-                if retrying_alerts and alert_snapshot_reference is None:
+                if prior_postprocess is not None and retrying_alerts and alert_snapshot_reference is None:
+                    previous_steps = () if plan.previous_manifest is None else plan.previous_manifest.steps
                     prior_players = next(
-                        (
-                            item
-                            for item in (
-                                ()
-                                if plan.previous_manifest is None
-                                else plan.previous_manifest.steps
-                            )
-                            if item.step_id == "players"
-                        ),
+                        (item for item in previous_steps if item.step_id == "players"),
                         None,
                     )
                     if prior_players is not None and (
@@ -1809,6 +1798,8 @@ def refresh_manager_game(
                         )
                     elif prior_postprocess.status == "cancelled":
                         retrying_alerts = False
+            elif pending_alerts:
+                errors.append(_PENDING_ALERT_REPLAY)
             try:
                 if alert_snapshot_reference is not None or retrying_alerts:
                     alert_count = merge_player_alerts(

@@ -29,7 +29,9 @@ Alle ranggrafer vender aksen, så førsteplads står øverst. Manglende runder e
 
 Laboratoriet starter fra det viste teamsnapshot og et spillersnapshot for samme spil og runde. Scenariet lever kun i `st.session_state`: det skriver aldrig til Holdet, snapshots, Hub-indstillinger eller grupper.
 
-Bank beregnes som startsaldo plus salg minus køb minus gebyr. Gebyret rundes op til nærmeste hele værdienhed. Kontraktforbrug er antallet af udskiftede pladser. Snapshotets resterende kontrakter bruges først; ellers kan basis/guld-preset og manuel saldo vælges.
+Et køb kræver et stabilt spiller-ID i kataloget. Ældre rækker uden ID vises fortsat i spillertabellen.
+
+Bank beregnes som startsaldo plus salg minus køb minus gebyr. Sæsonens verificerede regler bestemmer gebyr, afrunding og hvornår handler bruger kontrakter. Snapshotets resterende kontrakter foreslås først. Vælg en manuel kontraktsaldo eller et basis- eller guldestimat, hvis det er tilgængeligt. Når sæsonen kræver kaptajner, beholder scenariet som udgangspunkt de kaptajner fra snapshotet, der stadig er på holdet og har en tilladt position. Kaptajnvalget kan ændres i scenariet.
 
 | Profil | Trup og begrænsninger | Gebyr / kontrakter |
 | --- | --- | --- |
@@ -40,7 +42,9 @@ Bank beregnes som startsaldo plus salg minus køb minus gebyr. Gebyret rundes op
 
 Deaktiverede eller inaktive spillere kan ikke købes. Skader og karantæner giver advarsler. Ukendte fremtidige formater kan undersøges, men får ikke en falsk godkendelse.
 
-Disse legacy-formatprofiler er fortsat bagudkompatible i Transferlaboratoriet. Beslutningscenteret aktiverer derimod kun regelafhængige resultater fra en præcis, auditeret `GameRuleProfile` for det konkrete spil og den konkrete sæson. Et formatmatch alene tæller ikke som verificeret.
+Transferlaboratoriet, Beslutningscenteret og rådgiver-CLI'en bruger samme regelopslag for spillet og sæsonen. Ved manglende, ufuldstændige eller forældede regelkilder kan formatprofilerne i tabellen bruges til tydeligt mærkede estimater. Beløb med standardgebyr rundes op til nærmeste hele værdienhed.
+
+Med verificerede sæsonregler kan handler tidligst simuleres for datarunden og senest for spillets sidste runde, hvis den er kendt. Modstridende priser eller en manglende saldo for bank eller nødvendige kontrakter giver et estimat.
 
 ### Regelgyldighed og datasikkerhed
 

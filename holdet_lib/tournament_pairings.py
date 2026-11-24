@@ -113,6 +113,58 @@ def validate_tournament_pairing_revision(
     )
     return value
 
+def _pairings_from_dict(payload: object, group_id: str, revision: int) -> TournamentPairingRevision:
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schema_version") not in (1, PAIRING_SCHEMA_VERSION)
+        or payload.get("group_id") != group_id
+        or payload.get("tournament_revision") != revision
+        or not isinstance(payload.get("pairings"), list)
+    ):
+        raise PayloadError("Ugyldigt lager for turneringsparringer")
+    pairings: list[TournamentPairing] = []
+    for raw in payload["pairings"]:
+        if not isinstance(raw, dict):
+            raise PayloadError("Ugyldig turneringsparring")
+        round_number = raw.get("round")
+        team_a_id = raw.get("team_a_id")
+        team_b_id = raw.get("team_b_id")
+        if (
+            not isinstance(round_number, int)
+            or isinstance(round_number, bool)
+            or not isinstance(team_a_id, int)
+            or isinstance(team_a_id, bool)
+            or (
+                team_b_id is not None
+                and (not isinstance(team_b_id, int) or isinstance(team_b_id, bool))
+            )
+        ):
+            raise PayloadError("Ugyldig turneringsparring")
+        pairings.append(TournamentPairing(round_number, team_a_id, team_b_id, True))
+    knockout_raw = payload.get("knockout_matches", [])
+    if not isinstance(knockout_raw, list):
+        raise PayloadError("Ugyldige publicerede knockoutkampe")
+    knockout: list[PublishedKnockoutMatch] = []
+    for raw in knockout_raw:
+        if not isinstance(raw, dict):
+            raise PayloadError("Ugyldig publiceret knockoutkamp")
+        def valid_int(value: object) -> bool:
+            return isinstance(value, int) and not isinstance(value, bool) and value > 0
+        if (not all(isinstance(raw.get(key), str) and raw[key] for key in ("match_id", "stage", "source_a", "source_b"))
+            or not valid_int(raw.get("match_index"))
+            or not isinstance(raw.get("round_numbers"), list)
+            or not raw["round_numbers"]
+            or not all(valid_int(v) for v in raw["round_numbers"])
+            or not all(raw.get(key) is None or valid_int(raw[key]) for key in ("team_a_id", "team_b_id", "team_a_seed", "team_b_seed"))):
+            raise PayloadError("Ugyldig publiceret knockoutkamp")
+        knockout.append(PublishedKnockoutMatch(
+            raw["match_id"], raw["stage"], raw["match_index"], tuple(raw["round_numbers"]),
+            raw.get("team_a_id"), raw.get("team_b_id"), raw.get("team_a_seed"), raw.get("team_b_seed"),
+            raw["source_a"], raw["source_b"],
+        ))
+    return TournamentPairingRevision(group_id, revision, tuple(pairings), tuple(knockout))
+
+
 class TournamentPairingStore:
     """Keep published fixtures stable while results may be corrected."""
 
@@ -165,55 +217,7 @@ class TournamentPairingStore:
             raise PayloadError(f"Turneringsparringer kunne ikke læses: {exc}") from exc
         except json.JSONDecodeError as exc:
             raise PayloadError("Turneringsparringerne indeholder ugyldig JSON") from exc
-        if (
-            not isinstance(payload, dict)
-            or payload.get("schema_version") not in (1, PAIRING_SCHEMA_VERSION)
-            or payload.get("group_id") != group_id
-            or payload.get("tournament_revision") != revision
-            or not isinstance(payload.get("pairings"), list)
-        ):
-            raise PayloadError("Ugyldigt lager for turneringsparringer")
-        pairings: list[TournamentPairing] = []
-        for raw in payload["pairings"]:
-            if not isinstance(raw, dict):
-                raise PayloadError("Ugyldig turneringsparring")
-            round_number = raw.get("round")
-            team_a_id = raw.get("team_a_id")
-            team_b_id = raw.get("team_b_id")
-            if (
-                not isinstance(round_number, int)
-                or isinstance(round_number, bool)
-                or not isinstance(team_a_id, int)
-                or isinstance(team_a_id, bool)
-                or (
-                    team_b_id is not None
-                    and (not isinstance(team_b_id, int) or isinstance(team_b_id, bool))
-                )
-            ):
-                raise PayloadError("Ugyldig turneringsparring")
-            pairings.append(TournamentPairing(round_number, team_a_id, team_b_id, True))
-        knockout_raw = payload.get("knockout_matches", [])
-        if not isinstance(knockout_raw, list):
-            raise PayloadError("Ugyldige publicerede knockoutkampe")
-        knockout: list[PublishedKnockoutMatch] = []
-        for raw in knockout_raw:
-            if not isinstance(raw, dict):
-                raise PayloadError("Ugyldig publiceret knockoutkamp")
-            def valid_int(value: object) -> bool:
-                return isinstance(value, int) and not isinstance(value, bool) and value > 0
-            if (not all(isinstance(raw.get(key), str) and raw[key] for key in ("match_id", "stage", "source_a", "source_b"))
-                or not valid_int(raw.get("match_index"))
-                or not isinstance(raw.get("round_numbers"), list)
-                or not raw["round_numbers"]
-                or not all(valid_int(v) for v in raw["round_numbers"])
-                or not all(raw.get(key) is None or valid_int(raw[key]) for key in ("team_a_id", "team_b_id", "team_a_seed", "team_b_seed"))):
-                raise PayloadError("Ugyldig publiceret knockoutkamp")
-            knockout.append(PublishedKnockoutMatch(
-                raw["match_id"], raw["stage"], raw["match_index"], tuple(raw["round_numbers"]),
-                raw.get("team_a_id"), raw.get("team_b_id"), raw.get("team_a_seed"), raw.get("team_b_seed"),
-                raw["source_a"], raw["source_b"],
-            ))
-        return TournamentPairingRevision(group_id, revision, tuple(pairings), tuple(knockout))
+        return _pairings_from_dict(payload, group_id, revision)
 
     def load_for_tournament(
         self,

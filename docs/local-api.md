@@ -33,9 +33,11 @@ flowchart LR
 
 ## Query-parametre
 
-`format=json|csv`, `limit=1..5000` og `offset>=0` gælder alle dataruter. Catalog angiver de relevante filtre blandt `locale`, `game`, `round`, `team_id`, `group` og `season`. Ukendte, duplikerede eller ugyldige parametre giver en afgrænset JSON-fejl uden stacktrace eller lokal sti.
+`format=json|csv`, `limit=1..5000` og `offset>=0` gælder alle dataruter. Catalog angiver de relevante filtre blandt `locale`, `game`, `round`, `team_id`, `group` og `season`. `round` og `team_id` skal være heltal, også når datasættet er tomt. Ukendte, duplikerede eller ugyldige parametre giver en afgrænset JSON-fejl uden stacktrace eller lokal sti.
 
-Rækker sorteres deterministisk før pagination. Svar har `ETag`, `Last-Modified`, `Cache-Control: private, no-cache`, `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy` og `Permissions-Policy`. `If-None-Match` kan give `304 Not Modified`.
+Rækker sorteres deterministisk før pagination. Svar har `ETag`, `Last-Modified`, `Cache-Control: private, no-cache`, `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy` og `Permissions-Policy`. For både `GET` og `HEAD` giver `If-None-Match` med et matchende tag, en liste med et match eller `*` svaret `304 Not Modified` uden indhold. Svage tags (`W/`) matches efter tagværdien. JSON og CSV har hver deres tag.
+
+Rundens `status` bruger det seneste tilgængelige snapshot for spillerkataloget og hvert hold med data. Rundens snapshottællere omfatter alle gemte observationer.
 
 ## Excel
 
@@ -45,7 +47,7 @@ Vælg **Data → Hent data → Fra internettet** og brug eksempelvis:
 http://127.0.0.1:8501/api/v1/data/players?game=super-manager-fall-2026&format=csv&limit=5000
 ```
 
-`players` kræver `game`. Tilføj `locale=da` og `round=7`, hvis flere scopes eller en bestemt runde skal vælges.
+`players` kræver `game` og læser spillersnapshots i det valgte spils lager. Tilføj `locale=da` og `round=7`, hvis flere scopes eller en bestemt runde skal vælges.
 
 Spillerrækkerne eksponerer de kanoniske identitets-, pris-, vækst- og statusfelter samt de valgfrie read-only-felter `popularity`, `popularity_change`, `trend` og `index`. Manglende valgfrie værdier er `null` i JSON og tomme celler i CSV; de omskrives ikke til nul. `stats` og `totalStats` forbliver i snapshotkontrakten til ændringsforklaring. Brugerens beregnede kolonner er UI-/eksportfunktionalitet og afvikles aldrig gennem API'et.
 

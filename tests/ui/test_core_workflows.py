@@ -1,6 +1,7 @@
 """Browser-level cache-only downloads for complete game and competition scopes."""
 from __future__ import annotations
 
+from dataclasses import replace
 import hashlib
 from io import BytesIO
 import json
@@ -10,7 +11,10 @@ from urllib.parse import urlparse
 import zipfile
 
 import pytest
-from playwright.sync_api import Page, expect
+from playwright.sync_api import Page, Route, expect
+
+import holdet_lib as holdet
+from holdet_lib.refresh_runs import exclusive_data_operation
 
 from .conftest import UiServer
 
@@ -28,6 +32,51 @@ def _download(page: Page) -> dict:
     with page.expect_download(timeout=20_000) as info:
         page.get_by_role("button", name="Download samlet JSON", exact=True).click()
     return json.loads(Path(info.value.path()).read_text(encoding="utf-8"))
+
+
+def _block_external_requests(page: Page) -> list[str]:
+    unexpected: list[str] = []
+
+    def stop_remote(route: Route) -> None:
+        request = route.request
+        target = urlparse(request.url)
+        if target.scheme in {"http", "https"} and target.hostname not in {"127.0.0.1", "localhost", "::1"}:
+            static_icon = (
+                target.hostname == "fonts.gstatic.com"
+                and target.path.startswith("/s/i/short-term/release/materialsymbolsrounded/")
+                and target.path.endswith(".svg")
+                and not target.query
+            )
+            if not static_icon:
+                unexpected.append(request.url)
+            route.abort()
+        else:
+            route.continue_()
+
+    page.context.route("**/*", stop_remote)
+    return unexpected
+
+
+@pytest.mark.ui
+def test_open_pages_follow_shared_data_lease(page: Page, ui_server: UiServer) -> None:
+    _block_external_requests(page)
+    settings = page.context.new_page()
+    page.goto(ui_server.base_url, wait_until="domcontentloaded")
+    settings.goto(ui_server.base_url + "/settings", wait_until="domcontentloaded")
+    update = page.get_by_role("button", name="Opdater alle", exact=True)
+    tools = settings.get_by_role("button", name="Gem værktøjer", exact=True)
+    expect(update).to_be_enabled(timeout=20_000)
+    expect(tools).to_be_enabled(timeout=20_000)
+
+    paths = holdet.resolve_paths(
+        overrides=holdet.PathOverrides(data_root=ui_server.data_root), environ={}
+    )
+    with exclusive_data_operation(paths.data_dir):
+        expect(update).to_be_disabled(timeout=10_000)
+        expect(tools).to_have_count(0, timeout=10_000)
+    expect(update).to_be_enabled(timeout=10_000)
+    expect(tools).to_be_enabled(timeout=10_000)
+    settings.close()
 
 
 @pytest.mark.ui
@@ -55,17 +104,18 @@ def test_archive_card_opens_named_game_without_reloading(page: Page, ui_server: 
 def test_home_game_picker_supports_keyboard_in_current_tab(page: Page, ui_server: UiServer) -> None:
     page.set_viewport_size({"width": 1920, "height": 910})
     page.goto(ui_server.base_url + "/", wait_until="domcontentloaded")
-    picker = page.get_by_role("button", name="Åbn spil")
+    page.bring_to_front()
+    picker = page.get_by_role("combobox", name="Åbn spil")
     expect(picker).to_be_visible(timeout=20_000)
+    document_start = page.evaluate("performance.timeOrigin")
     picker.focus()
-    page.keyboard.press("Enter")
-    options = page.get_by_role("menuitem")
-    expect(options.first).to_be_visible()
-    target = options.nth(1).inner_text().strip()
+    expect(picker).to_be_focused()
     page.keyboard.press("ArrowDown")
-    expect(options.nth(1)).to_be_focused()
+    expect(page.get_by_role("option", name="Super Manager", exact=True)).to_be_visible()
+    page.keyboard.type("Super Manager")
     page.keyboard.press("Enter")
-    expect(page.get_by_role("heading", name=target, exact=True)).to_be_visible(timeout=20_000)
+    expect(page.get_by_role("heading", name="Super Manager", exact=True)).to_be_visible(timeout=20_000)
+    assert page.evaluate("performance.timeOrigin") == document_start
 
 
 @pytest.mark.ui
@@ -112,10 +162,11 @@ def test_home_comparison_table_reflows_without_document_overflow(page: Page, ui_
 
 
 @pytest.mark.ui
-def test_downloads_include_full_catalog_and_only_scope_teams_without_writes_or_network(page: Page, ui_server: UiServer) -> None:
+def test_downloads_include_full_catalog_and_only_scope_teams_without_writes_or_data_fetches(
+    page: Page, ui_server: UiServer,
+) -> None:
     page.set_viewport_size({"width": 1920, "height": 910})
-    requests = []
-    page.on("request", lambda req: requests.append(req.url))
+    remote = _block_external_requests(page)
     before = _files(ui_server.data_root)
     page.goto(ui_server.base_url + "/game?locale=da&game=tour-de-france-2026&section=players", wait_until="domcontentloaded")
     expect(page.get_by_text("60 af 60 spillere", exact=False)).to_be_visible(timeout=20_000)
@@ -139,18 +190,34 @@ def test_downloads_include_full_catalog_and_only_scope_teams_without_writes_or_n
     assert [group["id"] for group in competition["competitions"]] == ["ui-testcup"]
     assert _files(ui_server.data_root) == before
     assert not (ui_server.data_root / "remote-attempts.log").exists()
-    assert not [url for url in requests if urlparse(url).scheme in {"http", "https"} and urlparse(url).hostname not in {"127.0.0.1", "localhost", "::1"}]
+    assert remote == []
+
+
+@pytest.mark.ui
+def test_default_startup_and_navigation_do_not_attempt_telemetry(page: Page, ui_server: UiServer) -> None:
+    remote = _block_external_requests(page)
+    page.goto(ui_server.base_url + "/", wait_until="domcontentloaded")
+    picker = page.get_by_role("combobox", name="Åbn spil")
+    expect(picker).to_be_visible(timeout=20_000)
+    picker.click()
+    first = page.get_by_role("option").first
+    title = first.inner_text().strip()
+    first.click()
+    expect(page.get_by_role("heading", name=title, exact=True)).to_be_visible(timeout=20_000)
+    assert remote == []
+    assert not (ui_server.data_root / "remote-attempts.log").exists()
 
 
 @pytest.mark.ui
 def test_support_download_requires_preparation_for_current_privacy_profile(page: Page, ui_server: UiServer) -> None:
     page.set_viewport_size({"width": 1920, "height": 1080})
+    remote = _block_external_requests(page)
     before = _files(ui_server.data_root)
     page.goto(ui_server.base_url + "/data?section=exports", wait_until="domcontentloaded")
     prepare_report = page.get_by_role("button", name="Forbered managerspilrapport", exact=True)
     expect(prepare_report).to_be_visible(timeout=20_000)
     prepare_report.click()
-    prepare_support = page.get_by_role("button", name="Forbered anonymiseret ZIP", exact=True)
+    prepare_support = page.get_by_role("button", name="Forbered supportpakke", exact=True)
     expect(prepare_support).to_be_visible()
     prepare_support.click()
     download = page.get_by_role("button", name="Download supportpakke", exact=True)
@@ -158,6 +225,7 @@ def test_support_download_requires_preparation_for_current_privacy_profile(page:
     def read_support():
         with page.expect_download(timeout=20_000) as event:
             download.click()
+        assert event.value.suggested_filename == "holdet-support.zip"
         content = Path(event.value.path()).read_bytes()
         with zipfile.ZipFile(BytesIO(content)) as archive:
             return json.loads(archive.read("support-manifest.json")), json.loads(archive.read("data-package.json"))
@@ -172,6 +240,113 @@ def test_support_download_requires_preparation_for_current_privacy_profile(page:
     assert manifest["restorable"] is False and package["restorable"] is False
     assert _files(ui_server.data_root) == before
     assert not (ui_server.data_root / "remote-attempts.log").exists()
+    assert remote == []
+
+
+def _same_page_navigation(page: Page, url: str) -> None:
+    page.evaluate(
+        """url => {
+            history.pushState(history.state, '', url);
+            dispatchEvent(new PopStateEvent('popstate', {state: history.state}));
+        }""",
+        url,
+    )
+
+
+@pytest.mark.ui
+def test_scouting_url_restores_view_and_complete_game_identity(page: Page, ui_server: UiServer) -> None:
+    remote = _block_external_requests(page)
+    paths = holdet.resolve_paths(overrides=holdet.PathOverrides(data_root=ui_server.data_root))
+    original = paths.groups_file.read_bytes()
+    slug = "tour-de-france-2026"
+    scope = f"/scouting?locale=en&game={slug}"
+    try:
+        holdet.GroupStore(paths.groups_file, paths.group_revision_dir).create_manager_game(
+            f"https://www.holdet.dk/en/fantasy/{slug}", "Tourspillet 2026",
+        )
+        page.goto(ui_server.base_url + scope + "&view=notes", wait_until="domcontentloaded")
+        search = page.get_by_role("textbox", name=re.compile("Søg i noter"))
+        games = page.get_by_role("combobox", name="Spil", exact=True)
+        expect(search).to_be_visible(timeout=20_000)
+        expect(games).to_have_value(f"Tourspillet 2026 · {slug} · en")
+        document_start = page.evaluate("performance.timeOrigin")
+
+        _same_page_navigation(page, f"/scouting?locale=da&game={slug}&view=watchlist")
+        expect(search).to_have_count(0)
+        expect(games).to_have_value(f"Tourspillet 2026 · {slug} · da")
+        page.go_back()
+        expect(search).to_be_visible()
+        expect(games).to_have_value(f"Tourspillet 2026 · {slug} · en")
+        page.go_forward()
+        expect(search).to_have_count(0)
+        expect(games).to_have_value(f"Tourspillet 2026 · {slug} · da")
+        assert page.evaluate("performance.timeOrigin") == document_start
+
+        notes = page.get_by_role("radio", name="Noter", exact=True)
+        notes.click()
+        expect(search).to_be_visible()
+        expect(page).to_have_url(re.compile(r"view=notes(?:&|$)"))
+        notes.press("Space")
+        expect(search).to_be_visible()
+        expect(page).to_have_url(re.compile(r"view=notes(?:&|$)"))
+        assert remote == []
+    finally:
+        paths.groups_file.write_bytes(original)
+
+
+@pytest.mark.ui
+def test_analysis_url_restores_selected_panel(page: Page, ui_server: UiServer) -> None:
+    remote = _block_external_requests(page)
+    paths = holdet.resolve_paths(overrides=holdet.PathOverrides(data_root=ui_server.data_root))
+    original = paths.hub_settings_file.read_bytes()
+    try:
+        settings = holdet.HubSettingsStore(paths.hub_settings_file)
+        previous = settings.load()
+        settings.save(replace(previous, enabled_features=(*previous.enabled_features, holdet.HubFeature.ANALYSIS)))
+        scope = "/game?locale=da&game=tour-de-france-2026&section=analysis"
+        page.goto(ui_server.base_url + scope + "&analysis=experimental", wait_until="domcontentloaded")
+        experimental = page.get_by_role("heading", name="Eksperimentelle modeller", exact=True)
+        ideal = page.get_by_role("heading", name="Idealhold for en afsluttet runde", exact=True)
+        expect(experimental).to_be_visible(timeout=20_000)
+        document_start = page.evaluate("performance.timeOrigin")
+        _same_page_navigation(page, scope + "&analysis=ideal")
+        expect(ideal).to_be_visible()
+        page.go_back()
+        expect(experimental).to_be_visible()
+        page.go_forward()
+        expect(ideal).to_be_visible()
+        assert page.evaluate("performance.timeOrigin") == document_start
+        assert remote == []
+    finally:
+        paths.hub_settings_file.write_bytes(original)
+
+
+@pytest.mark.ui
+def test_report_scope_stays_selected_when_activated_twice(page: Page, ui_server: UiServer) -> None:
+    remote = _block_external_requests(page)
+    page.goto(ui_server.base_url + "/data?section=exports", wait_until="domcontentloaded")
+    prepare = page.get_by_role("button", name="Forbered managerspilrapport", exact=True)
+    expect(prepare).to_be_visible(timeout=20_000)
+    scope = page.get_by_role("radio", name="Managerspil", exact=True)
+    scope.click()
+    scope.press("Space")
+    expect(scope).to_be_checked()
+    expect(prepare).to_be_visible()
+    assert remote == []
+
+
+@pytest.mark.ui
+def test_standings_mode_stays_selected_when_activated_twice(page: Page, ui_server: UiServer) -> None:
+    remote = _block_external_requests(page)
+    page.goto(ui_server.base_url + "/group?group=ui-testliga", wait_until="domcontentloaded")
+    overall = page.get_by_role("radio", name="Samlet", exact=True)
+    rounds = page.get_by_role("radio", name="Runde", exact=True)
+    expect(overall).to_be_checked(timeout=20_000)
+    rounds.click()
+    expect(rounds).to_be_checked()
+    rounds.press("Space")
+    expect(rounds).to_be_checked()
+    assert remote == []
 
 
 @pytest.mark.ui

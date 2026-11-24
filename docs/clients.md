@@ -73,7 +73,11 @@ Eksempel: `/game?locale=da&game=tour-de-france-2026&section=players`. Valg i Str
 
 ### Offline-first
 
-Navigation, faneskift, rundeskift, Scouting, smartlister, notesøgning, grafer, Analyse, spillerdetaljer, spilafgrænset alarmfiltrering, sammenligning, ændringsvisning, transfersimulation og Rundecenterets time machine læser kun kompatible snapshots. Netværk bruges kun af tydeligt navngivne og bekræftede handlinger som **Hent**, **Find hold**, **Opdater** eller **Prøv igen**. Alarmer skriver kun ved **Markér som læst**, **Afvis** eller **Ryd afviste alarmer**. Bulkhandlinger validerer alle spillere før ét atomisk settings-write; formeldefinitioner gemmes kun eksplicit. Simuleringer og Rundecenterets afvigelsesfiltre lever i `st.session_state`; kun eksplicit gem af noter, filtre, standardhold, watchlist, formler eller opt-in skriver konfiguration.
+Navigation, faneskift, rundeskift, Scouting, smartlister, notesøgning, grafer, Analyse, spillerdetaljer, spilafgrænset alarmfiltrering, sammenligning, ændringsvisning, transfersimulation og Rundecenterets time machine læser kun kompatible snapshots. Appen kontakter Holdet.dk ved tydeligt navngivne og bekræftede handlinger som **Hent**, **Find hold**, **Opdater** eller **Prøv igen**. Streamlits brugsmålinger er slået fra i standardopsætningen. Browseren kan hente Streamlits ikoner fra en ekstern kilde.
+
+Alarmer skriver kun ved **Markér som læst**, **Afvis** eller **Ryd afviste alarmer**. Bulkhandlinger validerer alle spillere før ét atomisk settings-write; formeldefinitioner gemmes kun eksplicit. Simuleringer og Rundecenterets afvigelsesfiltre lever i `st.session_state`; kun eksplicit gem af noter, filtre, standardhold, watchlist, formler eller opt-in skriver konfiguration.
+
+Under en samlet opdatering er direkte hentning og holdsøgning utilgængelig. Noter og watchlist kan stadig redigeres på spillerprofilen for et aktivt spil. Hvert trin for et managerspil bruger de alarmindstillinger, det læste ved start. Ændringer kan derfor gælde for senere trin i samme kørsel.
 
 Den kanoniske alarmroute er `/game?locale=…&game=…&section=alerts`. `/alerts?locale=…&game=…` er den skjulte, spilfiltrerede kompatibilitetsside for watchlists fra den selvstændige Spillerstatistik. Hvis spillet er gemt som managerspil, viderestilles den til den kanoniske fane.
 

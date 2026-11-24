@@ -266,7 +266,7 @@ class TournamentDashboardTests(unittest.TestCase):
                     4,
                 )
                 button(app, "Opdater data").click().run(timeout=30)
-                run = coordinator.snapshot(app.session_state["visible-refresh-run"])
+                (run,) = coordinator.list_runs()
                 manifest = holdet.ManifestStore(paths.manifest_dir).load(
                     paths.data_dir / run["games"][0]["manifest_paths"][-1]
                 )

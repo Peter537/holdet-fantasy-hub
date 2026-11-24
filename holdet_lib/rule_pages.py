@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from hashlib import sha256
 from html.parser import HTMLParser
@@ -12,10 +12,11 @@ import re
 from urllib.parse import urljoin, urlsplit
 
 from .errors import PayloadError
+from .game_metadata import GameMetadata
 from .http import HttpClient
 from .models import GameUrl
 from .persistence import aware_local, publish_immutable_text
-from .rules import GameRuleProfile, game_rule_from_dict, game_rule_to_dict
+from .rules import GameRuleProfile, game_rule_from_dict, game_rule_to_dict, rule_profile_for_game
 
 
 @dataclass
@@ -239,6 +240,15 @@ def reviewed_rule_profile(game: GameUrl, capture: dict, raw_profile: dict, note:
     return game_rule_from_dict(raw)
 
 
+def capture_matches_profile(capture: dict, profile: GameRuleProfile) -> bool:
+    return (
+        capture["extraction_complete"]
+        and capture["source_sha256"] == profile.source_sha256
+        and capture["document_url"] == profile.document_url
+        and capture["source_url"] == profile.source_url
+    )
+
+
 class RulePageStore:
     """Immutable evidence and explicitly reviewed season profiles."""
 
@@ -275,7 +285,7 @@ class RulePageStore:
         }, ensure_ascii=False, indent=2, allow_nan=False) + "\n")
         return profile
 
-    def profile(self, game: GameUrl) -> GameRuleProfile | None:
+    def _reviewed_profile(self, game: GameUrl) -> GameRuleProfile | None:
         raw = _latest_record(self._root(game).glob("audit-*.json"), "reviewed_at", "audit")
         if raw is None:
             return None
@@ -284,11 +294,63 @@ class RulePageStore:
         profile = game_rule_from_dict(raw.get("profile"))
         if profile.identity != (game.locale.casefold(), game.slug) or not profile.verified:
             raise PayloadError("Rules audit has an invalid game identity")
+        return profile
+
+    def profile(self, game: GameUrl) -> GameRuleProfile | None:
+        profile = self._reviewed_profile(game)
+        if profile is None:
+            return None
         latest = self.latest(game)
         if latest is None:
             raise PayloadError("Audited rules have no matching evidence capture")
-        if (latest["source_sha256"] != profile.source_sha256
-                or latest["document_url"] != profile.document_url
-                or latest["source_url"] != profile.source_url):
-            return None
+        return profile if capture_matches_profile(latest, profile) else None
+
+    def effective_profile(
+        self,
+        game: GameUrl,
+        metadata: GameMetadata | None = None,
+        *,
+        label: str | None = None,
+        warnings: list[str] | None = None,
+    ) -> GameRuleProfile:
+        """Resolve reviewed local rules and compatible legacy metadata for either client."""
+        identity = (game.locale.casefold(), game.slug)
+        if metadata is not None and metadata.identity != identity:
+            metadata = None
+            if warnings is not None:
+                warnings.append("metadata_unreadable")
+        game_id = None if metadata is None else metadata.game_id
+        fallback = rule_profile_for_game(
+            game, game_id=game_id,
+            salary_cap=None if metadata is None else metadata.salary_cap, label=label,
+        )
+
+        def matches_game(profile: GameRuleProfile) -> bool:
+            return profile.identity == identity and (
+                game_id is None or profile.game_id is None or profile.game_id == game_id
+            )
+
+        legacy = None if metadata is None else metadata.rule_profile
+        if legacy is not None and not matches_game(legacy):
+            legacy = None
+            if warnings is not None:
+                warnings.append("rules_profile_mismatch")
+        profile = legacy if legacy is not None and (legacy.verified or not fallback.verified) else fallback
+        try:
+            reviewed = self._reviewed_profile(game)
+            latest = self.latest(game)
+            if reviewed is not None and latest is None:
+                raise PayloadError("Audited rules have no matching evidence capture")
+        except (OSError, ValueError, PayloadError):
+            if warnings is not None:
+                warnings.append("rules_evidence_unreadable")
+            return replace(profile, verified=False)
+        if reviewed is not None:
+            if not matches_game(reviewed):
+                if warnings is not None:
+                    warnings.append("rules_profile_mismatch")
+                return replace(profile, verified=False)
+            profile = reviewed
+        if latest is not None and not capture_matches_profile(latest, profile):
+            return replace(profile, verified=False)
         return profile

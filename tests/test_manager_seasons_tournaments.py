@@ -1005,6 +1005,7 @@ class AuditRegressionTests(unittest.TestCase):
                 "2026-08-01T00:00:00+00:00",
             )
 
+            store.save((original,))
             updated = store.update(
                 (original,),
                 "season-id",

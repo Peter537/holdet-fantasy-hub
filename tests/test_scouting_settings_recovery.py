@@ -120,7 +120,7 @@ def test_bulk_bookmark_uses_latest_preferences_and_keeps_other_records(tmp_path:
     with patch.object(scouting_page, "st", ui):
         scouting_page._bulk_controls(
             scope="test", selected_keys=(key,), game=GAME, entries={key: player},
-            store=store, settings=HubSettings(),
+            paths=paths, store=store, settings=HubSettings(),
         )
 
     saved = store.load()

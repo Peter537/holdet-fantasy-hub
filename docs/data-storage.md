@@ -124,14 +124,16 @@ En metadatarevision er en uforanderlig indsamling, mens den aktuelle metadatafil
 
 `backup-manifest.json` indeholder schema-version, tidspunkt, filstørrelser og SHA-256 for hver fil. Før restore vises en preview, og hele arkivet valideres. Restore afvises ved:
 
-- absolutte stier, backslashes, `..` eller ukendte rødder;
-- links, mapper, dubletter eller ikke-manifesterede filer;
-- grænser for medlemstal, enkeltfil, total udpakket størrelse, manifest og kompressionsratio;
-- utilstrækkelig ledig diskplads eller en kildefil, der ændrer sig under backup;
-- størrelse- eller checksumfejl;
-- ugyldig JSON eller ukendt schema-version.
+- absolutte stier, backslashes, `..`, ukendte rødder eller filnavne, der er tvetydige på Windows.
+- links, mapper, dubletter, navnekollisioner på Windows eller ikke-manifesterede filer.
+- overskridelse af grænserne for medlemstal, enkeltfil, total udpakket størrelse, manifest eller kompressionsratio. Ved en strukturel afvisning åbnes de indeholdte datafiler ikke.
+- utilstrækkelig ledig diskplads eller en kildefil, der ændrer sig under backup.
+- størrelse- eller checksumfejl.
+- ugyldig JSON, ukendt schema-version eller indhold, som de relevante datalagre ikke kan læse.
 
-Efter brugerens bekræftelse oprettes først en valideret rollback-ZIP. Nye `config`- og `data`-træer stages og installeres med hver sine mappeflytninger. En fanget fejl udløser tilbagerulning af de gennemførte flytninger. Hvis tilbagerulningen også fejler, angiver fejlmeddelelsen den bevarede rollback-ZIP. Denne garanti gælder fangede undtagelser; der er ingen varig restorejournal, som automatisk genopretter installationen efter processtop eller strømsvigt midt i flytningerne. Efter succes ryddes Streamlit-caches, og appen genindlæses. En rigtig restore bør kun afprøves mod test-ejede `AppPaths`.
+Konfiguration og data skal ligge i adskilte mapper. Eksportlageret og rollback-backuppen skal ligge uden for de mapper, restore erstatter. Ugyldige mappekombinationer afvises før staging.
+
+Efter bekræftelse opretter Hubben en valideret rollback-ZIP og en gendannelsesjournal ved siden af konfigurationsmappen. De nye mapper valideres, før de installeres. En tilstandsfil ved siden af datamappen afviser nye skrivninger, mens en mappeudskiftning afventer gendannelse. Det lokale API beder om et nyt forsøg, hvis en læsning overlapper mappeudskiftningen. Hvis processen stopper før bekræftet installation, ruller Hubben gennemførte mappeflytninger tilbage, næste gang installationen åbnes. Efter en bekræftet installation færdiggøres oprydningen ved opstart. Hvis gendannelsen ikke kan afsluttes automatisk, bevares oplysningerne til gendannelse og rollback-ZIP'en. Kontofiler i en brugerdefineret placering skal ligge uden for den datamappe, der udskiftes. En rigtig restore bør kun afprøves mod test-ejede `AppPaths`.
 
 Offentlig backup og indeksreparation tager datalåsen og derefter konfigurationslåsen. Konfigurationsstores og appens direkte hentehandlinger deltager i de samme ejerskabsgrænser, så backup ikke indsamler en halv konto-/gruppeændring eller overlapper en igangværende publicering. Den interne ZIP-writer tager ikke nye låse, når restore allerede ejer begge. Låsene koordinerer Hub-kald; eksterne programmer, som redigerer filerne direkte, er fortsat dækket af filstabilitets- og checksumkontrollerne.
 
@@ -141,11 +143,13 @@ Der er ingen automatisk eller cloud-baseret backup. ZIP-backup er altid en manue
 
 ## Integritet, lager og retention
 
-**Data og lager → Overblik** viser datastatus og eksakt lagerforbrug pr. managerspil og kategori. **Integritet og oprydning** tilbyder hurtig metadata-/schemakontrol, fuld streamet SHA-256-kontrol og et preview af en indeksreparation. Reparation erstatter kun `integrity-index.json`; korrupte data ændres eller skjules aldrig.
+**Data og lager → Overblik** viser lagerforbrug pr. managerspil og kategori. Optællingen omfatter konfiguration, snapshots, metadata, fixtures, historik og gemte kørsler. Integritetsindekset og artifactregisteret tælles som afledte data. **Integritet og oprydning** tilbyder hurtig metadata- og skemakontrol, fuld SHA-256-kontrol og et preview af en indeksreparation. Reparation erstatter alene `integrity-index.json`.
 
 Retention bevarer den nyeste gyldige spillerfil pr. `(locale, spil, runde)` og den nyeste gyldige holdfil pr. `(locale, spil, hold, runde)`. Snapshotreferencer i læsbare manifester bevares også; ved ældre manifester og fejl i efterbehandling bevares flere snapshots, som kan være nødvendige til historik eller genforsøg. En uafsluttet eller ulæselig opdateringsjournal og ulæselige manifester standser retention konservativt. Korrupte og uklassificerbare filer vælges aldrig automatisk. Arkivering opretter og validerer først en ZIP og kontrollerer igen, at de valgte filer må fjernes. Eksisterende mellemversionsarkiver udelades fra sletning, hvis de indeholder refererede snapshots, eller hvis sikker sletning ikke kan fastslås. Alle handlinger er manuelle, viser preview og kræver bekræftelse.
 
 Arkivering og sletning tager samme lokale lås som en samlet opdatering. En handling afvises, mens en anden ejer låsen; prøv igen, når den igangværende handling er færdig. Preview tager ikke låsen og skriver ikke filer.
+
+Oprydning beskytter den nyeste validerede backup og udelader ukendte eller ugyldige filer. Beskyttelsen kontrolleres igen under sletningslåsen.
 
 ## Overrides
 

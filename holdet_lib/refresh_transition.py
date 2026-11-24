@@ -8,12 +8,22 @@ from uuid import UUID, uuid4
 
 from .errors import PayloadError
 from .hub_settings import HubSettings, _settings_from_dict, _settings_to_dict
+from .models import ScrapedGame
 from .persistence import publish_immutable_text
 from .player_serialization import player_statistics_from_dict, player_statistics_to_json
 
 
 class RecoveryCheckpointError(RuntimeError):
     """A required recovery checkpoint could not be persisted."""
+
+
+def _staged_player_snapshot(value: object) -> ScrapedGame:
+    if not isinstance(value, dict) or not isinstance(value.get("generated_at"), str):
+        raise PayloadError("Spillerjournalens tidsstempel mangler")
+    generated_at = datetime.fromisoformat(value["generated_at"])
+    if generated_at.utcoffset() is None:
+        raise PayloadError("Spillerjournalens tidsstempel mangler tidszone")
+    return player_statistics_from_dict(value)
 
 
 class PlayerTransition:
@@ -112,17 +122,14 @@ class PlayerTransition:
         try:
             content = path.read_text(encoding="utf-8")
             value = json.loads(content)
-            statistics = player_statistics_from_dict(value)
-            generated_at = datetime.fromisoformat(value["generated_at"])
-            if (generated_at.utcoffset() is None or not statistics.entries
-                or statistics.round_number < 0
-                or (self.record.get("requested_round") is not None
+            statistics = _staged_player_snapshot(value)
+            if ((self.record.get("requested_round") is not None
                     and statistics.round_number != self.record["requested_round"])
                 or (expected_round is not None and statistics.round_number != expected_round)
                 or (statistics.game.locale.casefold(), statistics.game.slug)
                 != (self.game.locale.casefold(), self.game.slug)):
                 raise ValueError
-        except (OSError, ValueError, TypeError, KeyError, PayloadError) as exc:
+        except (OSError, ValueError, TypeError, KeyError, RecursionError, PayloadError) as exc:
             raise PayloadError("Spillerjournalens gemte data er ugyldige") from exc
         directory = self.player_store._game_directory(self.game)
         suffix = f"_recovery-{self.record['attempt_id']}.json"

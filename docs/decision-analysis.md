@@ -18,10 +18,10 @@ Provenance indeholder anvendte runder, stikprøvestørrelse, manglende input og 
 | Form 3/5 | Middel af de seneste præcis 3 eller 5 afsluttede observationer. Et ufuldstændigt vindue giver ingen værdi. Rundehuller interpoleres ikke. |
 | Stabilitet | På seneste højst fem afsluttede observationer og mindst tre: `sample_stdev(x)`, `scale=max(mean(abs(x)),1)`, `round(100/(1+dispersion/scale))`. 70–100 er stabil, 40–69 balanceret og under 40 boom/bust. |
 | Kaptajn | Faktisk bonus er `RoundSummary.captain_bonus`. Et alternativ summerer `round_change * (multiplier - 1)` for det verificerede kaptajnantal; profiler med positiv bonus bruger først `max(0, round_change)`. Scenarier kræver præcis rundetrup og deaktiveres ved mismatch mod den officielle bonus. |
-| Bank | For bank `A` og investering `P`: `lost_interest=interest(A)-interest(A-P-fee(P))`; `break_even=fee(P)+lost_interest`; procenten er `break_even/P`. UI viser faktisk og regelberegnet rente samt andelen af spillere, hvis form 3/5 slog grænsen. |
+| Bank | Den tabte rente er `interest(A)-interest(A-P-fee(P))` for bank `A` og investering `P`. Break-even er gebyr plus tabt rente. Andelen af spillere over grænsen bruger form 3/5 frem til og med den valgte runde. |
 | Transfer | For sammenhængende afsluttede snapshots: `decision_delta=bought_growth-fee-sold_next_growth`; `no_trade=actual_change-decision_delta`. Sæsonsummen er kun summen af et-rundes kontrafaktiske beslutninger. |
 | Bedst/værst | Maksimum og minimum af verificerede transferdeltaer. Lighed afgøres af tidligste runde. Kaptajn og bank vises separat. |
-| Gruppe/swing | Fælles og unikke spillere sammenlignes med gruppeføreren fra den eksisterende stilling. Afsluttet swing bruger faktisk rundevækst; fremadrettet potentiale er mærket som formbaseret proxy. |
+| Gruppe/swing | Fælles og unikke spillere sammenlignes med gruppeføreren fra den valgte rundes stilling. Faktisk swing er endeligt, når begge holds rundedata og den anvendte spillervækst er afsluttet. Den formbaserede proxy bruger afsluttede observationer frem til og med den valgte runde. |
 | Eksponering | `ejere / hold_med_dækkende_snapshot`. Dækkede hold, samlet gruppestørrelse og manglende hold vises altid. |
 | Pris-/pointkurve | Bruger `PlayerHistoryPoint.value`-semantikken og faktiske rundenumre. Ikke-afsluttede punkter mærkes `preliminary`; en tom numerisk serie giver en forklaring i stedet for en graf. |
 
@@ -41,7 +41,9 @@ Popularitet påvirker ikke potentiale eller risiko. ≤ 10 % er **differential**
 
 `GameRuleProfile` er bundet til konkret locale og spil-/sæsonslug. En verificeret profil kræver en officiel kilde-URL og adgangsdato. Rente og transfergebyr gemmes som basispoint med en eksplicit `floor`, `ceil` eller `nearest`-afrunding. Budget, trupstørrelse, formation eller kategorier, klubgrænse, kontrakter og kaptajnregler er valgfrie, indtil de er dokumenteret.
 
-`GameMetadata` schema 2 kan indeholde profilens projektion. `TransferRuleProfile` er bevaret som bagudkompatibelt API, men dens generiske formatpresets verificerer ikke en ny sæsons beslutningsanalyse. Schema 1-metadata læses uden startup-write.
+Dashboardet og CLI'en bruger samme lokale regelgennemgang for spillet. En gennemgang forbliver verificeret, så længe den seneste komplette kilde stemmer med dens URL'er og fingeraftryk. `GameMetadata` schema 2 kan levere en kompatibel profil for samme spil, hvis der ikke findes en lokal gennemgang og kilden ikke modsiger profilen. Schema 1-metadata læses uden automatisk omskrivning. De generiske `TransferRuleProfile`-profiler er uverificerede.
+
+Kaptajnanalysen bruger de samme positionsregler som transferberegningen. Den viser kun tilladte alternativer og markerer analysen som uverificeret, hvis de registrerede kaptajner mangler den krævede position.
 
 Spillernoter og tags, watchlistregler og -begrundelser, højst 20 beregnede kolonner pr. spil, gemte `PlayerStatisticsQuery`-profiler, standardhold og eksperimentelt opt-in ligger i `HubSettings` schema 4. Schema 1–3 migreres i hukommelsen og skrives først som schema 4 ved en eksplicit gemmehandling. En note er højst 2.000 tegn; en spiller kan have højst 12 normaliserede tags á 24 tegn. Standardtags er `overvej`, `undgå`, `kaptajn` og `langsigtet`, og egne tags er tilladt.
 
@@ -59,7 +61,9 @@ Eksperimentelle analyser er slået fra pr. spil, indtil brugeren gemmer et opt-i
 
 Fixturekontrakten accepterer kun en kilde, som er dokumenteret offentlig uden login og har en parsertest. `FixtureRecord` indeholder runde, hold, modstander, hjemme/ude, starttid og eventuel officiel difficulty. Difficulty vises kun, når både feltet og dets dokumentation er registreret; ellers vises kun kamplisten og **difficulty ikke verificeret**. `FixtureStore` er cache-only ved læsning og skrives kun af en eksplicit fremtidig adapterhandling.
 
-Monte Carlo sammenligner ét gyldigt transferscenarie med ingen handel. Fælles spillere annulleres, og hele observerede rundevækstvektorer reduceres samlet, så den observerede samvariation bevares. Fem dækkende afsluttede runder åbner 10.000 block-bootstrap-simuleringer over tre runder; 3–4 giver kun deskriptiv analyse, og færre end tre blokerer. Manglende værdi kan erstattes af positionsmedian, når mindst tre peers findes i observationen.
+Monte Carlo sammenligner ét verificerbart bytte til næste runde med at undlade at handle. Kontrollen bruger de lokale hold- og spillersnapshots, sæsonreglerne og den registrerede kaptajn. Prognosen dækker op til tre runder og slutter senest ved den kendte sidste runde. Et bytte med manglende grundlag eller brud på reglerne kan vises som en hypotetisk historisk sammenligning. Den udløser ingen prognose eller backtest.
+
+Modellen bruger den senest hentede afsluttede spillerobservation for hver runde frem til den valgte kildes runde. Fælles spillere annulleres, og de resterende spilleres rundevækst analyseres samlet for at bevare samvariationen. Fem særskilte, dækkende runder åbner 10.000 block-bootstrap-simuleringer over tre runder. Tre eller fire giver deskriptiv analyse. Færre end tre giver ingen analyse. Manglende værdi kan erstattes af positionsmedianen, når mindst tre sammenlignelige spillere findes i observationen.
 
 Standardseed er de første 64 bit af SHA-256 over kanoniske input. UI viser median, P10/P90, sandsynlighed for at slå baseline, seed og inputdækning. Ved mindst otte runder vises en walk-forward-backtest mod seneste-runde- og 3-runders-gennemsnitsbaselines. Fixtures påvirker ikke simulationen i denne version.
 

@@ -2,25 +2,26 @@
 
 from __future__ import annotations
 
-from .refresh_runs import exclusive_data_operation
-
 from dataclasses import dataclass
 from datetime import datetime
 import hashlib
 from io import BytesIO
 import json
 import os
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 import shutil
-import stat
-import tempfile
 from typing import BinaryIO
-from uuid import UUID, uuid4
+from uuid import uuid4
 import zipfile
+from zlib import error as CompressionError
 
+from .archive_validation import COPY_CHUNK, bounded_chunks, member_chunks, portable_parts, preflight_archive, read_member
+from .canonical_validation import is_refresh_run_file, known_schema_error
 from .errors import PayloadError
 from .paths import AppPaths
 from .persistence import aware_local, exclusive_configuration_update, file_update_lock_path
+from .refresh_runs import exclusive_data_operation
+from .restore_transaction import RestoreTransaction, recover_restore_locked
 
 
 BACKUP_SCHEMA_VERSION = 2
@@ -31,7 +32,6 @@ MAX_BACKUP_TOTAL_BYTES = 4 * 1024 * 1024 * 1024
 MAX_BACKUP_MANIFEST_BYTES = 4 * 1024 * 1024
 MAX_BACKUP_COMPRESSION_RATIO = 200
 MAX_JSON_VALIDATION_BYTES = 64 * 1024 * 1024
-_COPY_CHUNK = 1024 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,21 +66,6 @@ class RestoreResult:
     restored_files: int
     restored_bytes: int
     rollback_path: Path
-
-
-def is_refresh_run_file(relative: str) -> bool:
-    """Recognize journal data, including a run-owned immutable player stage."""
-
-    parts = PurePosixPath(relative).parts
-    name = parts[-1] if parts else ""
-    if name == "run.json" or (name.startswith("pending-") and name.endswith(".json")):
-        return True
-    if len(parts) != 2 or not name.startswith("player-") or not name.endswith(".json"):
-        return False
-    try:
-        return str(UUID(parts[0])) == parts[0] and str(UUID(name[7:-5])) == name[7:-5]
-    except ValueError:
-        return False
 
 
 def _canonical_files(paths: AppPaths) -> tuple[tuple[str, Path], ...]:
@@ -151,7 +136,7 @@ def _write_backup_zip(
             hasher = hashlib.sha256()
             size = 0
             with source.open("rb") as input_file, archive.open(archive_path, "w") as output:
-                while chunk := input_file.read(_COPY_CHUNK):
+                while chunk := input_file.read(COPY_CHUNK):
                     output.write(chunk)
                     hasher.update(chunk)
                     size += len(chunk)
@@ -189,6 +174,7 @@ def create_backup_bytes(
 ) -> tuple[bytes, BackupManifest]:
     """Compatibility facade; the archive itself is assembled on disk."""
 
+    _validate_accounts_location(paths)
     with exclusive_data_operation(paths.data_dir), exclusive_configuration_update(paths.config_dir):
         generated = aware_local(now)
         output = BytesIO()
@@ -204,6 +190,7 @@ def create_backup(
 ) -> Path:
     """Create one ZIP outside the canonical config/data trees."""
 
+    _validate_accounts_location(paths)
     with exclusive_data_operation(paths.data_dir), exclusive_configuration_update(paths.config_dir):
         return _create_backup_locked(paths, destination, now=now)
 
@@ -248,113 +235,26 @@ def _create_backup_locked(paths, destination, *, now):
     return target
 
 
-def _source_bytes(source: bytes | bytearray | Path | str | BinaryIO) -> bytes:
-    if isinstance(source, (bytes, bytearray)):
-        return bytes(source)
-    if hasattr(source, "read"):
-        value = source.read()
-        if not isinstance(value, bytes):
-            raise PayloadError("Backupkilden skal levere bytes")
-        return value
-    path = Path(source)
-    if path.stat().st_size > MAX_BACKUP_TOTAL_BYTES:
-        raise PayloadError("Backupkilden er større end den tilladte grænse")
-    return path.read_bytes()
-
-
-def _safe_member(name: str) -> str | None:
-    if not name or "\\" in name or name.startswith(("/", "\\")):
-        return None
-    path = PurePosixPath(name)
-    if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
-        return None
-    if path.parts[0] not in {"config", "data", _MANIFEST_NAME}:
-        return None
-    if len(path.parts) == 1 and name != _MANIFEST_NAME:
-        return None
-    return path.as_posix()
-
-
-def known_schema_error(path: str, data: bytes) -> str | None:
-    if not path.endswith(".json"):
-        return None
-    try:
-        payload = json.loads(data.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        return f"{path}: ugyldig JSON"
-    if not isinstance(payload, dict):
-        return f"{path}: JSON-roden skal være et objekt"
-    version = payload.get("schema_version")
-    if path == "config/groups.json" and version == 8:
-        return None
-    if path == "config/groups.json" and version not in {1, 2, 3, 4, 5, 6, 7}:
-        return f"{path}: ukendt gruppeschema"
-    if path == "config/groups.json" and version == 8:
-        return None
-    if path == "config/hub-settings.json" and version in {2, 3, 4, 5}:
-        return None
-    if path == "config/analysis-inbox.json" and version in {1, 2}:
-        return None
-    if path == "config/seasons.json" and version == 1:
-        return None
-    if path.startswith("data/tournament-pairings/"):
-        return None if version in {1, 2} else f"{path}: ukendt parringsschema"
-    if path.startswith("data/hall-of-fame/") and version == 2:
-        return None
-    if path == "config/hub-settings.json" and version != 1:
-        return f"{path}: ukendt Hub-schema"
-    if path == "config/analysis-inbox.json":
-        return f"{path}: ukendt alarmschema"
-    if path.startswith("data/game-metadata/") and version not in {1, 2}:
-        return f"{path}: ukendt metadataschema"
-    if path.startswith("data/fixtures/") and version != 1:
-        return f"{path}: ukendt fixtureschema"
-    if (path.startswith("data/rules/") or path == "config/team-strategies.json") and version != 1:
-        return f"{path}: ukendt rådgivningsschema"
-    if path.startswith("data/hall-of-fame/") and version != 1:
-        return f"{path}: ukendt Hall of Fame-schema"
-    if "/players/" in path and "player-round" in path and version not in {1, 2, 3, 4}:
-        return f"{path}: ukendt spillersnapshotschema"
-    if "/teams/" in path and "team-round" in path and version not in {1, 2}:
-        return f"{path}: ukendt teamsnapshotschema"
-    if path.startswith("data/manifests/") and version not in {1, 2, 3}:
-        return f"{path}: ukendt manifestschema"
-    if path.startswith("data/refresh-runs/"):
-        if path.endswith("/run.json"):
-            if version not in {1, 2} or not isinstance(payload.get("games"), list) or not isinstance(payload.get("run_id"), str):
-                return f"{path}: ugyldig opdateringsjournal"
-        elif "/pending-" in path:
-            if version not in {1, 2, 3}:
-                return f"{path}: ukendt afventende manifestschema"
-        elif is_refresh_run_file(path.removeprefix("data/refresh-runs/")):
-            from .player_serialization import player_statistics_from_dict
-
-            try:
-                player_statistics_from_dict(payload)
-                generated = datetime.fromisoformat(payload["generated_at"])
-                if generated.tzinfo is None:
-                    raise ValueError("Stage-tidspunktet mangler tidszone")
-            except (KeyError, TypeError, ValueError, PayloadError):
-                return f"{path}: ugyldigt midlertidigt spillersnapshot"
-        else:
-            return f"{path}: ukendt journalfil"
-    if path.startswith("data/group-revisions/") and version != 1:
-        return f"{path}: ukendt revisionsschema"
-    return None
+def _backup_member_parts(name: str) -> tuple[str, ...]:
+    parts = portable_parts(name)
+    if len(parts) < 2 or parts[0] not in {"config", "data"}:
+        raise PayloadError(f"Usikker sti i ZIP: {name}")
+    return parts
 
 
 def _parse_manifest(data: bytes) -> BackupManifest:
     try:
         payload = json.loads(data.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+    except (ValueError, RecursionError) as exc:
         raise PayloadError("Backupmanifestet indeholder ugyldig JSON") from exc
-    if not isinstance(payload, dict) or payload.get("schema_version") not in {1, 2}:
+    schema_version = payload.get("schema_version") if isinstance(payload, dict) else None
+    if type(schema_version) is not int or schema_version not in {1, 2}:
         raise PayloadError("Ukendt skema for backupmanifest")
-    schema_version = int(payload["schema_version"])
     files = payload.get("files")
     if not isinstance(files, list):
         raise PayloadError("Backupmanifestet mangler fillisten")
     parsed: list[BackupManifestEntry] = []
+    seen: set[str] = set()
     for raw in files:
         if not isinstance(raw, dict):
             raise PayloadError("Backupmanifestet har en ugyldig filpost")
@@ -363,7 +263,6 @@ def _parse_manifest(data: bytes) -> BackupManifest:
         digest = raw.get("sha256")
         if (
             not isinstance(path, str)
-            or _safe_member(path) != path
             or not isinstance(size, int)
             or isinstance(size, bool)
             or size < 0
@@ -371,6 +270,10 @@ def _parse_manifest(data: bytes) -> BackupManifest:
             or len(digest) != 64
         ):
             raise PayloadError("Backupmanifestet har en ugyldig filpost")
+        _backup_member_parts(path)
+        if path in seen:
+            raise PayloadError("Backupmanifestet har duplikerede filstier")
+        seen.add(path)
         mtime = raw.get("mtime_ns")
         if mtime is not None and (
             not isinstance(mtime, int) or isinstance(mtime, bool) or mtime < 0
@@ -396,102 +299,156 @@ def validate_backup(
 ) -> BackupValidation:
     """Validate all members, schemas, sizes and SHA-256 checksums."""
 
-    errors: list[str] = []
-    warnings: list[str] = []
     try:
-        if isinstance(source, (bytes, bytearray)):
-            archive_source: object = BytesIO(bytes(source))
-        elif hasattr(source, "read"):
-            if hasattr(source, "seek"):
-                source.seek(0)
-            archive_source = source
-        else:
-            archive_source = Path(source)
-        archive = zipfile.ZipFile(archive_source)  # type: ignore[arg-type]
-    except (OSError, zipfile.BadZipFile, PayloadError) as exc:
+        with _open_backup(source) as archive:
+            return _validate_archive(archive, validate_schemas=_validate_schemas)
+    except (OSError, ValueError, zipfile.BadZipFile, PayloadError) as exc:
         return BackupValidation(None, (f"ZIP-filen kunne ikke åbnes: {exc}",))
-    with archive:
-        infos = archive.infolist()
-        if len(infos) > MAX_BACKUP_MEMBERS:
-            errors.append("ZIP-filen indeholder for mange medlemmer")
-        if sum(info.file_size for info in infos) > MAX_BACKUP_TOTAL_BYTES:
-            errors.append("ZIP-filens udpakkede størrelse er for stor")
-        names: list[str] = []
-        for info in infos:
-            safe = _safe_member(info.filename)
-            if safe is None or safe != info.filename:
-                errors.append(f"Usikker sti i ZIP: {info.filename}")
-                continue
-            unix_mode = info.external_attr >> 16
-            if stat.S_ISLNK(unix_mode):
-                errors.append(f"Links er ikke tilladt i backup: {info.filename}")
-            if info.is_dir():
-                errors.append(f"Mappeposter er ikke tilladt: {info.filename}")
-            if info.file_size > MAX_BACKUP_MEMBER_BYTES:
-                errors.append(f"Filen er for stor: {info.filename}")
-            if (
-                info.compress_size
-                and info.file_size / info.compress_size > MAX_BACKUP_COMPRESSION_RATIO
-            ):
-                errors.append(f"Mistænkelig kompressionsratio: {info.filename}")
-            names.append(info.filename)
-        if len(names) != len(set(names)):
-            errors.append("ZIP-filen indeholder dubletter")
-        if _MANIFEST_NAME not in names:
-            return BackupValidation(None, tuple((*errors, "Backupmanifestet mangler")))
-        manifest_info = archive.getinfo(_MANIFEST_NAME)
-        if manifest_info.file_size > MAX_BACKUP_MANIFEST_BYTES:
-            return BackupValidation(None, tuple((*errors, "Backupmanifestet er for stort")))
+
+
+def _open_backup(source: bytes | bytearray | Path | str | BinaryIO) -> zipfile.ZipFile:
+    if isinstance(source, (bytes, bytearray)):
+        size = len(source)
+        archive_source = BytesIO(source)
+    elif isinstance(source, (Path, str)):
+        archive_source = Path(source)
+        size = archive_source.stat().st_size
+    else:
+        archive_source = source
+        size = source.seek(0, os.SEEK_END)
+        source.seek(0)
+    if size > MAX_BACKUP_TOTAL_BYTES:
+        raise PayloadError("Backupkilden er større end den tilladte grænse")
+    return zipfile.ZipFile(archive_source)
+
+
+def _validate_archive(
+    archive: zipfile.ZipFile, *, validate_schemas: bool
+) -> BackupValidation:
+    try:
+        members = preflight_archive(
+            archive,
+            max_members=MAX_BACKUP_MEMBERS,
+            max_member_bytes=MAX_BACKUP_MEMBER_BYTES,
+            max_total_bytes=MAX_BACKUP_TOTAL_BYTES,
+            max_compression_ratio=MAX_BACKUP_COMPRESSION_RATIO,
+        )
+        for name in members:
+            if name != _MANIFEST_NAME:
+                _backup_member_parts(name)
+        if _MANIFEST_NAME not in members:
+            raise PayloadError("Backupmanifestet mangler")
+        manifest = _parse_manifest(
+            read_member(archive, members[_MANIFEST_NAME], limit=MAX_BACKUP_MANIFEST_BYTES)
+        )
+    except (OSError, RuntimeError, zipfile.BadZipFile, CompressionError, PayloadError) as exc:
+        return BackupValidation(None, (str(exc),))
+
+    if {entry.path for entry in manifest.files} != members.keys() - {_MANIFEST_NAME}:
+        return BackupValidation(manifest, ("Fillisten i manifestet matcher ikke ZIP-indholdet",))
+    errors: list[str] = []
+    if sum(members[entry.path].file_size for entry in manifest.files) != manifest.total_bytes:
+        errors.append("Totalstørrelsen i manifestet matcher ikke")
+    for entry in manifest.files:
+        member = members[entry.path]
+        if member.file_size != entry.size:
+            errors.append(f"Filstørrelsen matcher ikke: {entry.path}")
+        if validate_schemas and entry.path.casefold().endswith(".json") and entry.size > MAX_JSON_VALIDATION_BYTES:
+            errors.append(f"JSON-filen er for stor til skemavalidering: {entry.path}")
+    if errors:
+        return BackupValidation(manifest, tuple(errors))
+
+    expected = {entry.path.casefold(): entry for entry in manifest.files}
+    checked_revisions: set[str] = set()
+
+    def read_revision(name: str) -> object:
+        key = f"data/group-revisions/{name}".casefold()
+        entry = expected.get(key)
+        if entry is None:
+            raise PayloadError(f"Turneringsrevisionen mangler i backup: {name}")
+        if key in checked_revisions:
+            raise PayloadError(f"Turneringsrevisionen er refereret flere gange: {name}")
+        checked_revisions.add(key)
         try:
-            manifest = _parse_manifest(archive.read(_MANIFEST_NAME))
-        except (KeyError, PayloadError) as exc:
-            return BackupValidation(None, tuple((*errors, str(exc))))
-        expected = {item.path: item for item in manifest.files}
-        actual = set(names) - {_MANIFEST_NAME}
-        if set(expected) != actual:
-            errors.append("Fillisten i manifestet matcher ikke ZIP-indholdet")
-        checked_total = 0
-        for path, entry in expected.items():
-            try:
-                hasher = hashlib.sha256()
-                size = 0
-                schema_data = bytearray()
-                with archive.open(path) as member:
-                    while chunk := member.read(_COPY_CHUNK):
-                        size += len(chunk)
-                        hasher.update(chunk)
-                        if path.endswith(".json") and len(schema_data) <= MAX_JSON_VALIDATION_BYTES:
-                            schema_data.extend(chunk)
-            except KeyError:
-                continue
-            except (OSError, RuntimeError, zipfile.BadZipFile) as exc:
-                errors.append(f"Filen kunne ikke udpakkes: {path}: {exc}")
-                continue
-            checked_total += size
-            if size != entry.size:
-                errors.append(f"Filstørrelsen matcher ikke: {path}")
-            if hasher.hexdigest() != entry.sha256:
-                errors.append(f"Checksum matcher ikke: {path}")
-            if _validate_schemas and path.endswith(".json"):
-                if size > MAX_JSON_VALIDATION_BYTES:
-                    errors.append(f"JSON-filen er for stor til skemavalidering: {path}")
-                elif schema_error := known_schema_error(path, bytes(schema_data)):
-                    errors.append(schema_error)
-        if checked_total != manifest.total_bytes:
-            errors.append("Totalstørrelsen i manifestet matcher ikke")
-    return BackupValidation(manifest, tuple(dict.fromkeys(errors)), tuple(warnings))
+            content = _verify_member(archive, members[entry.path], entry, collect=True)
+            return json.loads(content.decode("utf-8"))
+        except (OSError, RuntimeError, ValueError, zipfile.BadZipFile, CompressionError) as exc:
+            raise PayloadError(f"Turneringsrevisionen kunne ikke læses: {name}") from exc
 
-
-def _extract_tree(archive: zipfile.ZipFile, prefix: str, target: Path) -> None:
-    target.mkdir(parents=True, exist_ok=True)
-    for info in archive.infolist():
-        if not info.filename.startswith(prefix + "/"):
+    for entry in manifest.files:
+        compare_schema = validate_schemas and entry.path.casefold().endswith(".json")
+        try:
+            data = _verify_member(archive, members[entry.path], entry, collect=compare_schema)
+        except (OSError, RuntimeError, zipfile.BadZipFile, CompressionError, PayloadError) as exc:
+            errors.append(str(exc))
             continue
-        relative = PurePosixPath(info.filename).relative_to(prefix)
-        destination = target.joinpath(*relative.parts)
+        if compare_schema and (problem := known_schema_error(entry.path, data, read_revision=read_revision)):
+            errors.append(problem)
+    return BackupValidation(manifest, tuple(errors))
+
+
+def _verify_member(
+    archive: zipfile.ZipFile,
+    info: zipfile.ZipInfo,
+    entry: BackupManifestEntry,
+    *,
+    collect: bool = False,
+    output: BinaryIO | None = None,
+) -> bytes:
+    digest = hashlib.sha256()
+    data = bytearray()
+    for chunk in member_chunks(archive, info, limit=entry.size):
+        digest.update(chunk)
+        if collect:
+            data.extend(chunk)
+        if output is not None:
+            output.write(chunk)
+    if info.file_size != entry.size or digest.hexdigest() != entry.sha256:
+        raise PayloadError(f"Checksum matcher ikke: {entry.path}")
+    return bytes(data)
+
+
+def _extract_backup(
+    archive: zipfile.ZipFile, manifest: BackupManifest, config: Path, data: Path
+) -> None:
+    roots = {"config": config.resolve(), "data": data.resolve()}
+    for root in roots.values():
+        root.mkdir()
+    for entry in manifest.files:
+        tree, *parts = _backup_member_parts(entry.path)
+        root = roots[tree]
+        destination = root.joinpath(*parts)
+        resolved = destination.resolve()
+        if not resolved.is_relative_to(root) or resolved != destination:
+            raise PayloadError(f"Usikker sti i ZIP: {entry.path}")
         destination.parent.mkdir(parents=True, exist_ok=True)
-        with archive.open(info, "r") as source, destination.open("wb") as output:
-            shutil.copyfileobj(source, output)
+        if destination.parent.resolve(strict=True) != destination.parent:
+            raise PayloadError(f"Usikker sti i ZIP: {entry.path}")
+        with destination.open("xb") as output:
+            _verify_member(archive, archive.getinfo(entry.path), entry, output=output)
+
+
+def _validate_accounts_location(paths: AppPaths) -> None:
+    if paths.accounts_file.resolve().is_relative_to(paths.data_dir.resolve()):
+        raise PayloadError("Kontofilen skal ligge uden for den datamappe der gendannes")
+
+
+def validate_restore_layout(paths: AppPaths) -> None:
+    """Keep canonical trees and exports disjoint before taking any write locks."""
+
+    config, data = paths.config_dir.resolve(), paths.data_dir.resolve()
+    if config.is_relative_to(data) or data.is_relative_to(config):
+        raise PayloadError("Konfigurations- og datamapperne skal være adskilte ved gendannelse")
+    _validate_accounts_location(paths)
+    exports = (
+        paths.export_dir, paths.backup_dir, paths.player_export_dir,
+        paths.team_export_dir, paths.report_dir, paths.archive_dir,
+        paths.artifact_registry_file,
+    )
+    for path in exports:
+        export = path.resolve()
+        if any(export.is_relative_to(root) or root.is_relative_to(export) for root in (config, data)):
+            raise PayloadError("Eksporter og rollback-backup skal ligge uden for mapperne der gendannes")
 
 
 def restore_backup(
@@ -502,30 +459,34 @@ def restore_backup(
 ) -> RestoreResult:
     """Replace config/data only after full validation, with automatic rollback."""
 
-    source_path: Path | None = None
-    source_signature: tuple[int, int] | None = None
-    if isinstance(source, (Path, str)):
-        source_path = Path(source)
-        source_stat = source_path.stat()
-        source_signature = (source_stat.st_size, source_stat.st_mtime_ns)
-        if source_stat.st_size > MAX_BACKUP_TOTAL_BYTES:
-            raise PayloadError("Backupkilden er større end den tilladte grænse")
-        archive_source: Path | BytesIO = source_path
-    else:
-        archive_source = BytesIO(_source_bytes(source))
-    validation = validate_backup(archive_source)
-    if not validation.is_valid or validation.manifest is None:
-        raise PayloadError("; ".join(validation.errors))
-    if source_path is not None:
-        checked = source_path.stat()
-        if (checked.st_size, checked.st_mtime_ns) != source_signature:
-            raise PayloadError("Backupkilden ændrede sig under valideringen")
-    with exclusive_data_operation(paths.data_dir), exclusive_configuration_update(paths.config_dir):
+    validate_restore_layout(paths)
+    if not isinstance(source, (bytes, bytearray, str, Path)):
+        source = b"".join(
+            bounded_chunks(source, MAX_BACKUP_TOTAL_BYTES, error="Backupkilden er for stor")
+        )
+    try:
+        archive = _open_backup(source)
+    except (OSError, ValueError, zipfile.BadZipFile) as exc:
+        raise PayloadError(f"ZIP-filen kunne ikke åbnes: {exc}") from exc
+    with archive:
+        validation = _validate_archive(archive, validate_schemas=True)
+        if not validation.is_valid or validation.manifest is None:
+            raise PayloadError("; ".join(validation.errors))
+        return _restore_validated(archive, validation.manifest, paths, now=now)
+
+
+def _restore_validated(
+    archive: zipfile.ZipFile, manifest: BackupManifest, paths: AppPaths, *, now: datetime | None
+) -> RestoreResult:
+    with exclusive_data_operation(paths.data_dir, allow_pending_restore=True), exclusive_configuration_update(
+        paths.config_dir, allow_pending_restore=True,
+    ):
+        recover_restore_locked(paths)
         config_parent = paths.config_dir.parent
         data_parent = paths.data_dir.parent
         config_parent.mkdir(parents=True, exist_ok=True)
         data_parent.mkdir(parents=True, exist_ok=True)
-        required = validation.manifest.total_bytes + 32 * 1024 * 1024
+        required = manifest.total_bytes + 32 * 1024 * 1024
         for parent in {config_parent.resolve(), data_parent.resolve()}:
             if shutil.disk_usage(parent).free < required:
                 raise PayloadError("Der er ikke nok ledig diskplads til sikker gendannelse")
@@ -557,41 +518,16 @@ def restore_backup(
         finally:
             rollback_temporary.unlink(missing_ok=True)
         rollback = rollback_target.resolve()
-        config_temp = Path(tempfile.mkdtemp(prefix=".holdet-restore-", dir=config_parent))
-        data_temp = Path(tempfile.mkdtemp(prefix=".holdet-restore-", dir=data_parent))
-        staged_config = config_temp / "config"
-        staged_data = data_temp / "data"
-        old_config = config_parent / f".{paths.config_dir.name}.old-{uuid4().hex}"
-        old_data = data_parent / f".{paths.data_dir.name}.old-{uuid4().hex}"
-        moved_config = moved_data = installed_config = installed_data = False
+        transaction = RestoreTransaction.start(paths, rollback)
         try:
-            with zipfile.ZipFile(archive_source) as archive:
-                _extract_tree(archive, "config", staged_config)
-                _extract_tree(archive, "data", staged_data)
-            if source_path is not None:
-                checked = source_path.stat()
-                if (checked.st_size, checked.st_mtime_ns) != source_signature:
-                    raise PayloadError("Backupkilden ændrede sig under staging")
-            if paths.config_dir.exists():
-                os.replace(paths.config_dir, old_config)
-                moved_config = True
-            os.replace(staged_config, paths.config_dir)
-            installed_config = True
-            if paths.data_dir.exists():
-                os.replace(paths.data_dir, old_data)
-                moved_data = True
-            os.replace(staged_data, paths.data_dir)
-            installed_data = True
+            for parent in {transaction.config.stage.parent, transaction.data.stage.parent}:
+                parent.mkdir()
+            _extract_backup(archive, manifest, transaction.config.stage, transaction.data.stage)
+            archive.close()
+            transaction.install()
         except Exception as exc:
             try:
-                if installed_data and paths.data_dir.exists():
-                    shutil.rmtree(paths.data_dir)
-                if moved_data and old_data.exists():
-                    os.replace(old_data, paths.data_dir)
-                if installed_config and paths.config_dir.exists():
-                    shutil.rmtree(paths.config_dir)
-                if moved_config and old_config.exists():
-                    os.replace(old_config, paths.config_dir)
+                recover_restore_locked(paths)
             except Exception as rollback_exc:
                 raise PayloadError(
                     f"Gendannelsen mislykkedes, og tilbagerulningen mislykkedes: {rollback_exc}. "
@@ -600,14 +536,10 @@ def restore_backup(
             raise PayloadError(
                 f"Gendannelsen mislykkedes; den oprindelige installation er lagt tilbage: {exc}"
             ) from exc
-        finally:
-            shutil.rmtree(config_temp, ignore_errors=True)
-            shutil.rmtree(data_temp, ignore_errors=True)
-        shutil.rmtree(old_config, ignore_errors=True)
-        shutil.rmtree(old_data, ignore_errors=True)
+        recover_restore_locked(paths)
         return RestoreResult(
-            len(validation.manifest.files),
-            validation.manifest.total_bytes,
+            len(manifest.files),
+            manifest.total_bytes,
             rollback,
         )
 

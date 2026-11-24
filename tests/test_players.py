@@ -101,6 +101,15 @@ class PayloadTests(unittest.TestCase):
         self.assertEqual(round_number, 0)
         self.assertEqual(len(entries), 2)
 
+    def test_duplicate_source_ids_are_rejected_without_requiring_legacy_ids(self) -> None:
+        html = fixture("soccer")
+        repeated = html.replace(r'{\"person\":', r'{\"id\":42,\"person\":')
+        assert repeated != html
+        with self.assertRaisesRegex(scraper.PayloadError, "gentagne spiller-ID"):
+            scraper.extract_entries_and_round(repeated)
+        entries, _ = scraper.extract_entries_and_round(html)
+        self.assertEqual([entry.entry_id for entry in entries], [None, None])
+
     def test_accepts_legacy_cycling_manager_variant(self) -> None:
         payload = '<script>self.__next_f.push([1,"{\\"variant\\":\\"cycling_world_tour\\"}"]);</script>'
         self.assertEqual(

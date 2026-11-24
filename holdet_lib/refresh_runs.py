@@ -17,7 +17,9 @@ import time
 from typing import Any, Callable
 from uuid import UUID, uuid4
 
+from .errors import PayloadError
 from .persistence import replace_text_atomically
+from .restore_fence import RestoreFence
 
 _TERMINAL = frozenset({"success", "partial", "failed", "cancelled"})
 _ACTIVE: dict[str, str] = {}
@@ -97,7 +99,7 @@ class _Lease:
         self.run_id = run_id
         self.handle: Any = None
 
-    def acquire(self) -> None:
+    def acquire(self, *, allow_pending_restore: bool = False) -> None:
         with _GUARD:
             if self.key in _ACTIVE:
                 raise RefreshRunBusyError("En opdatering er allerede i gang")
@@ -107,6 +109,13 @@ class _Lease:
             try:
                 if not _try_lock(self.handle):
                     raise RefreshRunBusyError("En opdatering er allerede i gang")
+                if not allow_pending_restore:
+                    try:
+                        state = RestoreFence.load(self.root.parent)
+                    except PayloadError as exc:
+                        raise RefreshRunBusyError(str(exc)) from exc
+                    if state is not None and state.pending:
+                        raise RefreshRunBusyError("En afbrudt gendannelse skal afsluttes, før data kan ændres")
                 self.handle.seek(0)
                 self.handle.write(b"0" + self.run_id.encode("ascii"))
                 self.handle.truncate()
@@ -129,31 +138,31 @@ class _Lease:
 
 
 @contextmanager
-def exclusive_data_operation(data_dir: Path):
+def exclusive_data_operation(data_dir: Path, *, allow_pending_restore: bool = False):
     """Serialize an explicit data mutation with refresh workers for this root.
 
     Read-only previews and scans must not enter this context. The lease is held
     until the operation exits, including when it raises.
     """
     lease = _Lease(Path(data_dir) / "refresh-runs", str(uuid4()))
-    lease.acquire()
+    lease.acquire(allow_pending_restore=allow_pending_restore)
     try:
         yield
     finally:
         lease.release()
 
 
-def _active(root: Path, run_id: str) -> bool:
+def _active(root: Path, run_id: str | None = None) -> bool:
     with _GUARD:
         active = _ACTIVE.get(_root_key(root))
         if active is not None:
-            return active == run_id
+            return run_id is None or active == run_id
         path = _lock_path(root)
-        if not path.exists():
-            return False
         try:
             with path.open("r+b") as handle:
                 if not _try_lock(handle):
+                    if run_id is None:
+                        return True
                     handle.seek(1)
                     return handle.read().decode("ascii", errors="replace") == run_id
                 _unlock(handle)
@@ -162,8 +171,29 @@ def _active(root: Path, run_id: str) -> bool:
         return False
 
 
+def data_operation_running(data_dir: Path) -> bool:
+    """Check the shared lease without creating a lock file or changing its contents."""
+    return _active(Path(data_dir) / "refresh-runs")
+
+
 def _json_copy(value: Any) -> Any:
     return json.loads(json.dumps(value, ensure_ascii=False, allow_nan=False))
+
+
+def _journal_from_dict(value: object, run_id: str) -> dict[str, Any]:
+    if (not isinstance(value, dict) or value.get("schema_version") not in {1, 2}
+        or value.get("run_id") != run_id or not isinstance(value.get("games"), list)
+        or not isinstance(value.get("created_at"), str)
+        or value.get("status") not in _TERMINAL | {"running", "unstarted"}):
+        raise ValueError("Ugyldig opdateringsjournal")
+    for entry in value["games"]:
+        if (not isinstance(entry, dict) or not isinstance(entry.get("game"), dict)
+            or not isinstance(entry["game"].get("key"), str)
+            or entry.get("status") not in _TERMINAL | {"running", "unstarted"}
+            or not isinstance(entry.get("manifest_paths"), list)
+            or not all(isinstance(path, str) for path in entry["manifest_paths"])):
+            raise ValueError("Ugyldig spilstatus i opdateringsjournal")
+    return value
 
 
 class RefreshRunCoordinator:
@@ -198,19 +228,7 @@ class RefreshRunCoordinator:
                     if attempt == 19:
                         raise
                     time.sleep(0.01)
-        if (not isinstance(value, dict) or value.get("schema_version") not in {1, 2}
-            or value.get("run_id") != run_id or not isinstance(value.get("games"), list)
-            or not isinstance(value.get("created_at"), str)
-            or value.get("status") not in _TERMINAL | {"running", "unstarted"}):
-            raise ValueError("Ugyldig opdateringsjournal")
-        for entry in value["games"]:
-            if (not isinstance(entry, dict) or not isinstance(entry.get("game"), dict)
-                or not isinstance(entry["game"].get("key"), str)
-                or entry.get("status") not in _TERMINAL | {"running", "unstarted"}
-                or not isinstance(entry.get("manifest_paths"), list)
-                or not all(isinstance(path, str) for path in entry["manifest_paths"])):
-                raise ValueError("Ugyldig spilstatus i opdateringsjournal")
-        return value
+        return _journal_from_dict(value, run_id)
 
     def _write(self, run: dict[str, Any]) -> None:
         run["updated_at"] = _now()

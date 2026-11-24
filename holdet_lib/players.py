@@ -10,7 +10,7 @@ from urllib.parse import unquote, urlsplit
 from .errors import PayloadError, UnsupportedGameError, UrlValidationError
 from .flight import extract_flight_text
 from .http import fetch_html
-from .models import GameUrl, PlayerEntry, PlayerPerformanceStat, ScrapedGame
+from .models import GameUrl, PlayerEntry, PlayerPerformanceStat, ScrapedGame, require_unique_player_ids
 from .policies import KNOWN_ROUTE_VARIANTS, GamePolicy, legacy_policy
 from .sport_adapters import get_sport_adapter
 
@@ -248,10 +248,16 @@ def extract_entries_and_round(html: str) -> tuple[tuple[PlayerEntry, ...], int]:
     rows, round_number, _ = max(candidates, key=lambda item: len(item[0]))
     if round_number < 0:
         raise PayloadError(f"Ugyldigt aktuelt rundenummer: {round_number}")
-    return (
-        tuple(_row_to_entry(row, index) for index, row in enumerate(rows)),
-        round_number,
-    )
+    entries = tuple(_row_to_entry(row, index) for index, row in enumerate(rows))
+    require_unique_player_ids(entries)
+    return entries, round_number
+
+
+def require_requested_round(requested: int | None, actual: int) -> None:
+    if requested is not None and actual != requested:
+        raise PayloadError(
+            f"Holdet returnerede runde {actual} i stedet for den ønskede runde {requested}"
+        )
 
 
 def scrape_game(
@@ -277,6 +283,7 @@ def scrape_game(
     entries, actual_round = extract_entries_and_round(
         fetcher(game.statistics_url(variant, round_number))
     )
+    require_requested_round(round_number, actual_round)
     return ScrapedGame(
         game,
         variant,

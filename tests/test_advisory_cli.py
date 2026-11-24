@@ -403,6 +403,58 @@ def test_retained_players_use_current_catalogue_attributes_for_roster_limits(see
         assert data.validate(manager, proposal())["status"] == "valid"
 
 
+@pytest.mark.parametrize("legacy_first", [False, True])
+def test_advisor_purchase_uses_stable_player_identity(seeded, legacy_first):
+    paths, manager = seeded
+    players = PlayerStatisticsStore(paths.snapshot_dir)
+    catalogue = players.scan(GAME).latest_round(GAME).statistics
+    stable = tuple(
+        replace(item, source_index=0, value=750_000) if item.entry_id == 3 else item
+        for item in catalogue.entries
+    )
+    legacy = replace(entry(99, 0, value=200_000), entry_id=None, source_index=3)
+    entries = (legacy, *stable) if legacy_first else (*stable, legacy)
+    players.save(replace(catalogue, entries=entries), now=NOW + timedelta(minutes=1))
+
+    result = AdvisoryData(paths).validate(manager, proposal(ids=(1, 3)))
+    assert result["status"] == "valid"
+    assert result["teams"][0]["transfer_fee"] == 7_500
+    assert result["teams"][0]["ending_bank"] == 2_242_500
+
+
+def test_rule_audit_and_invalidated_evidence_resolve_the_same_across_clients(seeded, capsys):
+    from holdet_lib.rule_pages import RulePageStore
+    from tests.rule_page_fixtures import HTML, capture
+    from website.analysis_pages import _rule_profile
+
+    paths, manager = seeded
+    rules = RulePageStore(paths.rules_dir)
+    metadata = GameMetadataStore(paths.game_metadata_dir)
+    profile = rules.audit(GAME, capture(), game_rule_to_dict(verified_rules(sport="soccer")), "Reviewed rules")
+
+    def check_clients(verified):
+        status, output, _ = run_cli(capsys, paths, ["rules", GAME.slug])
+        assert status == 0
+        dashboard = _rule_profile(manager, paths)
+        assert dashboard.verified is verified
+        assert game_rule_to_dict(dashboard) == output["profile"]
+        return dashboard
+
+    assert check_clients(True) == profile
+    refreshed = replace(metadata.load(GAME), fetched_at=NOW + timedelta(minutes=1),
+                        rule_profile=rule_profile_for_game(GAME, game_id=1, salary_cap=3_000_000))
+    metadata.save(refreshed)
+    assert check_clients(True) == profile
+
+    changed = rules.save(GAME, capture(HTML + "<!-- new revision -->", now=NOW + timedelta(hours=1)))
+    check_clients(False)
+    changed.write_text("{}", encoding="utf-8")
+    result = AdvisoryData(paths).context(manager)
+    assert result["advisory"]["rules"]["verified"] is False
+    assert "rules_evidence_unreadable" in result["advisory"]["warnings"]
+    assert _rule_profile(manager, paths).verified is False
+
+
 @pytest.mark.parametrize("seeded", [1], indirect=True)
 @pytest.mark.parametrize("new_team", [False, True])
 def test_injury_and_suspension_warnings_cover_retained_and_initial_selections(seeded, new_team):

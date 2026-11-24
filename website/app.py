@@ -35,6 +35,7 @@ from website.ui import (
     render_shared_shell,
     render_sidebar,
     set_ui_context,
+    verify_ui_context,
 )
 
 install_styles()
@@ -42,6 +43,7 @@ install_styles()
 pages = create_pages()
 selected_page = st.navigation(list(pages.values()), position="hidden")
 context = build_ui_context()
+verify_ui_context(context)
 set_ui_context(context)
 page_id = selected_page_id(selected_page, pages)
 
@@ -51,3 +53,4 @@ redirect_legacy_query(page_id)
 render_sidebar(context, page_id)
 render_shared_shell(context, page_id)
 selected_page.run()
+verify_ui_context(context)

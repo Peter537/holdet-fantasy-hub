@@ -14,6 +14,7 @@ from .models import (
     PlayerPerformanceStat,
     RoundStatus,
     ScrapedGame,
+    require_unique_player_ids,
 )
 from .policies import legacy_policy
 
@@ -39,6 +40,7 @@ def player_statistics_to_dict(
 ) -> dict[str, object]:
     """Return the stable public JSON representation of one statistics round."""
 
+    require_unique_player_ids(game.entries)
     return {
         "schema_version": PLAYER_STATISTICS_SCHEMA_VERSION,
         "generated_at": generated_at.isoformat(),
@@ -311,6 +313,7 @@ def player_statistics_from_dict(payload: object) -> ScrapedGame:
         if schema_version >= 3
         else None
     )
+    require_unique_player_ids(entries)
     return ScrapedGame(
         game=game,
         variant=variant,

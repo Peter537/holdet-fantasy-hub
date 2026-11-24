@@ -34,7 +34,8 @@ from holdet_lib import (
     player_identity,
     watchlist_entry,
 )
-from website.navigation import PageId, page_link, relative_url
+from website.navigation import PageId, page_link, query_segmented_control, relative_url
+from website.game_access import editable_game, is_game_archived
 from website.preferences import settings_for, settings_readable, tool_visible
 from holdet_lib.errors import PayloadError
 from holdet_lib.hub_settings import feature_enabled
@@ -86,12 +87,14 @@ def _settings(paths: AppPaths) -> tuple[HubSettingsStore, HubSettings]:
 
 
 def _save_settings(
-    store: HubSettingsStore, apply: Callable[[HubSettings], object]
+    store: HubSettingsStore, paths: AppPaths, game: GameUrl,
+    apply: Callable[[HubSettings], object],
 ) -> bool:
     """Apply an explicit edit to readable current settings, never fallback defaults."""
 
     try:
-        apply(store.load())
+        with editable_game(paths, game):
+            apply(store.load())
     except (OSError, PayloadError, ValueError) as exc:
         st.error(f"Ændringerne blev ikke gemt: {exc}")
         return False
@@ -218,6 +221,7 @@ def _bulk_controls(
     entries: dict[str, object],
     store: HubSettingsStore,
     settings: HubSettings,
+    paths: AppPaths,
     read_only: bool = False,
 ) -> None:
     if read_only:
@@ -350,7 +354,7 @@ def _bulk_controls(
             watchlist=tuple(watch_by_key.values()),
             annotations=tuple(annotation_by_key.values()),
         )
-    if _save_settings(store, apply):
+    if _save_settings(store, paths, game, apply):
         st.toast("Alle valgte spillere blev opdateret samlet.")
         st.rerun()
 
@@ -375,6 +379,7 @@ def render_player_bulk_controls(
         entries=entries,
         store=store,
         settings=settings,
+        paths=paths,
         read_only=read_only,
     )
 
@@ -576,6 +581,7 @@ def render_contextual_scouting_panel(
                 entries=entries,
                 store=store,
                 settings=settings,
+                paths=paths,
                 read_only=read_only,
             )
     _scatter(chart_rows, x="Pris", y="Form 3-værdi", title="Pris mod Form 3", scope=scope)
@@ -760,7 +766,7 @@ def render_contextual_watchlist_panel(
                 for item in settings.watchlist
             )
             store.set_watchlist(settings, updated)
-        if _save_settings(store, apply):
+        if _save_settings(store, paths, game, apply):
             st.rerun()
 
 
@@ -792,7 +798,7 @@ def render_player_watchlist_editor(
                     store.set_watchlist(
                         settings, (*settings.watchlist, watchlist_entry(game, entry, settings))
                     )
-            if _save_settings(store, add):
+            if _save_settings(store, paths, game, add):
                 st.rerun()
         return
     alerts_enabled = feature_enabled(settings, "alerts")
@@ -892,14 +898,14 @@ def render_player_watchlist_editor(
                     for item in settings.watchlist
                 ),
             )
-        if _save_settings(store, apply):
+        if _save_settings(store, paths, game, apply):
             st.rerun()
     if st.button(
         "Fjern fra watchlist",
         key=f"player-watchlist-remove:{player_key}",
         disabled=read_only,
     ) and not read_only:
-        if _save_settings(store, lambda current: store.set_watchlist(
+        if _save_settings(store, paths, game, lambda current: store.set_watchlist(
             current,
             tuple(item for item in current.watchlist if item.player_key != player_key),
         )):
@@ -1055,7 +1061,7 @@ def _formula_editor(
                 key=f"computed-column-remove-button:{game.locale}:{game.slug}",
                 disabled=read_only,
             ) and not read_only:
-                if _save_settings(store, lambda current: store.set_computed_player_columns(
+                if _save_settings(store, paths, game, lambda current: store.set_computed_player_columns(
                     current,
                     tuple(
                         item
@@ -1089,7 +1095,7 @@ def _formula_editor(
                     expression,
                     int(decimals),
                 )
-                saved = _save_settings(store, lambda current: store.set_computed_player_columns(
+                saved = _save_settings(store, paths, game, lambda current: store.set_computed_player_columns(
                     current, (*current.computed_player_columns, column)
                 ))
             except (OSError, ValueError) as exc:
@@ -1115,47 +1121,50 @@ def render_scouting_page(games: tuple[ManagerGame, ...], paths: AppPaths) -> Non
     if not suggestions:
         st.info("Der er ingen cachede spil at scoute endnu.")
         return
-    ordered = tuple(sorted(suggestions.values(), key=lambda item: item[1].casefold()))
-    requested_slug = str(st.query_params.get("game", ""))
-    default = next(
-        (item[0].original for item in ordered if item[0].slug == requested_slug),
-        ordered[0][0].original,
+    ordered = tuple(sorted(suggestions, key=lambda identity: (suggestions[identity][1].casefold(), identity)))
+    requested = (
+        str(st.query_params.get("locale", "")).casefold(),
+        str(st.query_params.get("game", "")),
     )
-    game_url = st.selectbox(
+    selection_key = "global-scouting-game"
+    observed_key = "global-scouting-url"
+    if st.session_state.get(observed_key) != requested or st.session_state.get(selection_key) not in ordered:
+        if requested in suggestions:
+            default = requested
+        else:
+            default = next(
+                (identity for identity in ordered if not requested[0] and identity[1] == requested[1]),
+                ordered[0],
+            )
+        st.session_state[selection_key] = default
+    labels = {
+        identity: f"{suggestions[identity][1]} · {identity[1]} · {identity[0]}"
+        for identity in ordered
+    }
+    chosen = st.selectbox(
         "Spil",
-        tuple(item[0].original for item in ordered),
-        index=tuple(item[0].original for item in ordered).index(default),
-        format_func=lambda value: next(
-            f"{label} · {game.slug}" for game, label in ordered if game.original == value
-        ),
-        key="global-scouting-game",
+        ordered,
+        index=None,
+        format_func=labels.__getitem__,
+        key=selection_key,
     )
-    game = next(item[0] for item in ordered if item[0].original == game_url)
-    read_only = any(
-        item.identity == (game.locale.casefold(), game.slug) and item.is_archived
-        for item in games
+    selection = chosen if chosen in ordered else ordered[0]
+    game, _ = suggestions[selection]
+    if selection != requested:
+        st.query_params.update(locale=selection[0], game=selection[1])
+    st.session_state[observed_key] = selection
+    read_only = is_game_archived(games, game)
+    view = query_segmented_control(
+        "Visning", _VIEW_LABELS, parameter="view", key="global-scouting-view", default="watchlist",
     )
-    st.query_params["game"] = game.slug
-    st.query_params["locale"] = game.locale
-    requested_view = str(st.query_params.get("view", "watchlist"))
-    if requested_view not in _VIEW_LABELS:
-        requested_view = "watchlist"
-    view_label = st.segmented_control(
-        "Visning",
-        tuple(_VIEW_LABELS.values()),
-        default=_VIEW_LABELS[requested_view],
-        key="global-scouting-view",
-    )
-    view = next(key for key, label in _VIEW_LABELS.items() if label == view_label)
-    st.query_params["view"] = view
     store, settings = _settings(paths)
-    if view == "watchlist":
+    if view == "smartlists":
+        _smartlists_view(game, index)
+    elif view == "notes":
+        _notes_view(paths, settings, index)
+    else:
         render_contextual_watchlist_panel(game, index, paths, read_only=read_only)
         _formula_editor(game, store, settings, paths, read_only=read_only)
-    elif view == "smartlists":
-        _smartlists_view(game, index)
-    else:
-        _notes_view(paths, settings, index)
 
 
 def render_player_scouting_detail(

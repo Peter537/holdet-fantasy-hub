@@ -45,7 +45,7 @@ Statistiksiden hentes fra:
 /<locale>/season/<slug>/<route-variant>/statistics[?round=<runde>]
 ```
 
-Next.js Flight-strenge samles fra scripts, og parseren finder den gyldige `rows`-liste og runde. Hele serverpayloaden bruges uanset den virtualiserede tabels synlige rækker. Et eksplicit spiller-refresh gemmer både det komplette spillersnapshot og de tilgængelige spilmetadata.
+Next.js Flight-strenge samles fra scripts, og parseren finder den gyldige `rows`-liste og runde. Hele serverpayloaden bruges uanset den virtualiserede tabels synlige rækker. Ved en eksplicit valgt runde skal svarets runde matche, før spillerdata kan gemmes eller eksporteres. Et eksplicit spiller-refresh gemmer både det komplette spillersnapshot og de tilgængelige spilmetadata.
 
 De obligatoriske identitets-, hold-, positions-, pris- og statusfelter valideres strengt. De offentlige felter `popularity`, `popularityChange`, `trend`, `index`, `stats` og `totalStats` er valgfrie. I preseason-payloads valideres de fire numeriske scoutingfelter pr. værdi: `null` mappes til `None`, og et endeligt tal mappes til den tilsvarende numeriske værdi. Korte, entydige statnavne og endelige statværdier bevares i snapshot schema 4. Ukendt form, ikke-endelige tal eller kildedrift ignoreres fail-closed for det valgfrie felt, så den almindelige spillerparser fortsat kan levere de obligatoriske data. Parser-canaryen overvåger felterne separat på de otte aktuelle spil, inklusive Premier League, Football Fantasy 2026 (`nfl`) og Kvinde EM Håndbold 2026 (`handball`).
 
@@ -70,9 +70,9 @@ Ranglisterne leverer også historiske runder, så én manuel holdopdatering kan 
 
 En igangværende rundes placeringer kan ændre sig. Visningerne bruger de senest gemte oplysninger for den valgte runde og kontakter ikke Holdet.dk ved navigation. Begge placeringsfelter findes allerede i teamsnapshot schema 2, holdeksporterne og det lokale `team_history`-API.
 
-Schedule-parseren gemmer hver rundes `start`, `close` og `end`. Sluttid og hentetid afgør, om en sammenligning eller transfersimulation kan kaldes `final`, mens snapshotstatus er `complete`, `in_progress` eller `unknown`. Hvis schedulekaldet fejler, gemmes øvrige gyldige data med `unknown` og UI'et markerer grundlaget som foreløbigt.
+Schedule-parseren gemmer hver rundes `start`, `close` og `end`. Ens poster for samme runde samles. Modstridende tidsgrænser afvises både ved hentning og læsning af gemt metadata. Sluttid og hentetid afgør, om en sammenligning eller transfersimulation kan kaldes `final`, mens snapshotstatus er `complete`, `in_progress` eller `unknown`. Hvis schedulekaldet fejler, gemmes øvrige gyldige data med `unknown` og UI'et markerer grundlaget som foreløbigt.
 
-For pengebaserede spil kontrolleres opstillingens værdi mod historikkens total minus bank. Uoverensstemmelse genhentes én gang og giver derefter fejl.
+Når opstillingen angiver en runde, skal den matche den nyeste historikrunde. Ældre holdsider uden rundeoverskrift bruger historikkens nyeste runde. For pengebaserede spil kontrolleres opstillingens værdi også mod historikkens total minus bank. Uoverensstemmelse genhentes én gang og giver derefter fejl.
 
 ## Manuelle opdateringer og eventrevisioner
 
@@ -88,12 +88,12 @@ Almindelig navigation beregner kun Elo, awards, historier, H2H, sæsonstillinger
 
 ## HTTP, retries og proxy
 
-`HttpClient` bruger user-agent, afgrænset timeout og kontrollerede retries:
+`HttpClient` bruger user-agent, socket-timeout og en fælles tidsgrænse for hvert ressourcekald. Klienten kontrollerer tidsbudgettet omkring læsninger og planlægger kun retries, der kan påbegyndes inden for budgettet. Et igangværende blokerende kald følger socket-timeout. Som standard må et svar fylde op til 64 MiB, og tidsbudgettet er 90 sekunder.
 
-- transiente HTTP-statusser, timeouts og netværksfejl får op til tre samlede forsøg;
-- aktivt afviste forbindelser får op til fem med eksponentiel ventetid;
-- permanente 4xx-fejl og inkompatible payloads genforsøges ikke unødigt;
-- Windows- og miljøproxyer respekteres;
+- transiente HTTP-statusser, afbrudte svar, timeouts og netværksfejl får op til tre samlede forsøg.
+- aktivt afviste forbindelser får op til fem med eksponentiel ventetid.
+- permanente 4xx-fejl og inkompatible payloads afvises.
+- Windows- og miljøproxyer respekteres.
 - proxy-credentials skjules i tekniske fejl.
 
 Ved fejl bevarer dashboardet en gyldig cache og tilbyder et eksplicit retry. Navigation starter aldrig automatiske genforsøg.

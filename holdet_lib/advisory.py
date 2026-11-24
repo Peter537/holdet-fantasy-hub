@@ -13,13 +13,13 @@ from .groups import GroupStore, normalize_manager_game
 from .hub_settings import HubSettingsStore, player_identity
 from .models import RosterEntry, TeamReference
 from .rule_pages import RulePageStore
-from .rules import _basis_points, game_rule_to_dict, rule_profile_for_game
+from .rules import _basis_points, game_rule_to_dict
 from .scope_exports import build_scope_export, prepare_scope_export
 from .scopes import resolve_scope
 from .storage import ManifestStore, PlayerStatisticsStore, SnapshotStore
 from .strategies import StrategyStore, TeamStrategy, strategy_from_dict, strategy_to_dict
 from .tournament_pairings import TournamentPairingStore
-from .transfers import TransferScenario, simulate_transfers
+from .transfers import TransferScenario, roster_prices_match, simulate_transfers
 
 
 def _positive_int(value, label):
@@ -132,32 +132,9 @@ class AdvisoryData:
         }
 
     def rules(self, manager, metadata=None, *, warnings=None):
-        evidence_unreadable = False
-        try:
-            profile = self.rule_pages.profile(manager.game)
-            latest = self.rule_pages.latest(manager.game)
-        except (OSError, ValueError, PayloadError):
-            profile, latest = None, None
-            evidence_unreadable = True
-            if warnings is not None:
-                warnings.append("rules_evidence_unreadable")
-        if profile is None:
-            fallback = rule_profile_for_game(
-                manager.game, salary_cap=metadata.salary_cap if metadata else None,
-                game_id=metadata.game_id if metadata else None, label=manager.name,
-            )
-            profile = (metadata.rule_profile
-                       if metadata and metadata.rule_profile and (metadata.rule_profile.verified or not fallback.verified)
-                       else fallback)
-            if latest is not None and profile.source_sha256 != latest["source_sha256"]:
-                profile = replace(profile, verified=False)
-        if evidence_unreadable:
-            profile = replace(profile, verified=False)
-        if profile.identity != manager.identity:
-            raise PayloadError("Rule profile belongs to another game")
-        if metadata and profile.game_id is not None and profile.game_id != metadata.game_id:
-            raise PayloadError("Rule profile game ID does not match cached metadata")
-        return profile
+        return self.rule_pages.effective_profile(
+            manager.game, metadata, label=manager.name, warnings=warnings,
+        )
 
     def context(self, manager, *, competition=None, selectors=(), history=False, analysis=False):
         settings = HubSettingsStore(self.paths.hub_settings_file).load()
@@ -321,27 +298,17 @@ class AdvisoryData:
                 missing.append("verified_season_rules")
             if not rules.sport:
                 missing.append("rules.sport")
-            if rules.sport in {"soccer", "nfl", "formula1"} and not rules.position_limits:
-                missing.append("rules.position_limits")
-            if rules.sport in {"soccer", "cycling"} and rules.max_from_team is None:
-                missing.append("rules.max_from_team")
-            if rules.sport == "formula1" and not rules.captain_positions:
+            missing.extend(f"rules.{field}" for field in rules.missing_roster_rules())
+            if rules.requires_captain_positions and not rules.captain_positions:
                 missing.append("rules.captain_positions")
-            if rules.sport == "golf" and (rules.category_count is None or rules.category_size is None):
-                missing.append("rules.categories")
-            for field in ("roster_size", "budget_enabled", "captain_count", "free_through_round"):
+            for field in ("captain_count", "free_through_round"):
                 if getattr(rules, field) is None:
                     missing.append(f"rules.{field}")
-            if rules.budget_enabled and rules.salary_cap is None:
-                missing.append("rules.salary_cap")
             if players.statistics.unit == "points" and rules.budget_enabled is True or players.statistics.unit == "money" and rules.budget_enabled is False:
                 missing.append("rules.unit_mismatch")
             if snapshot and players.statistics.round_number != snapshot.team.overview.current_round:
                 missing.append("matching_team_and_player_rounds")
-            if snapshot and any(
-                entry.player_id in available and entry.value != available[entry.player_id].value
-                for entry in snapshot.team.roster
-            ):
+            if snapshot and not roster_prices_match(snapshot.team.roster, available):
                 missing.append("matching_team_and_player_prices")
             if snapshot and target < snapshot.team.overview.current_round:
                 errors.append("Target round precedes the current roster")
@@ -414,7 +381,7 @@ class AdvisoryData:
                 if not snapshot:
                     transfer_profile = replace(transfer_profile, allow_club_excess_without_trades=False)
                 simulation = simulate_transfers(transfer_profile, TransferScenario(
-                    initial, players.statistics.entries, tuple(sorted(sold)), tuple(sorted(bought)),
+                    initial, tuple(available.values()), tuple(sorted(sold)), tuple(sorted(bought)),
                     bank, contracts, target, team_round, players.statistics.round_number, captains,
                     team_status, players.statistics.round_status,
                 ))

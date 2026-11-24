@@ -95,6 +95,83 @@ def test_resume_after_player_publication_preserves_alert_transition(monkeypatch)
         assert alerts
 
 
+def test_original_journal_replays_alert_after_routine_runs_and_round_change(monkeypatch):
+    from datetime import timedelta
+    from holdet_lib.refresh_runs import data_operation_running
+    from tests.test_player_statistics import sample_statistics
+    from tests.test_refresh_foundation import _future_metadata
+    from tests.test_refresh_runs import wait_for
+
+    with temporary_directory() as root:
+        paths = make_paths(root)
+        now = datetime.now(timezone.utc)
+        adverse = replace(sample_statistics(3), round_status="complete")
+        healthy = replace(
+            adverse.entries[0], is_active=True, is_disabled=False,
+            is_injured=False, has_suspension=False,
+        )
+        metadata_store = holdet.GameMetadataStore(paths.game_metadata_dir)
+        metadata = _future_metadata(adverse.game, now)
+        metadata_store.save(metadata)
+        players = holdet.PlayerStatisticsStore(paths.snapshot_dir)
+        players.save(replace(adverse, entries=(healthy,)), now=now - timedelta(hours=1))
+        settings = holdet.HubSettingsStore(paths.hub_settings_file)
+        settings.save(holdet.HubSettings(
+            enabled_features=("alerts",), watchlist=(holdet.watchlist_entry(adverse.game, healthy),),
+        ))
+        holdet.GroupStore(paths.groups_file, paths.group_revision_dir).create_manager_game(adverse.game, "Spil")
+        calls = []
+
+        class Client:
+            def fetch_game_info(self, _game):
+                return metadata
+
+            def fetch_players(self, _game, *, round_number=None):
+                calls.append(round_number)
+                return adverse
+
+        merge = holdet.AnalysisInboxStore.merge
+        failed_merges = []
+
+        def fail_merge(_store, alerts):
+            failed_merges.extend(alerts)
+            raise OSError("inbox unavailable")
+
+        monkeypatch.setattr(holdet.AnalysisInboxStore, "merge", fail_merge)
+        coordinator = refresh_service.create_refresh_coordinator(paths, client_factory=Client)
+        task = {"key": "game", "locale": adverse.game.locale, "game": adverse.game.slug}
+
+        def settled(run_id, status):
+            return wait_for(coordinator, run_id, lambda run:
+                run["status"] == status and not data_operation_running(paths.data_dir))
+
+        original = coordinator.start([{**task, "force": True}])["run_id"]
+        failed = settled(original, "partial")
+        assert failed["games"][0]["player_transition"]["snapshot_path"]
+        assert len(failed_merges) > 0
+        for advance_round in (False, True):
+            if advance_round:
+                players.save(replace(adverse, round_number=4), now=now)
+                metadata_store.save(replace(metadata, final_round=4, rounds=(
+                    *metadata.rounds, holdet.ScheduleRound(
+                        4, now + timedelta(days=2), now + timedelta(days=3), now + timedelta(days=4),
+                    ),
+                )))
+            routine = coordinator.start([task])["run_id"]
+            pending = settled(routine, "partial")
+            assert "oprindelige kørsel" in pending["games"][0]["detail"]
+
+        assert calls == [None]
+        settings.save(holdet.HubSettings())
+        monkeypatch.setattr(holdet.AnalysisInboxStore, "merge", merge)
+        coordinator.resume(original)
+        done = settled(original, "success")
+        assert done["games"][0]["player_transition"]["alerts_complete"]
+        assert calls == [None]
+        inbox = holdet.AnalysisInboxStore(paths.analysis_inbox_file)
+        assert len(inbox.load()) == len(failed_merges)
+
+
 def test_scope_archives_guard_and_worker_resources(monkeypatch):
     with temporary_directory() as root:
         paths = make_paths(root)

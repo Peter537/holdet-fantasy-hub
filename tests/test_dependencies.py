@@ -2,8 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 import re
+from types import SimpleNamespace
 import tomllib
 from urllib.parse import urlsplit
+
+import pytest
 
 from scripts import refresh_dependency_lock
 
@@ -80,7 +83,86 @@ def test_lock_covers_manifest_with_trusted_hashed_wheels() -> None:
     assert {"httpx", "httpcore"}.isdisjoint(locked_names)
 
 
-def test_lock_check_preserves_locked_versions_and_does_not_rewrite(monkeypatch, tmp_path) -> None:
+@pytest.mark.parametrize(
+    ("system", "implementation", "version", "platform_tag", "free_threaded"),
+    [
+        ("win32", "cpython", (3, 14), "win-arm64", False),
+        ("win32", "cpython", (3, 14), "win32", False),
+        ("linux", "cpython", (3, 14), "linux-x86_64", False),
+        ("win32", "pypy", (3, 14), "win-amd64", False),
+        ("win32", "cpython", (3, 13), "win-amd64", False),
+        ("win32", "cpython", (3, 14), "win-amd64", True),
+    ],
+)
+def test_lock_rejects_unsupported_runtime_before_pip(
+    monkeypatch, system, implementation, version, platform_tag, free_threaded
+) -> None:
+    script = refresh_dependency_lock
+    monkeypatch.setattr(script, "sys", SimpleNamespace(
+        platform=system, implementation=SimpleNamespace(name=implementation),
+        version_info=version,
+    ))
+    monkeypatch.setattr(script, "sysconfig", SimpleNamespace(
+        get_platform=lambda: platform_tag, get_config_var=lambda _name: free_threaded,
+    ))
+
+    def reject_pip(*_args, **_kwargs):
+        pytest.fail("Pip must not run on an unsupported runtime")
+
+    monkeypatch.setattr(script, "subprocess", SimpleNamespace(run=reject_pip))
+    for require_lock_command in (False, True):
+        with pytest.raises(script.LockError, match=r"AMD64 .* CPython 3[.]14"):
+            script.ensure_supported_runtime(require_lock_command=require_lock_command)
+
+
+def test_lock_accepts_amd64_cpython_for_both_workflows(monkeypatch) -> None:
+    script = refresh_dependency_lock
+    monkeypatch.setattr(script, "sys", SimpleNamespace(
+        platform="win32", implementation=SimpleNamespace(name="cpython"),
+        version_info=(3, 14, 0), executable="python.exe",
+    ))
+    monkeypatch.setattr(script, "sysconfig", SimpleNamespace(
+        get_platform=lambda: "win-amd64", get_config_var=lambda _name: 0,
+    ))
+    calls = []
+
+    def pip_version(command, **_kwargs):
+        calls.append(command)
+        return SimpleNamespace(stdout="pip 26.2.2")
+
+    monkeypatch.setattr(script, "subprocess", SimpleNamespace(run=pip_version))
+    script.ensure_supported_runtime(require_lock_command=False)
+    assert calls == []
+    script.ensure_supported_runtime()
+    assert calls == [["python.exe", "-m", "pip", "--version"]]
+
+
+def test_registry_check_keeps_wheel_identity_and_hash_validation(monkeypatch) -> None:
+    script = refresh_dependency_lock
+    artifact = {
+        "name": "fixture-package",
+        "version": "1.2.3",
+        "filename": "fixture_package-1.2.3-py3-none-any.whl",
+        "url": "https://files.pythonhosted.org/fixture_package-1.2.3-py3-none-any.whl",
+        "sha256": "a" * 64,
+    }
+    wheel = {
+        "filename": artifact["filename"], "url": artifact["url"],
+        "packagetype": "bdist_wheel", "digests": {"sha256": artifact["sha256"]},
+    }
+    monkeypatch.setattr(script, "request_json", lambda _url: {
+        "info": {"name": "Fixture_Package"}, "urls": [wheel],
+    })
+    script.verify_pypi_artifacts((artifact,))
+
+    wheel["digests"] = {"sha256": "b" * 64}
+    with pytest.raises(script.LockError, match="artifact evidence does not match"):
+        script.verify_pypi_artifacts((artifact,))
+
+
+def test_lock_check_preserves_locked_versions_and_does_not_rewrite(
+    monkeypatch, tmp_path, capsys
+) -> None:
     before = refresh_dependency_lock.LOCK_PATH.read_bytes()
     lock = tomllib.loads(before.decode("utf-8"))
     expected = {f"{item['name']}=={item['version']}" for item in lock["packages"]}
@@ -99,7 +181,7 @@ def test_lock_check_preserves_locked_versions_and_does_not_rewrite(monkeypatch, 
     monkeypatch.setattr(refresh_dependency_lock, "generate_lock", resolve)
     monkeypatch.setattr(
         refresh_dependency_lock, "verify_pypi_artifacts",
-        lambda artifacts: evidence.append(("registry", len(artifacts))) or 0,
+        lambda artifacts: evidence.append(("registry", len(artifacts))),
     )
     monkeypatch.setattr(
         refresh_dependency_lock, "verify_osv",
@@ -111,4 +193,5 @@ def test_lock_check_preserves_locked_versions_and_does_not_rewrite(monkeypatch, 
     )
     assert refresh_dependency_lock.run(check=True) == 0
     assert evidence == [("registry", len(expected)), ("advisories", len(expected))]
+    assert "PyPI wheel metadata matched, OSV clean, attestations unchecked" in capsys.readouterr().out
     assert refresh_dependency_lock.LOCK_PATH.read_bytes() == before

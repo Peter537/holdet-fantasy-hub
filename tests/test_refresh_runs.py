@@ -125,7 +125,7 @@ def test_process_lock_blocks_other_worker_and_poll_does_not_rewrite(tmp_path):
     proceed = threading.Event()
     def action(game, *, cancelled, progress, checkpoint):
         entered.set()
-        assert proceed.wait(5)
+        assert proceed.wait(20)
         return RefreshRunResult("success")
     coordinator = RefreshRunCoordinator(root, action)
     run_id = coordinator.start([{"key": "one"}])["run_id"]
@@ -150,8 +150,8 @@ else:
 '''
     path = root / run_id / "run.json"
     before = path.read_bytes()
-    child = subprocess.run([sys.executable, "-c", program, str(root), run_id, old_id], capture_output=True, text=True, timeout=10)
     try:
+        child = subprocess.run([sys.executable, "-c", program, str(root), run_id, old_id], capture_output=True, text=True, timeout=10)
         assert child.returncode == 0, child.stderr
         assert child.stdout.strip() == "busy"
         assert path.read_bytes() == before

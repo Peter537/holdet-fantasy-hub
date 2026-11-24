@@ -22,7 +22,7 @@ Holdet Fantasy Hub er et uofficielt, lokalt Windows-værktøj til offentlige fan
 
 ## Kom hurtigt i gang
 
-Projektet kræver Windows og Python 3.14. Opret et separat miljø, og installer låsens præcise afhængigheder fra repositoryets rod i PowerShell:
+Projektets låste installation kræver Windows med standardudgaven af AMD64 (x64) CPython 3.14. Vælg x64-interpreteren til det separate miljø, og installer låsens præcise afhængigheder fra repositoryets rod i PowerShell:
 
 ```powershell
 py -3.14 -m venv .venv
@@ -30,12 +30,12 @@ py -3.14 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install --no-deps --no-build-isolation --no-index -e .
 ```
 
-`pylock.toml` låser hele Windows/Python 3.14-miljøet, inklusive Parquet- og
+`pylock.toml` låser hele x64 Windows/Python 3.14-miljøet, inklusive Parquet- og
 UI-testafhængigheder, til kontrollerede PyPI-wheels med SHA-256. Pips
 `lock`/`pylock.toml`-understøttelse er fortsat eksperimentel og platformsspecifik;
 installationsscriptet validerer derfor låsen og giver pip de eksakte wheel-URL'er
 og hashes. Brug samme `.venv`-interpreter til appen og testene. Genberegn kun
-låsen ved ændringer i afhængighederne på Windows med Python 3.14. Den låste
+låsen ved ændringer i afhængighederne på Windows med x64 CPython 3.14. Den låste
 installation omfatter også pip, så det samme miljø kan kontrollere og
 genberegne låsen:
 
@@ -80,7 +80,7 @@ Streamlit ejer routingen via `st.navigation`/`st.Page`. Eksisterende `section=ro
 | Grupper og turneringsformater | [Grupper og turneringer](docs/groups-and-tournaments.md) |
 | Hentning fra Holdet.dk | [Datahentning](docs/data-retrieval.md) |
 | AppData, skemaer og backup | [Datalagring](docs/data-storage.md) |
-| Eksport, rapporter, anonymisering, import og retention | [Dataportabilitet](docs/data-portability.md) |
+| Eksport, rapporter, supportpakker, import og retention | [Dataportabilitet](docs/data-portability.md) |
 | Read-only API, datasæt og Excel/Power BI | [Lokalt API](docs/local-api.md) |
 | Spillerstatistik | [Spillerstatistik](docs/player-statistics.md) |
 | Holdstatistik | [Holdstatistik](docs/team-statistics.md) |
@@ -89,7 +89,7 @@ Streamlit ejer routingen via `st.navigation`/`st.Page`. Eksisterende `section=ro
 
 ## Lokal data og privatliv
 
-Personlige konti, profiler, grupper, sæsoner, noter, filtre, alarmer, snapshots, metadata, kørselsjournaler, manager-events, importer, backups, rapporter og eksporter ligger uden for repositoryet under `%APPDATA%\Holdet Fantasy Hub` og `%LOCALAPPDATA%\Holdet Fantasy Hub`. Mapper oprettes først ved en eksplicit skrivehandling. Anonymiserede supportpakker er irreversible og markeret som ikke-gendannelige.
+Personlige konti, profiler, grupper, sæsoner, noter, filtre, alarmer, snapshots, metadata, kørselsjournaler, manager-events, importer, backups, rapporter og eksporter ligger uden for repositoryet under `%APPDATA%\Holdet Fantasy Hub` og `%LOCALAPPDATA%\Holdet Fantasy Hub`. Mapper oprettes først ved en eksplicit skrivehandling. Pseudonymiserede supportpakker er markeret som ikke-gendannelige. Sportsmålinger i pakkerne kan stadig genkendes. Streamlits brugsmålinger er slået fra i projektets standardkonfiguration.
 
 Repositoryet må ikke indeholde virkelige profil-ID'er, fantasy-team-ID'er eller personlige holdnavne. Dokumentation og tests bruger fiktive identiteter.
 

@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass, replace
-from typing import Literal
+from typing import Iterable, Literal, Mapping
 
 from .errors import UnsupportedGameError
 from .models import PlayerEntry, RosterEntry, RoundStatus
-from .sport_adapters import get_sport_adapter
+from .sport_adapters import SportAdapter, get_sport_adapter, normalize_position_limits
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,22 +170,36 @@ def transfer_rule_profile(
     return replace(profile, known=False)
 
 
-def _position(profile: TransferRuleProfile, value: str) -> str:
+def _position_adapter(profile: TransferRuleProfile) -> SportAdapter:
     adapter_key = profile.sport or {
         "football": "soccer",
         "cycling": "cycling",
         "motor": "formula1",
         "golf": "golf",
     }.get(profile.key)
-    if adapter_key is None:
-        positions = {item[0] for item in profile.position_limits}
-        if positions & {"goalkeeper", "defender", "midfielder", "forward"}:
-            adapter_key = "soccer"
-        elif positions & {"driver", "constructor", "pitcrew"}:
-            adapter_key = "formula1"
-    if adapter_key is None:
-        return " ".join(value.strip().casefold().split())
-    return get_sport_adapter(adapter_key).normalize_position(value)
+    return get_sport_adapter(adapter_key or "soccer")
+
+
+def normalize_roster_position(profile: TransferRuleProfile, value: str) -> str:
+    return _position_adapter(profile).normalize_position(value)
+
+
+def captain_position_allowed(profile: TransferRuleProfile, value: str) -> bool:
+    if not profile.captain_positions:
+        return True
+    position = normalize_roster_position(profile, value)
+    return any(
+        position == normalize_roster_position(profile, allowed)
+        for allowed in profile.captain_positions
+    )
+
+
+def roster_prices_match(roster: Iterable[RosterEntry], catalogue: Mapping[int, PlayerEntry]) -> bool:
+    """Check shared prices while retaining the roster's sale price when a player left the catalogue."""
+    return all(
+        entry.player_id not in catalogue or entry.value == catalogue[entry.player_id].value
+        for entry in roster
+    )
 
 
 def _roster_player(entry: RosterEntry, current: PlayerEntry | None = None) -> ScenarioPlayer:
@@ -205,13 +219,9 @@ def _roster_player(entry: RosterEntry, current: PlayerEntry | None = None) -> Sc
     )
 
 
-def _available_id(entry: PlayerEntry) -> int:
-    return entry.entry_id if entry.entry_id is not None else entry.source_index
-
-
-def _purchase_player(entry: PlayerEntry) -> ScenarioPlayer:
+def _purchase_player(player_id: int, entry: PlayerEntry) -> ScenarioPlayer:
     return ScenarioPlayer(
-        _available_id(entry),
+        player_id,
         entry.name,
         entry.team,
         entry.position,
@@ -244,7 +254,7 @@ def simulate_transfers(
     if unknown_sales:
         errors.append("Et eller flere salg findes ikke i holdsnapshotet")
 
-    available = {_available_id(entry): entry for entry in scenario.available_players}
+    available = {entry.entry_id: entry for entry in scenario.available_players if entry.entry_id is not None}
     unknown_buys = set(bought_ids) - available.keys()
     if unknown_buys:
         errors.append("Et eller flere køb findes ikke i spillersnapshotet")
@@ -265,7 +275,7 @@ def simulate_transfers(
         if entry.player_id not in sold_ids
     ]
     purchases = [
-        _purchase_player(available[player_id])
+        _purchase_player(player_id, available[player_id])
         for player_id in bought_ids
         if player_id in available
     ]
@@ -346,22 +356,29 @@ def simulate_transfers(
     ):
         warnings.append("Kontraktsaldo mangler; vælg basis/guld eller indtast restsaldo")
 
-    if profile.known:
+    can_validate = profile.known
+    if can_validate:
+        try:
+            adapter = _position_adapter(profile)
+            limits = normalize_position_limits(profile.position_limits, adapter.normalize_position)
+        except (UnsupportedGameError, ValueError) as exc:
+            warnings.append(str(exc))
+            can_validate = False
+    if can_validate:
         if len(ending) != profile.roster_size:
             errors.append(
                 f"Slutholdet skal have {profile.roster_size} pladser; det har {len(ending)}"
             )
-        counts = Counter(_position(profile, entry.position) for entry in ending)
-        for position, minimum, maximum in profile.position_limits:
+        counts = Counter(adapter.normalize_position(entry.position) for entry in ending)
+        for position, (minimum, maximum) in limits.items():
             count = counts[position]
             if count < minimum or count > maximum:
                 errors.append(
                     f"{position}: {count} valgt, tilladt {minimum}-{maximum}"
                 )
         if profile.category_count is not None and profile.category_size is not None:
-            category_counts = Counter(_position(profile, entry.position) for entry in ending)
-            if len(category_counts) != profile.category_count or any(
-                count != profile.category_size for count in category_counts.values()
+            if len(counts) != profile.category_count or any(
+                count != profile.category_size for count in counts.values()
             ):
                 errors.append(
                     f"Der skal være {profile.category_size} spillere i hver af "
@@ -384,8 +401,8 @@ def simulate_transfers(
             errors.append(f"Der skal vælges {profile.captain_count} kaptajn(er)")
         if not captains.issubset(set(ending_ids)):
             errors.append("Kaptajnen skal være på slutholdet")
-        if profile.captain_positions and any(
-            _position(profile, entry.position) not in profile.captain_positions
+        if any(
+            not captain_position_allowed(profile, entry.position)
             for entry in ending if entry.player_id in captains
         ):
             errors.append("Kaptajnen har ikke en tilladt position")
@@ -393,13 +410,14 @@ def simulate_transfers(
             "invalid" if errors else "valid"
         )
     else:
-        warnings.append("Regler kan ikke valideres for dette fremtidige format")
+        if not profile.known:
+            warnings.append("Regelgyldighed kan ikke afgøres med det valgte grundlag")
         status = "unverified"
     if unknown_fee_rounding and not errors:
         status = "unverified"
 
     if (
-        not profile.known or unknown_fee_rounding
+        not can_validate or unknown_fee_rounding
         or scenario.team_round is None
         or scenario.player_round is None
         or scenario.team_round != scenario.player_round

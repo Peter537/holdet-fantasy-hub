@@ -218,3 +218,14 @@ def get_sport_adapter(value: object) -> SportAdapter:
             return _BY_KEY[normalized]
     shown = candidates[0] if candidates else repr(value)
     raise UnsupportedGameError(f"Ikke-understøttet sportsadapter: {shown}")
+
+
+def normalize_position_limits(
+    limits: tuple[tuple[str, int, int], ...], normalize_position: Callable[[str], str]
+) -> dict[str, tuple[int, int]]:
+    normalized: dict[str, tuple[int, int]] = {}
+    for position, minimum, maximum in limits:
+        key = normalize_position(position)
+        if normalized.setdefault(key, (minimum, maximum)) != (minimum, maximum):
+            raise ValueError(f"Modstridende positionsgrænser for {position}")
+    return normalized

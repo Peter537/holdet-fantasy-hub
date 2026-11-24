@@ -11,7 +11,9 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Literal
 
+from .errors import UnsupportedGameError
 from .models import GameUrl
+from .sport_adapters import get_sport_adapter, normalize_position_limits
 from .transfers import TransferRuleProfile
 
 
@@ -124,6 +126,12 @@ class GameRuleProfile:
             self.category_count < 1 or self.category_size is None or self.category_size < 1
         ):
             raise ValueError("Kategorireglerne skal være positive")
+        if self.position_limits:
+            try:
+                sport = get_sport_adapter(self.sport or "soccer")
+            except UnsupportedGameError:
+                return
+            normalize_position_limits(self.position_limits, sport.normalize_position)
 
     @property
     def identity(self) -> tuple[str, str]:
@@ -134,15 +142,48 @@ class GameRuleProfile:
             return None
         return _basis_points(amount, self.bank_interest_basis_points, self.bank_interest_rounding)
 
-    def transfer_fee(self, amount: int) -> int | None:
+    def transfer_fee(self, amount: int, *, round_number: int | None = None) -> int | None:
         if not self.verified or self.transfer_fee_basis_points is None:
             return None
+        if (
+            round_number is not None and self.fee_free_through_round is not None
+            and round_number <= self.fee_free_through_round
+        ):
+            return 0
         return _basis_points(amount, self.transfer_fee_basis_points, self.transfer_fee_rounding)
+
+    def missing_roster_rules(self) -> tuple[str, ...]:
+        """Report missing roster constraints for this season's sport."""
+        missing = [field for field in ("roster_size", "budget_enabled") if getattr(self, field) is None]
+        if self.budget_enabled and self.salary_cap is None:
+            missing.append("salary_cap")
+        if self.sport is None:
+            # Older explicit profiles can describe their roster through quotas alone.
+            if not self.position_limits and self.category_count is None:
+                missing.append("formation")
+            return tuple(missing)
+        try:
+            sport = get_sport_adapter(self.sport)
+        except UnsupportedGameError:
+            return (*missing, "sport")
+        if sport.capabilities.positions and not self.position_limits:
+            missing.append("position_limits")
+        if sport.key in {"soccer", "cycling"} and self.max_from_team is None:
+            missing.append("max_from_team")
+        if sport.key == "golf" and self.category_count is None:
+            missing.append("categories")
+        return tuple(missing)
+
+    @property
+    def requires_captain_positions(self) -> bool:
+        return (self.captain_count or 0) > 0 and (self.sport or "").strip().casefold() == "formula1"
 
     def to_transfer_profile(self) -> TransferRuleProfile:
         """Project the audited contract onto the legacy transfer API."""
 
-        known = self.verified and self.roster_size is not None
+        known = self.verified and not self.missing_roster_rules() and (
+            not self.requires_captain_positions or bool(self.captain_positions)
+        )
         basis_points = self.transfer_fee_basis_points if self.verified else None
         return TransferRuleProfile(
             key=f"season:{self.game_locale.casefold()}:{self.game_slug}",

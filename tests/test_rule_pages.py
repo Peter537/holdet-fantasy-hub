@@ -10,8 +10,8 @@ from holdet_lib.rule_pages import (
 )
 from holdet_lib.rules import AUDITED_RULE_PROFILES, game_rule_from_dict, game_rule_to_dict, rule_profile_for_game
 from holdet_lib.transfers import simulate_transfers, TransferScenario
-from holdet_lib.decision_analysis import build_captain_analysis
-from tests.test_decision_analysis import GAME, NOW, roster, summary, team_snapshot, verified_rules
+from holdet_lib.decision_analysis import build_captain_analysis, optimize_ideal_team
+from tests.test_decision_analysis import GAME, NOW, entry, roster, summary, team_snapshot, verified_rules
 from tests.rule_page_fixtures import DOCUMENT, HTML, capture
 
 
@@ -43,6 +43,52 @@ def test_game_profiles_start_unverified_without_shipped_season_rules():
     assert profile.source_url is None and profile.document_url is None
     assert profile.source_sha256 is None and profile.accessed_on is None
     assert profile.interest(123) is None and profile.transfer_fee(123) is None
+
+
+def test_handball_position_capability_requires_verified_quotas():
+    handball = verified_rules(sport="handball", position_limits=(), max_from_team=None)
+    entries = (entry(1, 1), entry(2, 2))
+    assert handball.missing_roster_rules() == ("position_limits",)
+    assert not handball.to_transfer_profile().known
+    assert optimize_ideal_team(entries, handball).status == "unverified"
+    complete = replace(handball, position_limits=(("Forward", 2, 2),))
+    assert complete.to_transfer_profile().known
+    assert optimize_ideal_team(entries, complete).status == "optimal"
+    cycling = replace(handball, sport="cycling", max_from_team=2)
+    assert cycling.to_transfer_profile().known
+
+
+def test_position_limit_aliases_reject_conflicts_and_allow_identical_quotas():
+    rules = verified_rules(sport="soccer")
+    conflicting = (("Angriber", 0, 1), ("Forward", 2, 2))
+    with pytest.raises(ValueError, match="Modstridende positionsgrænser"):
+        replace(rules, position_limits=conflicting)
+    scenario = TransferScenario((roster(1, 0), roster(2, 0)), (), starting_bank=0, captain_player_ids=(1,))
+    incompatible = simulate_transfers(replace(rules.to_transfer_profile(), position_limits=conflicting), scenario)
+    assert incompatible.status == incompatible.certainty == "unverified"
+    assert any("Modstridende positionsgrænser" in warning for warning in incompatible.warnings)
+    equivalent = replace(rules, position_limits=(("Angriber", 2, 2), ("Forward", 2, 2)))
+    assert simulate_transfers(equivalent.to_transfer_profile(), scenario).status == "valid"
+    assert optimize_ideal_team((entry(1, 1), entry(2, 2)), equivalent).status == "optimal"
+
+
+def test_repeated_stable_ids_cannot_fill_multiple_ideal_team_slots():
+    rules = verified_rules(sport="soccer")
+    duplicate = replace(entry(1, 20), source_index=2)
+    result = optimize_ideal_team((entry(1, 10), duplicate, entry(3, 1)), rules)
+    assert result.status == "unverified"
+    assert not result.players
+    assert any("gentagne spiller-ID'er" in reason for reason in result.provenance.missing_reasons)
+
+
+@pytest.mark.parametrize("positions", ((), ("Forward",)))
+def test_captain_analysis_marks_an_unknown_sport_unavailable(positions):
+    row = summary(3, 20, captain_bonus=10)
+    team = team_snapshot(101, 3, (roster(1, 10, role="captain"), roster(2, 11)), (row,))
+    rules = verified_rules(sport="unknown-future-sport", captain_positions=positions)
+    result = build_captain_analysis(team, row, rules)
+    assert result.provenance.certainty == "unverified"
+    assert result.computed_actual_bonus is None and not result.alternatives
 
 
 @pytest.mark.parametrize("field", ["bank_interest_rounding", "transfer_fee_rounding"])
@@ -142,7 +188,6 @@ def test_external_iframes_are_not_fetched_and_incomplete_sections_remain_unverif
 def test_initial_round_transfer_exemption_and_later_fee_use_integer_arithmetic():
     rules = verified_rules(sport="soccer", free_through_round=1, fee_free_through_round=1)
     current = (roster(1, 0, role="captain"), roster(2, 0))
-    from tests.test_decision_analysis import entry
     scenario = TransferScenario(current, (entry(3, 0),), (2,), (3,), 0, 3, 1, 1, 1, (1,))
     initial = simulate_transfers(rules.to_transfer_profile(), scenario)
     assert initial.status == "valid" and initial.transfer_fee == 0
