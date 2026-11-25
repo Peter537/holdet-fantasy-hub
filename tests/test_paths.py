@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 from pathlib import Path
-import shutil
 import unittest
 from unittest.mock import patch
-from uuid import uuid4
 
 import holdet_lib as holdet
+from tests.temp_directory import temporary_directory
 
 
 class _FakePlatformDirs:
@@ -99,14 +98,12 @@ class AppPathTests(unittest.TestCase):
         self.assertEqual(paths.export_dir, Path("F:/chosen-exports"))
 
     def test_open_in_explorer_creates_only_after_explicit_action(self) -> None:
-        target = Path(__file__).parent / f"_test-paths-{uuid4().hex}" / "Dansk mappe"
-        try:
+        with temporary_directory() as root:
+            target = root / "Dansk mappe"
             self.assertFalse(target.exists())
             with patch("holdet_lib.paths.os.startfile", create=True) as startfile:
                 self.assertTrue(holdet.open_in_explorer(target))
             self.assertTrue(target.is_dir())
             startfile.assert_called_once_with(target.resolve())
-        finally:
-            shutil.rmtree(target.parent, ignore_errors=True)
 
 

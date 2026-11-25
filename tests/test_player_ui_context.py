@@ -1,5 +1,6 @@
 """Acceptance checks for numeric player comparisons and historical detail links."""
 
+import csv
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -106,7 +107,7 @@ def test_default_player_table_is_compact_and_keeps_source_numbers_and_links(play
 
 def test_derived_sort_is_numeric_nulls_last_and_preserves_row_identity(player_paths):
     app = AppTest.from_function(_list_app, args=(str(player_paths.config_dir.parent),)).run()
-    widget(app, "multiselect", "Ekstra kolonner").set_value(["Form 3", "Vækst pr. mio."]).run()
+    widget(app, "multiselect", "Ekstra kolonner").set_value(["Form 3", "Vækst pr. mio."])
     widget(app, "selectbox", "Sortering").set_value("form_3").run()
 
     assert not app.exception
@@ -126,14 +127,17 @@ def test_derived_sort_is_numeric_nulls_last_and_preserves_row_identity(player_pa
 def test_player_export_keeps_the_visible_derived_sort_order(player_paths):
     app = AppTest.from_function(_list_app, args=(str(player_paths.config_dir.parent),)).run()
     widget(app, "selectbox", "Sortering").set_value("form_3").run()
-    visible_names = app.dataframe[0].value["Navn"].tolist()
+    columns = ["Navn", "Hold", "Position"]
+    visible_players = list(app.dataframe[0].value[columns].itertuples(index=False, name=None))
     button(app, "Opret eksport").click().run()
 
     assert not app.exception
     artifacts = app.session_state[f"{SCOPE}-ready-export-3"]
     text = artifacts[0].content.decode("utf-8")
-    exported_positions = [text.index(name) for name in visible_names]
-    assert exported_positions == sorted(exported_positions)
+    metadata, table = text.split("\n\n", 1)
+    assert f"Rækker: {len(visible_players)}" in metadata.splitlines()
+    exported_players = list(csv.DictReader(table.splitlines(), delimiter="\t"))
+    assert [tuple(row[column] for column in columns) for row in exported_players] == visible_players
 
 
 def test_exported_computed_form_uses_the_selected_round_and_fetch(player_paths):

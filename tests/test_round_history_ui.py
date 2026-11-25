@@ -187,10 +187,10 @@ def test_historical_panels_bound_charts_and_tables_before_derivation(
     app = AppTest.from_function(_history_app, args=(group_view, 2)).run(timeout=20)
     assert not app.exception
     assert seen and all(frame["Runde"].max() <= 2 for frame, _ in seen)
-    assert app.dataframe
-    for table in app.dataframe:
-        if "Runde" in table.value:
-            assert table.value["Runde"].max() <= 2
+    expander = next(item for item in app.expander if item.label == "Vis historik som tabel")
+    (table,) = expander.dataframe
+    assert list(table.value.columns) == ["Runde", "Hold", "Værdi/point", "Datastatus", "Hentet"]
+    assert sorted(table.value["Runde"]) == [1, 1, 2, 2]
 
     next(item for item in app.segmented_control if item.label == "Sammenlign udvikling").set_value(
         "Ændring fra første runde"

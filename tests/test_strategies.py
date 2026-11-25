@@ -1,9 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
-from pathlib import Path
-import subprocess
-import sys
 import threading
-import time
 from unittest.mock import patch
 
 import pytest
@@ -11,10 +7,12 @@ import pytest
 from holdet_lib.paths import PathOverrides, resolve_paths
 from holdet_lib.persistence import exclusive_file_update, file_update_lock_path
 from holdet_lib.strategies import StrategyStore, TeamStrategy
+from tests.spawned_process import spawned_process
 from tests.test_decision_analysis import GAME
 
 
 STRATEGY = TeamStrategy(transfer_policy="fixed", captain_policy="fixed", fixed_captain_id=1)
+SECOND_STRATEGY = TeamStrategy(transfer_policy="limited", max_transfers=2, captain_policy="rotate")
 
 
 def paused_first_writer(path):
@@ -37,62 +35,63 @@ def test_overlapping_thread_saves_preserve_distinct_policies(tmp_path):
         a = pool.submit(first.set, GAME, 101, STRATEGY)
         try:
             assert read.wait(5)
-            b = pool.submit(StrategyStore(path).set, GAME, 202, STRATEGY)
-            try:
+            b = pool.submit(StrategyStore(path).set, GAME, 202, SECOND_STRATEGY)
+            with pytest.raises(FutureTimeout):
                 b.result(timeout=0.3)
-            except FutureTimeout:
-                pass
         finally:
             release.set()
         a.result(timeout=5)
         b.result(timeout=5)
-    assert {key[2] for key in StrategyStore(path).load()} == {101, 202}
+    assert StrategyStore(path).load() == {
+        (GAME.locale, GAME.slug, 101): STRATEGY,
+        (GAME.locale, GAME.slug, 202): SECOND_STRATEGY,
+    }
 
 
 def test_separate_processes_with_shared_config_preserve_distinct_policies(tmp_path):
     config = tmp_path / "shared-config"
     paths = resolve_paths(overrides=PathOverrides(data_root=tmp_path / "first", config_dir=config), environ={})
+    other_paths = resolve_paths(overrides=PathOverrides(
+        data_root=tmp_path / "second", config_dir=config / ".." / config.name,
+    ), environ={})
     first, read, release = paused_first_writer(paths.strategy_file)
-    program = """import sys
-from pathlib import Path
-from holdet_lib.paths import PathOverrides, resolve_paths
-from holdet_lib.strategies import StrategyStore, TeamStrategy
-from holdet_lib.players import normalize_game_url
-paths = resolve_paths(overrides=PathOverrides(data_root=Path(sys.argv[1]), config_dir=Path(sys.argv[2])), environ={})
-print('ready', flush=True)
-StrategyStore(paths.strategy_file).set(normalize_game_url(sys.argv[3]), 202,
-    TeamStrategy(transfer_policy='fixed', captain_policy='fixed', fixed_captain_id=1))
-print('saved')
-"""
-    child = None
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        pending = pool.submit(first.set, GAME, 101, STRATEGY)
-        try:
-            assert read.wait(5)
-            child = subprocess.Popen(
-                [sys.executable, "-B", "-X", "utf8", "-c", program, str(tmp_path / "second"),
-                 str(config / ".." / config.name), GAME.original],
-                cwd=Path(__file__).resolve().parents[1], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-            )
-            ready = pool.submit(child.stdout.readline)
-            assert ready.result(timeout=5).strip() == "ready"
+    with spawned_process(save_strategy_in_child, other_paths.strategy_file, GAME, 202, SECOND_STRATEGY) as (child, connection):
+        assert connection.poll(30), "strategy writer did not finish startup"
+        assert connection.recv() == "ready"
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            pending = pool.submit(first.set, GAME, 101, STRATEGY)
             try:
-                child.communicate(timeout=0.3)
-            except subprocess.TimeoutExpired:
-                pass
-        finally:
-            release.set()
-            if child is not None:
-                try:
-                    stdout, stderr = child.communicate(timeout=5)
-                except subprocess.TimeoutExpired:
-                    child.kill()
-                    child.communicate(timeout=5)
-                    raise
-        pending.result(timeout=5)
-    assert child.returncode == 0, stderr
-    assert stdout.strip() == "saved"
-    assert {key[2] for key in StrategyStore(paths.strategy_file).load()} == {101, 202}
+                assert read.wait(5)
+                connection.send("save")
+                assert connection.poll(5), "second writer did not start its save"
+                assert connection.recv() == "saving"
+                assert not connection.poll(0.3), "second writer finished while the first held the lock"
+            finally:
+                release.set()
+            pending.result(timeout=5)
+        assert connection.poll(10), "second writer did not finish after release"
+        assert connection.recv() == "saved"
+        child.join(5)
+        assert child.exitcode == 0
+    assert StrategyStore(paths.strategy_file).load() == {
+        (GAME.locale, GAME.slug, 101): STRATEGY,
+        (GAME.locale, GAME.slug, 202): SECOND_STRATEGY,
+    }
+
+
+def save_strategy_in_child(path, game, team_id, strategy, connection):
+    with connection:
+        connection.send("ready")
+        assert connection.recv() == "save"
+        connection.send("saving")
+        StrategyStore(path).set(game, team_id, strategy)
+        connection.send("saved")
+
+
+def _hold_strategy_file_lock(path, connection):
+    with connection, exclusive_file_update(path):
+        connection.send("locked")
+        connection.recv()
 
 
 def test_strategy_reads_do_not_create_files(tmp_path):
@@ -129,31 +128,13 @@ def test_lock_contention_preserves_json_and_process_exit_releases_os_lock(tmp_pa
     store = StrategyStore(tmp_path / "team-strategies.json")
     store.set(GAME, 101, STRATEGY)
     before = store.path.read_bytes()
-    ready = tmp_path / "ready"
-    program = """import sys, time
-from pathlib import Path
-from holdet_lib.persistence import exclusive_file_update
-with exclusive_file_update(Path(sys.argv[1])):
-    Path(sys.argv[2]).write_text('ready', encoding='utf-8')
-    time.sleep(30)
-"""
-    child = subprocess.Popen(
-        [sys.executable, "-B", "-c", program, str(store.path), str(ready)],
-        cwd=Path(__file__).resolve().parents[1], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
-    )
-    try:
-        deadline = time.monotonic() + 5
-        while not ready.exists() and child.poll() is None and time.monotonic() < deadline:
-            time.sleep(0.01)
-        assert ready.exists(), "child did not acquire the OS lock"
+    with spawned_process(_hold_strategy_file_lock, store.path) as (_, connection):
+        assert connection.poll(30), "child did not acquire the OS lock"
+        assert connection.recv() == "locked"
         with pytest.raises(TimeoutError, match="busy"):
             with exclusive_file_update(store.path, timeout=0):
                 pytest.fail("accepted a competing process")
         assert store.path.read_bytes() == before
-    finally:
-        if child.poll() is None:
-            child.kill()
-        child.communicate(timeout=5)
     with exclusive_file_update(store.path, timeout=0):
         pass
     store.set(GAME, 202, STRATEGY)

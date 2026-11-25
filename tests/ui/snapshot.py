@@ -52,11 +52,9 @@ def assert_ui_snapshot(
 
     difference = ImageChops.difference(actual, expected)
     changed = difference.point(lambda value: 255 if value > 10 else 0)
-    changed_pixels = sum(
-        1
-        for red, green, blue in changed.get_flattened_data()
-        if red or green or blue
-    )
+    red, green, blue = changed.split()
+    any_channel_changed = ImageChops.lighter(ImageChops.lighter(red, green), blue)
+    changed_pixels = any_channel_changed.histogram()[255]
     ratio = changed_pixels / (actual.width * actual.height)
     if ratio > 0.001:
         _save_failure(name, actual, changed)

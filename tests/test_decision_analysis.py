@@ -547,6 +547,16 @@ def test_bootstrap_is_reproducible_and_gated() -> None:
     assert descriptive.simulations == 0
 
 
+def test_bootstrap_percentiles_exclude_rare_extremes() -> None:
+    vectors = tuple((number, {"old": 0, "new": 10 * (number % 2)}) for number in range(1, 7))
+    result = holdet.simulate_transfer_scenario(
+        vectors, ("old",), ("new",), seed=42, simulations=1_000, horizon=4,
+    )
+    # Four draws from equally frequent 0 and 10 outcomes give extremes of
+    # 0 and 40 with probability 1/16 each, outside the 10th–90th percentiles.
+    assert (result.p10, result.median_delta, result.p90) == (10, 20, 30)
+
+
 def test_bootstrap_preserves_common_player_cancellation_and_backtests() -> None:
     vectors = tuple(
         (
@@ -565,8 +575,9 @@ def test_bootstrap_preserves_common_player_cancellation_and_backtests() -> None:
     assert result.observed_deltas == tuple(range(1, 9))
     assert result.input_coverage == 1
     assert result.backtest_observations == 3
-    assert result.backtest_model_mae is not None
-    assert result.backtest_latest_mae is not None
+    assert result.backtest_model_mae == 3.5
+    assert result.backtest_latest_mae == 1
+    assert result.backtest_form_3_mae == 2
 
 
 def test_inbox_deduplicates_and_persists_state(tmp_path: Path) -> None:

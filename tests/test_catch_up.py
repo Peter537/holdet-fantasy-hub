@@ -9,18 +9,12 @@ import pytest
 import holdet_lib as h
 from holdet_lib.hub_settings import OwnTeamSelection
 from holdet_lib.refresh import catch_up_manager_game
-from tests.test_library_storage import sample_team, temporary_directory
+from tests.test_library_storage import sample_team
 from tests.test_player_statistics import sample_statistics
 from tests.test_refresh_foundation import _manager_game_and_group, _previous_manifest
 
 
 NOW = datetime(2026, 8, 9, 12, tzinfo=timezone.utc)
-
-
-@pytest.fixture
-def tmp_path():
-    with temporary_directory() as root:
-        yield root
 
 
 def metadata(game: h.GameUrl, *, fetched_at: datetime = NOW) -> h.GameMetadata:

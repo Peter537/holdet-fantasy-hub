@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import json
 import subprocess
 import sys
@@ -13,13 +14,7 @@ from holdet_lib.refresh_runs import (
     RefreshRunBusyError, RefreshRunCoordinator, RefreshRunResult,
     exclusive_data_operation,
 )
-from tests.test_library_storage import temporary_directory
-
-
-@pytest.fixture
-def tmp_path():
-    with temporary_directory() as path:
-        yield path
+from tests.spawned_process import spawned_process
 
 
 def wait_for(coordinator, run_id, predicate):
@@ -119,45 +114,57 @@ def test_interrupted_snapshot_is_read_only_and_resume_marks_uncertain(tmp_path):
     assert complete["games"][0]["manifest_paths"] == ["previous.json", "new.json"]
 
 
+def _check_refresh_lease(root, connection):
+    with connection:
+        coordinator = RefreshRunCoordinator(root, lambda *args, **kwargs: None)
+        connection.send("ready")
+        run_id, old_id = connection.recv()
+        assert coordinator.snapshot(run_id)["status"] == "running"
+        assert coordinator.snapshot(old_id)["status"] == "interrupted"
+        try:
+            coordinator.start([{"key": "other"}])
+        except RefreshRunBusyError:
+            connection.send("busy")
+        else:
+            raise AssertionError("concurrent worker accepted")
+
+
 def test_process_lock_blocks_other_worker_and_poll_does_not_rewrite(tmp_path):
     root = tmp_path / "data" / "refresh-runs"
     entered = threading.Event()
     proceed = threading.Event()
+
     def action(game, *, cancelled, progress, checkpoint):
         entered.set()
-        assert proceed.wait(20)
+        assert proceed.wait(30)
         return RefreshRunResult("success")
-    coordinator = RefreshRunCoordinator(root, action)
-    run_id = coordinator.start([{"key": "one"}])["run_id"]
-    assert entered.wait(5)
-    old_id = "00000000-0000-0000-0000-000000000002"
-    old_path = root / old_id / "run.json"
-    old_path.parent.mkdir()
-    old_path.write_text(json.dumps({"schema_version": 1, "run_id": old_id,
-        "created_at": "2026", "status": "running", "games": []}), encoding="utf-8")
-    program = '''import sys
-from pathlib import Path
-from holdet_lib.refresh_runs import RefreshRunBusyError, RefreshRunCoordinator
-c = RefreshRunCoordinator(Path(sys.argv[1]), lambda *a, **k: None)
-assert c.snapshot(sys.argv[2])["status"] == "running"
-assert c.snapshot(sys.argv[3])["status"] == "interrupted"
-try:
-    c.start([{"key":"other"}])
-except RefreshRunBusyError:
-    print("busy")
-else:
-    raise AssertionError("concurrent worker accepted")
-'''
-    path = root / run_id / "run.json"
-    before = path.read_bytes()
-    try:
-        child = subprocess.run([sys.executable, "-c", program, str(root), run_id, old_id], capture_output=True, text=True, timeout=10)
-        assert child.returncode == 0, child.stderr
-        assert child.stdout.strip() == "busy"
-        assert path.read_bytes() == before
-    finally:
-        proceed.set()
-    wait_for(coordinator, run_id, lambda x: x["status"] == "success")
+
+    with (
+        ThreadPoolExecutor(max_workers=1) as executor,
+        spawned_process(_check_refresh_lease, root) as (child, connection),
+    ):
+        assert connection.poll(30), "child did not finish startup"
+        assert connection.recv() == "ready"
+        coordinator = RefreshRunCoordinator(root, action, executor_factory=lambda **_: executor)
+        run_id = coordinator.start([{"key": "one"}])["run_id"]
+        try:
+            assert entered.wait(5)
+            old_id = "00000000-0000-0000-0000-000000000002"
+            old_path = root / old_id / "run.json"
+            old_path.parent.mkdir()
+            old_path.write_text(json.dumps({"schema_version": 1, "run_id": old_id,
+                "created_at": "2026", "status": "running", "games": []}), encoding="utf-8")
+            path = root / run_id / "run.json"
+            before = path.read_bytes()
+            connection.send((run_id, old_id))
+            assert connection.poll(10), "ready child did not finish lease check"
+            assert connection.recv() == "busy"
+            assert path.read_bytes() == before
+            child.join(5)
+            assert child.exitcode == 0
+        finally:
+            proceed.set()
+    assert coordinator.snapshot(run_id)["status"] == "success"
 
 
 def test_invalid_run_id_and_empty_or_duplicate_games_are_rejected_without_writes(tmp_path):

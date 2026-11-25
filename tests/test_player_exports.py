@@ -1,30 +1,19 @@
 from __future__ import annotations
 
-from contextlib import contextmanager, redirect_stdout
+from contextlib import redirect_stdout
 from datetime import datetime
 import io
 import json
 from pathlib import Path
-import shutil
 import unittest
 from unittest.mock import patch
-from uuid import uuid4
 
 import holdet_lib as holdet
 from cli.main import main as cli_main
+from tests.temp_directory import temporary_directory
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
-
-
-@contextmanager
-def writable_directory():
-    root = Path(__file__).parent / f"_test-player-export-{uuid4().hex}"
-    root.mkdir()
-    try:
-        yield root
-    finally:
-        shutil.rmtree(root)
 
 
 def statistics(
@@ -113,7 +102,7 @@ class PlayerExportTests(unittest.TestCase):
         document = holdet.build_player_export(
             statistics(), query, generated_at=fixed, source_generated_at=fixed
         )
-        with writable_directory() as root:
+        with temporary_directory() as root:
             store = holdet.PlayerExportStore(root)
             first = store.save(document, ("txt", "json", "md"))
             second = store.save(document, ("txt", "json", "md"))
@@ -179,7 +168,7 @@ class PlayerExportTests(unittest.TestCase):
             holdet.player_export_to_txt(document),
         )
     def test_store_is_side_effect_free_until_save(self) -> None:
-        with writable_directory() as root:
+        with temporary_directory() as root:
             target = root / "exports"
             store = holdet.PlayerExportStore(target)
             self.assertFalse(target.exists())
@@ -192,7 +181,7 @@ class PlayerExportTests(unittest.TestCase):
 
 class PlayerCliArgumentTests(unittest.TestCase):
     def test_cli_builds_shared_query_formats_round_and_snapshot_path(self) -> None:
-        with writable_directory() as root:
+        with temporary_directory() as root:
             with patch(
                 "cli.main._fetch_and_export_players",
                 return_value=(root / "one.txt", root / "one.json"),
@@ -226,7 +215,7 @@ class PlayerCliArgumentTests(unittest.TestCase):
 
 class SharedCliExportTests(unittest.TestCase):
     def test_cli_exports_table_and_canonical_snapshot(self) -> None:
-        with writable_directory() as root:
+        with temporary_directory() as root:
             with patch("cli.main.HoldetClient") as client_type:
                 client_type.return_value.fetch_players.return_value = statistics()
                 with redirect_stdout(io.StringIO()):

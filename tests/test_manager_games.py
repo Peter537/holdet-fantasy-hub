@@ -3,23 +3,11 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from dataclasses import replace
 import json
-from pathlib import Path
-import shutil
 import unittest
-from uuid import uuid4
 
 import holdet_lib as holdet
+from tests.temp_directory import temporary_directory
 from tests.test_library_storage import sample_team
-
-
-class TemporaryDirectory:
-    def __enter__(self) -> Path:
-        self.path = Path(__file__).parent / f"_test-manager-games-{uuid4().hex}"
-        self.path.mkdir()
-        return self.path
-
-    def __exit__(self, *_args) -> None:
-        shutil.rmtree(self.path)
 
 
 class ManagerGameStorageTests(unittest.TestCase):
@@ -51,7 +39,7 @@ class ManagerGameStorageTests(unittest.TestCase):
             "teams": [],
         }
         for schema_version in (1, 2, 3, 4):
-            with self.subTest(schema_version=schema_version), TemporaryDirectory() as root:
+            with self.subTest(schema_version=schema_version), temporary_directory() as root:
                 path = root / "groups.json"
                 original = json.dumps(
                     {"schema_version": schema_version, "groups": [raw_group, empty]},
@@ -67,7 +55,7 @@ class ManagerGameStorageTests(unittest.TestCase):
                 self.assertEqual(path.read_text(encoding="utf-8"), original)
 
     def test_persistent_empty_game_crud_and_blocked_delete(self) -> None:
-        with TemporaryDirectory() as root:
+        with temporary_directory() as root:
             store = holdet.GroupStore(root / "groups.json")
             manager_game = store.create_manager_game(
                 "future-manager-2027", "Fremtidens managerspil"
@@ -86,7 +74,7 @@ class ManagerGameStorageTests(unittest.TestCase):
             self.assertEqual(store.load_configuration().games, ())
 
     def test_schema_five_loads_active_without_rewriting(self) -> None:
-        with TemporaryDirectory() as root:
+        with temporary_directory() as root:
             path = root / "groups.json"
             game = sample_team(1).reference.game
             original = json.dumps(
@@ -113,7 +101,7 @@ class ManagerGameStorageTests(unittest.TestCase):
             self.assertEqual(path.read_text(encoding="utf-8"), original)
 
     def test_archive_restore_round_trip_preserves_order_groups_and_data(self) -> None:
-        with TemporaryDirectory() as root:
+        with temporary_directory() as root:
             path = root / "groups.json"
             store = holdet.GroupStore(path)
             first = store.create_manager_game("first-game", "Første")
@@ -154,7 +142,7 @@ class ManagerGameStorageTests(unittest.TestCase):
             self.assertEqual(after.groups, (group,))
 
     def test_duplicate_identity_and_schema_seven_shape(self) -> None:
-        with TemporaryDirectory() as root:
+        with temporary_directory() as root:
             path = root / "groups.json"
             store = holdet.GroupStore(path)
             created = store.create_manager_game(
@@ -214,7 +202,7 @@ class GameRefreshTests(unittest.TestCase):
                 calls["teams"] += 1
                 return team
 
-        with TemporaryDirectory() as root:
+        with temporary_directory() as root:
             player_store = holdet.PlayerStatisticsStore(root / "snapshots")
             player_store.save(statistics(healthy, 1))
             settings = holdet.HubSettings(
@@ -250,7 +238,7 @@ class GameRefreshTests(unittest.TestCase):
             def fetch_team(self, _reference):
                 return team
 
-        with TemporaryDirectory() as root:
+        with temporary_directory() as root:
             result = holdet.refresh_manager_game(
                 game,
                 (group,),
@@ -282,7 +270,7 @@ class GameRefreshTests(unittest.TestCase):
                 return first if reference.team_id == 1 else second
 
         fixed = datetime(2026, 7, 28, 12, 0, tzinfo=timezone.utc)
-        with TemporaryDirectory() as root:
+        with temporary_directory() as root:
             result = holdet.refresh_game(
                 game,
                 groups,
@@ -331,7 +319,7 @@ class GameRefreshTests(unittest.TestCase):
                 fetched.append(reference.team_id)
                 return teams[reference.team_id - 1]
 
-        with TemporaryDirectory() as root:
+        with temporary_directory() as root:
             snapshots = holdet.SnapshotStore(root / "snapshots")
             for team in teams:
                 snapshots.save_team_json(team)
@@ -363,7 +351,7 @@ class GameRefreshTests(unittest.TestCase):
             def fetch_team(self, reference):
                 raise holdet.FetchError("offline")
 
-        with TemporaryDirectory() as root:
+        with temporary_directory() as root:
             snapshots = holdet.SnapshotStore(root / "snapshots")
             snapshots.save_team_json(cached)
             result = holdet.refresh_game(

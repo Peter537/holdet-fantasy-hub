@@ -1,24 +1,11 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
-import shutil
 import unittest
 from unittest.mock import patch
-from uuid import uuid4
-from contextlib import contextmanager
 
 import holdet_lib as holdet
-
-
-@contextmanager
-def account_environment():
-    root = Path(__file__).parent / f"_test-accounts-{uuid4().hex}"
-    root.mkdir()
-    try:
-        yield root
-    finally:
-        shutil.rmtree(root)
+from tests.temp_directory import temporary_directory
 
 
 class AccountStoreTests(unittest.TestCase):
@@ -31,7 +18,7 @@ class AccountStoreTests(unittest.TestCase):
         self.assertEqual(holdet.account_key_from_label("東京", 9), "konto")
 
     def test_missing_file_is_side_effect_free_and_crud_preserves_order(self) -> None:
-        with account_environment() as root:
+        with temporary_directory() as root:
             path = root / "nested" / "accounts.json"
             store = holdet.AccountStore(path)
             self.assertEqual(store.load(), ())
@@ -55,7 +42,7 @@ class AccountStoreTests(unittest.TestCase):
             self.assertEqual(store.load(), (renamed,))
 
     def test_duplicate_identity_invalid_profile_and_corrupt_file_are_rejected(self) -> None:
-        with account_environment() as root:
+        with temporary_directory() as root:
             path = root / "accounts.json"
             store = holdet.AccountStore(path)
             store.create("Alpha", "https://www.holdet.dk/da/users/10/teams")
@@ -72,7 +59,7 @@ class AccountStoreTests(unittest.TestCase):
             self.assertEqual(path.read_text(encoding="utf-8"), "{broken")
 
     def test_failed_atomic_replace_keeps_existing_file(self) -> None:
-        with account_environment() as root:
+        with temporary_directory() as root:
             path = root / "accounts.json"
             store = holdet.AccountStore(path)
             store.create("Alpha", "https://www.holdet.dk/da/users/10/teams")
@@ -84,7 +71,7 @@ class AccountStoreTests(unittest.TestCase):
             self.assertEqual(list(path.parent.glob(".*.tmp")), [])
 
     def test_rename_updates_group_labels_and_rolls_back_on_group_failure(self) -> None:
-        with account_environment() as root:
+        with temporary_directory() as root:
             account_store = holdet.AccountStore(root / "config" / "accounts.json")
             account = account_store.create(
                 "Alpha", "https://www.holdet.dk/da/users/10/teams"
@@ -124,7 +111,7 @@ class AccountStoreTests(unittest.TestCase):
             self.assertEqual(group_store.load()[0].teams[0].account_label, "Nyt navn")
 
     def test_delete_does_not_change_groups(self) -> None:
-        with account_environment() as root:
+        with temporary_directory() as root:
             account_store = holdet.AccountStore(root / "config" / "accounts.json")
             account = account_store.create(
                 "Alpha", "https://www.holdet.dk/da/users/10/teams"

@@ -1,26 +1,14 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
 from datetime import datetime, timezone
 import json
 from pathlib import Path
-import shutil
 import unittest
 from unittest.mock import patch
-from uuid import uuid4
 
 import holdet_lib as holdet
 from cli.main import main
-
-
-@contextmanager
-def writable_directory():
-    root = Path(__file__).parent / f"_test-player-statistics-{uuid4().hex}"
-    root.mkdir()
-    try:
-        yield root
-    finally:
-        shutil.rmtree(root)
+from tests.temp_directory import temporary_directory
 
 
 def flight_html(payload: object) -> str:
@@ -269,7 +257,7 @@ class PlayerPayloadTests(unittest.TestCase):
 
     def test_player_cli_checks_injected_client_round_before_publishing(self) -> None:
         statistics = sample_statistics()
-        with writable_directory() as temporary, patch("cli.main.HoldetClient") as client:
+        with temporary_directory() as temporary, patch("cli.main.HoldetClient") as client:
             client.return_value.fetch_players.return_value = statistics
             result = main([
                 "players", statistics.game.original, "--round", str(statistics.round_number + 1),
@@ -409,7 +397,7 @@ class PlayerSerializationTests(unittest.TestCase):
         self.assertEqual((restored.format, restored.unit), ("soccer", "money"))
     def test_store_is_side_effect_free_until_save_and_uses_collisions(self) -> None:
         fixed = datetime(2026, 7, 28, 12, 34, 56)
-        with writable_directory() as root:
+        with temporary_directory() as root:
             snapshot_root = Path(root) / "snapshots"
             store = holdet.PlayerStatisticsStore(snapshot_root)
             self.assertFalse(snapshot_root.exists())
@@ -429,7 +417,7 @@ class PlayerSerializationTests(unittest.TestCase):
             self.assertEqual(index.newest(sample_statistics().game, 7).path, second)
 
     def test_corrupt_snapshot_warns_without_hiding_valid_data(self) -> None:
-        with writable_directory() as root:
+        with temporary_directory() as root:
             store = holdet.PlayerStatisticsStore(root)
             store.save(sample_statistics())
             corrupt = (

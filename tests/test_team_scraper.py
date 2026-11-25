@@ -1,15 +1,12 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
 from datetime import datetime, timezone
 import json
-from pathlib import Path
-import shutil
 import unittest
-from uuid import uuid4
 
 import holdet_lib as scraper
 from cli.main import main as cli_main
+from tests.temp_directory import temporary_directory as writable_test_directory
 
 
 FICTIONAL_ACCOUNT_KEY = "nordlys-konto"
@@ -179,16 +176,6 @@ def cartridge_payload(*, salary_cap: int = 500) -> dict[str, object]:
             "rulesets": {"8": {"id": 8, "salaryCap": salary_cap}},
         },
     }
-
-
-@contextmanager
-def writable_test_directory():
-    root = Path(__file__).parent / f"_test-team-output-{uuid4().hex}"
-    root.mkdir()
-    try:
-        yield root
-    finally:
-        shutil.rmtree(root)
 
 
 class AccountAndDiscoveryTests(unittest.TestCase):

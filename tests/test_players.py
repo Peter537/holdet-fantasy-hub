@@ -1,13 +1,11 @@
 from __future__ import annotations
 
-from contextlib import contextmanager, redirect_stderr, redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime
 import io
 from pathlib import Path
-import shutil
 import unittest
 from unittest.mock import patch
-from uuid import uuid4
 
 import holdet_lib as scraper
 from cli.main import main as cli_main
@@ -18,16 +16,6 @@ FIXTURES = Path(__file__).parent / "fixtures"
 
 def fixture(name: str) -> str:
     return (FIXTURES / f"{name}.html").read_text(encoding="utf-8")
-
-
-@contextmanager
-def writable_test_directory():
-    root = Path(__file__).parent / f"_test-output-{uuid4().hex}"
-    root.mkdir()
-    try:
-        yield root
-    finally:
-        shutil.rmtree(root)
 
 
 class UrlNormalizationTests(unittest.TestCase):

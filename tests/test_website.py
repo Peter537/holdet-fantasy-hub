@@ -7,18 +7,17 @@ import json
 import os
 from pathlib import Path
 import re
-import shutil
 from types import SimpleNamespace
 import tempfile
 import tomllib
 import unittest
 from unittest.mock import call, patch
 from urllib.parse import parse_qs
-from uuid import uuid4
 
 from streamlit.testing.v1 import AppTest
 
 import holdet_lib as holdet
+from tests.temp_directory import temporary_directory
 from tests.test_library_storage import sample_team
 from tests.test_player_statistics import sample_statistics
 from website import ui as dashboard
@@ -33,31 +32,25 @@ UI_PATH = PROJECT_ROOT / "website" / "ui.py"
 
 @contextmanager
 def website_environment(accounts: list[dict[str, str]] | None = None):
-    root = Path(__file__).parent / f"_test-website-{uuid4().hex}"
-    config = root / "config"
-    output = root / "data" / "snapshots"
-    test_temp = root / "temp"
-    test_temp.mkdir(parents=True)
-    previous_tempdir = tempfile.tempdir
-    config.mkdir(parents=True)
-    output.mkdir(parents=True)
-    (config / "groups.json").write_text(
-        '{"schema_version":1,"groups":[]}\n', encoding="utf-8"
-    )
-    (config / "accounts.json").write_text(
-        json.dumps({"accounts": accounts or []}, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-    )
-    tempfile.tempdir = str(test_temp)
-    with patch.dict(
-        os.environ,
-        {"HOLDET_DATA_DIR": str(root)},
-    ):
-        try:
+    with temporary_directory() as root:
+        config = root / "config"
+        output = root / "data" / "snapshots"
+        test_temp = root / "temp"
+        test_temp.mkdir()
+        config.mkdir()
+        output.mkdir(parents=True)
+        (config / "groups.json").write_text(
+            '{"schema_version":1,"groups":[]}\n', encoding="utf-8"
+        )
+        (config / "accounts.json").write_text(
+            json.dumps({"accounts": accounts or []}, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        with (
+            patch.object(tempfile, "tempdir", str(test_temp)),
+            patch.dict(os.environ, {"HOLDET_DATA_DIR": str(root)}),
+        ):
             yield config, output
-        finally:
-            tempfile.tempdir = previous_tempdir
-            shutil.rmtree(root)
 
 
 def button(app: AppTest, label: str):
@@ -920,7 +913,9 @@ class DashboardTests(unittest.TestCase):
             ) for locale in ("da", "en"))
             with patch("holdet_lib.http.HttpClient.fetch_text", side_effect=AssertionError("network")):
                 app = AppTest.from_file(APP_PATH).run(timeout=15)
-                for manager in games:
+                for index, manager in enumerate(games):
+                    if index:
+                        navigate(app, "home")
                     picker = widget(app, "selectbox", "Åbn spil")
                     label = f"Samme navn ({manager.game.locale}/{manager.game.slug})"
                     self.assertEqual(len(set(picker.options)), 2)
@@ -930,7 +925,6 @@ class DashboardTests(unittest.TestCase):
                     self.assertEqual(query_param_values(app, "locale"), [manager.game.locale])
                     self.assertEqual(query_param_values(app, "game"), [manager.game.slug])
                     self.assertEqual([item.value for item in app.title], [manager.name])
-                    navigate(app, "home")
 
     def test_game_overview_and_competition_rows_keep_results_and_native_navigation(self) -> None:
         with website_environment() as (config, output):

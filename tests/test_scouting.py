@@ -1,32 +1,20 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import json
-import shutil
-from uuid import uuid4
 
 import pytest
 
 import holdet_lib as holdet
+from tests.temp_directory import temporary_directory
 
 
 GAME = holdet.GameUrl(
     "https://www.holdet.dk/da/fantasy/scouting-test", "da", "scouting-test"
 )
 NOW = datetime(2026, 8, 12, 12, tzinfo=timezone.utc)
-
-
-@contextmanager
-def writable_directory():
-    root = Path(__file__).parent / f"_test-scouting-{uuid4().hex}"
-    root.mkdir()
-    try:
-        yield root
-    finally:
-        shutil.rmtree(root)
 
 
 def entry(
@@ -394,7 +382,7 @@ def test_settings_three_migrates_in_memory_without_startup_write_and_saves_five(
         "own_teams": [],
         "experimental_games": [],
     }
-    with writable_directory() as root:
+    with temporary_directory() as root:
         path = root / "hub.json"
         path.write_text(json.dumps(legacy), encoding="utf-8")
         before = path.read_bytes()
@@ -411,7 +399,7 @@ def test_settings_three_migrates_in_memory_without_startup_write_and_saves_five(
 
 
 def test_bulk_settings_write_is_all_or_nothing() -> None:
-    with writable_directory() as root:
+    with temporary_directory() as root:
         path = root / "hub.json"
         store = holdet.HubSettingsStore(path)
         settings = holdet.HubSettings(watchlist=(holdet.watchlist_entry(GAME, entry(1)),))

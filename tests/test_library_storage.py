@@ -1,25 +1,13 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
 from dataclasses import replace
 from datetime import datetime, timezone
 import json
 from pathlib import Path
-import shutil
 import unittest
-from uuid import uuid4
 
 import holdet_lib as holdet
-
-
-@contextmanager
-def temporary_directory():
-    root = Path(__file__).parent / f"_test-library-{uuid4().hex}"
-    root.mkdir()
-    try:
-        yield root
-    finally:
-        shutil.rmtree(root)
+from tests.temp_directory import temporary_directory
 
 
 def sample_team(

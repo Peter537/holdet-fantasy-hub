@@ -2,21 +2,16 @@ from __future__ import annotations
 
 from contextlib import redirect_stderr, redirect_stdout
 import io
-from pathlib import Path
-import shutil
 import unittest
 from unittest.mock import patch
-from uuid import uuid4
 
 from cli.main import main as cli_main
+from tests.temp_directory import temporary_directory
 
 
 class DataCliTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.root = Path(__file__).parent / f"_test-data-cli-{uuid4().hex}"
-
-    def tearDown(self) -> None:
-        shutil.rmtree(self.root, ignore_errors=True)
+        self.root = self.enterContext(temporary_directory()) / "app"
 
     def test_paths_reports_absolute_locations_without_creating_them(self) -> None:
         output = io.StringIO()

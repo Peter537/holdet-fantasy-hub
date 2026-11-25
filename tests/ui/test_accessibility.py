@@ -82,41 +82,29 @@ def test_player_sort_and_dataframe_scroll_survive_fragment_rerun(
     ui_server: UiServer,
 ) -> None:
     _open_players(page, ui_server)
+    expect(page.get_by_text("60 af 60 spillere")).to_be_visible()
     page.get_by_role("button", name="Flere filtre og kolonner").click()
     page.get_by_text("Avancerede filtre og kolonner", exact=True).click()
     sorter = page.get_by_role("combobox", name="Sortér efter")
     expect(sorter).to_have_value("Pris")
+    sorter.click()
+    page.get_by_role("option", name="Navn", exact=True).click()
+    page.get_by_role("spinbutton", name="Minimum pris", exact=True).fill("8000000")
 
-    table = page.locator("[data-testid='stDataFrame']")
-    before = table.evaluate(
-        """root => {
-            const nodes = [root, ...root.querySelectorAll('*')]
-                .filter(node => node.scrollHeight > node.clientHeight + 20);
-            const scroll = nodes.sort(
-                (left, right) => (right.scrollHeight - right.clientHeight)
-                    - (left.scrollHeight - left.clientHeight)
-            )[0];
-            if (!scroll) return null;
-            scroll.scrollTop = Math.min(120, scroll.scrollHeight - scroll.clientHeight);
-            return scroll.scrollTop;
-        }"""
+    scroller = page.get_by_test_id("stDataFrame").locator(".dvn-scroller")
+    before = scroller.evaluate(
+        """node => {
+            node.scrollTop = 120;
+            return node.scrollTop;
+        }""",
     )
-    assert before and before > 0
+    assert before > 0
     page.get_by_role("button", name="Anvend filtre").click()
-    expect(page.locator("[data-testid='stDataFrame']")).to_be_visible(timeout=20_000)
-    expect(page.get_by_role("combobox", name="Sortér efter")).to_have_value("Pris")
-    after = page.locator("[data-testid='stDataFrame']").evaluate(
-        """root => {
-            const nodes = [root, ...root.querySelectorAll('*')]
-                .filter(node => node.scrollHeight > node.clientHeight + 20);
-            const scroll = nodes.sort(
-                (left, right) => (right.scrollHeight - right.clientHeight)
-                    - (left.scrollHeight - left.clientHeight)
-            )[0];
-            return scroll ? scroll.scrollTop : null;
-        }"""
-    )
-    assert after == before
+    expect(page.get_by_text("54 af 60 spillere")).to_be_visible(timeout=20_000)
+    expect(page.get_by_role("combobox", name="Sortering", exact=True)).to_have_value("Navn")
+    page.get_by_test_id("stStatusWidget").wait_for(state="detached", timeout=20_000)
+    expect(scroller).to_be_visible()
+    assert scroller.evaluate("node => node.scrollTop") == before
 
 
 @pytest.mark.ui
@@ -170,12 +158,26 @@ def test_scouting_charts_have_tables_keyboard_focus_and_zoom(
     expect(page.get_by_role("heading", name="Tourspillet 2026", exact=True)).to_be_visible(
         timeout=20_000
     )
-    expect(page.get_by_text("Pris mod Form 3", exact=True)).to_be_visible(timeout=20_000)
-    expect(page.locator("canvas").first).to_be_visible(timeout=20_000)
-    page.get_by_text("Datatabel · Pris mod Form 3", exact=True).click()
-    expect(page.locator("[data-testid='stDataFrame']").last).to_be_visible(timeout=20_000)
-    page.keyboard.press("Tab")
-    assert page.evaluate("document.activeElement !== document.body")
+    titles = ("Pris mod Form 3", "Vækst mod stabilitet", "Potentiale mod risiko")
+    plots = page.get_by_test_id("stVegaLiteChart")
+    expect(plots).to_have_count(len(titles), timeout=20_000)
+    for index, title in enumerate(titles):
+        expect(page.get_by_role("heading", name=title, exact=True)).to_be_visible()
+        expect(plots.nth(index).locator("svg")).to_be_visible()
+        expander = page.locator("details").filter(
+            has=page.get_by_text(f"Datatabel · {title}", exact=True)
+        )
+        disclosure = expander.locator("summary")
+        disclosure.press("Enter")
+        table = expander.get_by_test_id("stDataFrame")
+        expect(table).to_be_visible(timeout=20_000)
+        expect(disclosure).to_be_focused()
+        disclosure.press("Tab")
+        columns = table.get_by_role("button", name="Show/hide columns", exact=True)
+        expect(columns).to_be_focused()
+        assert columns.evaluate("node => node.matches(':focus-visible')")
+        columns.press("Shift+Tab")
+        expect(disclosure).to_be_focused()
     page.evaluate("document.body.style.zoom = '2'")
     page.wait_for_timeout(100)
     assert page.evaluate(

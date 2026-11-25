@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import csv
+from dataclasses import replace
 from datetime import datetime, timezone
-from io import BytesIO
+from io import BytesIO, StringIO
 import hashlib
 import json
 from pathlib import Path
+import sys
+import xml.etree.ElementTree as ET
 import zipfile
 
 import pytest
@@ -13,6 +17,8 @@ import holdet_lib as holdet
 
 
 NOW = datetime(2026, 8, 7, 12, 30, tzinfo=timezone.utc)
+FORMULA_LIKE_TEXT = ("=1+1", "+1+1", "-1+1", "@SUM(1)", "\t=1+1", "\r=1+1")
+MULTILINE_NAME = 'Comma, "quote"\r\nsecond line'
 
 
 def paths_for(root: Path) -> holdet.AppPaths:
@@ -55,14 +61,31 @@ def sample_package(*, two_tables: bool = False) -> holdet.DataPackage:
     )
 
 
+def spreadsheet_package(*, two_tables: bool = False) -> holdet.DataPackage:
+    package = sample_package(two_tables=two_tables)
+    players, *other_tables = package.tables
+    additional_rows = tuple(
+        {"name": MULTILINE_NAME, "value": -4, "active": False, "note": note}
+        for note in FORMULA_LIKE_TEXT
+    )
+    return replace(package, tables=(replace(players, rows=players.rows + additional_rows), *other_tables))
+
+
 def test_csv_is_rfc4180_bom_safe_and_keeps_raw_numbers() -> None:
-    payload = holdet.package_to_csv(sample_package()).content
+    payload = holdet.package_to_csv(spreadsheet_package()).content
     assert payload.startswith(b"\xef\xbb\xbf")
     text = payload.decode("utf-8-sig")
-    assert "\r\n" in text
+    assert text.startswith("name,value,active,note\r\n")
     assert '"Ægir; Ørn"' not in text  # semicolon is not the CSV delimiter
-    assert "12345678" in text
-    assert "'=HYPERLINK" in text
+    rows = list(csv.reader(StringIO(text, newline="")))
+    assert rows == [
+        ["name", "value", "active", "note"],
+        ["Ægir; Ørn", "12345678", "True", "'=HYPERLINK(\"https://example.invalid\")"],
+        ["Nora", "-4", "False", ""],
+        *([MULTILINE_NAME, "-4", "False", "'" + note] for note in FORMULA_LIKE_TEXT),
+    ]
+    embedded_newlines = sum(field.count("\n") for row in rows for field in row)
+    assert text.count("\n") == text.count("\r\n") == len(rows) + embedded_newlines
 
 
 def test_data_package_rejects_nested_or_timezone_ambiguous_metadata() -> None:
@@ -95,29 +118,46 @@ def test_multitable_csv_zip_has_checksums_and_manifest() -> None:
 
 
 def test_xlsx_uses_separate_sheets_and_disables_formula_interpretation() -> None:
-    payload = holdet.package_to_xlsx(sample_package(two_tables=True)).content
+    payload = holdet.package_to_xlsx(spreadsheet_package(two_tables=True)).content
     with zipfile.ZipFile(BytesIO(payload)) as archive:
-        workbook = archive.read("xl/workbook.xml").decode("utf-8")
-        shared = archive.read("xl/sharedStrings.xml").decode("utf-8")
-    assert 'name="spillere"' in workbook
-    assert 'name="hold"' in workbook
-    assert "=HYPERLINK" in shared
-    assert "&apos;=HYPERLINK" in shared or "'=HYPERLINK" in shared
+        workbook = ET.fromstring(archive.read("xl/workbook.xml"))
+        shared = ET.fromstring(archive.read("xl/sharedStrings.xml"))
+        players = ET.fromstring(archive.read("xl/worksheets/sheet1.xml"))
+    assert [sheet.attrib["name"] for sheet in workbook.findall(".//{*}sheet")] == ["spillere", "hold"]
+    assert not players.findall(".//{*}f")
+    assert not players.findall(".//{*}hyperlink")
+    strings = [item.findtext("{*}t").replace("_x000D_", "\r") for item in shared.findall("{*}si")]
+    cells = {cell.attrib["r"]: cell for cell in players.findall(".//{*}c")}
+
+    assert cells["B2"].get("t", "n") == "n" and cells["B2"].findtext("{*}v") == "12345678"
+    assert cells["C2"].get("t") == "b" and cells["C2"].findtext("{*}v") == "1"
+    notes = [(2, '=HYPERLINK("https://example.invalid")'), *enumerate(FORMULA_LIKE_TEXT, start=4)]
+    for index, note in notes:
+        cell = cells[f"D{index}"]
+        assert cell.get("t") == "s"
+        assert strings[int(cell.findtext("{*}v"))] == "'" + note
+    for index in range(3, 4 + len(FORMULA_LIKE_TEXT)):
+        cell = cells[f"B{index}"]
+        assert cell.get("t", "n") == "n"
+        assert cell.findtext("{*}v") == "-4"
+    assert strings[int(cells["A4"].findtext("{*}v"))] == MULTILINE_NAME
 
 
-def test_parquet_is_optional_or_carries_package_metadata() -> None:
-    try:
-        serialized = holdet.package_to_parquet(sample_package())
-    except holdet.PayloadError as exc:
-        assert "holdet-lib[parquet]" in str(exc)
-    else:
-        import pyarrow.parquet as pq
+def test_parquet_round_trip_preserves_package_metadata_and_numbers() -> None:
+    import pyarrow.parquet as pq
 
-        table = pq.read_table(BytesIO(serialized.content))
-        metadata = json.loads(table.schema.metadata[b"holdet.data_package"])
-        assert metadata["schema_version"] == 1
-        assert metadata["scope"]["game"] == "super-manager"
-        assert table.column("value").to_pylist() == [12_345_678, -4]
+    serialized = holdet.package_to_parquet(sample_package())
+    table = pq.read_table(BytesIO(serialized.content))
+    metadata = json.loads(table.schema.metadata[b"holdet.data_package"])
+    assert metadata["schema_version"] == 1
+    assert metadata["scope"]["game"] == "super-manager"
+    assert table.column("value").to_pylist() == [12_345_678, -4]
+
+
+def test_parquet_requires_the_optional_dependency(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(sys.modules, "pyarrow", None)
+    with pytest.raises(holdet.PayloadError, match=r"holdet-lib\[parquet\]"):
+        holdet.package_to_parquet(sample_package())
 
 
 @pytest.mark.parametrize("profile", ["share", "debug"])

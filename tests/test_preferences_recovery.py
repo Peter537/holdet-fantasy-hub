@@ -66,6 +66,26 @@ def test_tool_enable_does_not_replace_unreadable_settings(tmp_path: Path) -> Non
     assert paths.hub_settings_file.read_bytes() == original
 
 
+def test_preference_submit_preserves_settings_corrupted_after_render(tmp_path: Path) -> None:
+    paths = resolve_paths(overrides=PathOverrides(data_root=tmp_path))
+    HubSettingsStore(paths.hub_settings_file).save(HubSettings())
+    ui = fake_ui()
+    corrupt = b'{"schema_version":5,"watchlist":['
+
+    with patch.object(preferences, "st", ui), patch.object(preferences, "page_link"):
+        preferences.render_settings(paths)
+        submitted = ui.form_submit_button.call_args.kwargs
+        assert not submitted["disabled"]
+        paths.hub_settings_file.write_bytes(corrupt)
+        ui.session_state["feature:scouting"] = True
+        submitted["on_click"](*submitted["args"])
+        preferences.render_settings(paths)
+
+    assert paths.hub_settings_file.read_bytes() == corrupt
+    assert "kunne ikke gemmes" in ui.error.call_args.args[0]
+    ui.success.assert_not_called()
+
+
 def test_explicit_preference_save_revokes_temporary_grants_and_preserves_records(tmp_path: Path) -> None:
     paths = resolve_paths(overrides=PathOverrides(data_root=tmp_path))
     watched = watchlist_entry(GAME, PLAYER)
